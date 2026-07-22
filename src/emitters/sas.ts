@@ -1,0 +1,1676 @@
+/**
+ * SAS emitter — turns a reviewed StudySpec into a numbered MarketScan program
+ * suite in authentic HEOR consulting house style (numbered programs, %LET
+ * macro variables, level checks after every step).
+ *
+ * Everything here is deterministic: the same spec + options always produce
+ * the same programs. Programs are skipped when the spec does not need them
+ * (e.g. no drug_name code lists → no NDC-pull program).
+ *
+ * Domain conventions honoured throughout:
+ *  - baseline period INCLUDES the index date and runs backward;
+ *  - follow-up period EXCLUDES the index date and runs forward;
+ *  - ICD-9-CM vs ICD-10-CM era is resolved via the DXVER claim column.
+ */
+
+import { DB_PREFIX, DX_COLUMNS, PROC_COLUMNS } from "../data/marketscan";
+import type { TableNamingStrategy } from "../data/marketscan";
+import { findCodeList } from "../spec/types";
+import type {
+  BaselineCharacteristic,
+  CareSetting,
+  CodeList,
+  Criterion,
+  RelativeWindow,
+  StudySpec,
+} from "../spec/types";
+import type { EmitOptions, GeneratedFile, SasEmitter } from "./types";
+
+/* ================================================================== *
+ *  small utilities
+ * ================================================================== */
+
+const MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+
+/** ISO date → SAS date literal, e.g. "2016-01-01" → '01JAN2016'd */
+function sasDate(iso: string): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  return `'${String(d).padStart(2, "0")}${MONTHS[(m ?? 1) - 1]}${y}'d`;
+}
+
+function yearOf(iso: string): number {
+  return Number(iso.slice(0, 4));
+}
+
+/** make an arbitrary id safe as (part of) a SAS name */
+function sasName(s: string): string {
+  return s.replace(/[^A-Za-z0-9_]/g, "_");
+}
+
+/** sanitize free text for use inside a SAS block comment */
+function cmt(s: string): string {
+  return s.replace(/\*\//g, "* /");
+}
+
+/** escape single quotes for a single-quoted SAS string literal */
+function sq(s: string): string {
+  return s.replace(/'/g, "''");
+}
+
+function qcode(s: string): string {
+  return `'${sq(s)}'`;
+}
+
+/** quoted, comma-separated code values wrapped a few per line */
+function chunkQuoted(codes: string[], perLine = 7): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < codes.length; i += perLine) {
+    const slice = codes.slice(i, i + perLine).map(qcode).join(",");
+    out.push(i + perLine >= codes.length ? slice : slice + ",");
+  }
+  return out;
+}
+
+/**
+ * Name pool guaranteeing resolved SAS names stay <= maxLen and unique
+ * (SAS dataset member and macro-variable names are limited to 32 chars).
+ */
+function makeNamePool(maxLen: number): (key: string) => string {
+  const assigned = new Map<string, string>();
+  const taken = new Set<string>();
+  return (key: string): string => {
+    const hit = assigned.get(key);
+    if (hit) return hit;
+    const base = key.length <= maxLen ? key : key.slice(0, maxLen);
+    let candidate = base;
+    let n = 2;
+    while (taken.has(candidate)) {
+      const suffix = String(n++);
+      candidate = base.slice(0, maxLen - suffix.length) + suffix;
+    }
+    assigned.set(key, candidate);
+    taken.add(candidate);
+    return candidate;
+  };
+}
+
+/* ================================================================== *
+ *  physical table naming (site adaptation layer)
+ * ================================================================== */
+
+interface FamilyMeta {
+  letter: string;
+  label: string;
+}
+
+const FAMILY: Record<string, FamilyMeta> = {
+  enrollment_detail: { letter: "t", label: "enrollment detail" },
+  drug_claims: { letter: "d", label: "outpatient pharmacy claims" },
+  outpatient_services: { letter: "o", label: "outpatient services" },
+  inpatient_services: { letter: "s", label: "inpatient services" },
+  inpatient_admissions: { letter: "i", label: "inpatient admissions" },
+};
+
+interface SiteNaming {
+  /** whether the event/enrollment pulls loop over calendar years */
+  yearLoop: boolean;
+  /** libname statements for 00_setup */
+  libnameLines: string[];
+  /** naming-configuration block for 00_setup (per family letter used) */
+  namingLines: (letters: string[]) => string[];
+  /** SAS-side reference to a family table, e.g. "%tab_o(&yr.)" */
+  tab: (letter: string) => string;
+  /** where the Redbook-style NDC reference lives by default */
+  ndcRefDefault: string;
+}
+
+function makeSite(naming: TableNamingStrategy, database: string): SiteNaming {
+  const familyComment = (letter: string): string => {
+    const fam = Object.values(FAMILY).find((f) => f.letter === letter);
+    return fam ? fam.label : letter;
+  };
+
+  if (naming.kind === "yearly_sas") {
+    const prefix = sasName(naming.prefix);
+    return {
+      yearLoop: true,
+      libnameLines: [
+        `libname raw "/EDIT/path/to/marketscan" access=readonly;  /* raw MarketScan yearly SAS data sets */`,
+        `libname tz  "/EDIT/path/to/project/work";                /* persistent project work area        */`,
+      ],
+      namingLines: (letters) => [
+        `/*-------------------- MarketScan physical table names -----------------------`,
+        `| Delivery style: yearly SAS data sets named <prefix><letter><yy><release>,`,
+        `| e.g. ${prefix}s181 = ${prefix} + s (inpatient services) + 18 (2018) + release 1.`,
+        `| Family letters: t = enrollment detail, d = pharmacy claims,`,
+        `| o = outpatient services, s = inpatient services, i = inpatient admissions.`,
+        `| EDIT the libname above plus prefix/rel below so that, for example,`,
+        `| %tab_o(2018) resolves to your 2018 outpatient services data set.`,
+        `-----------------------------------------------------------------------------*/`,
+        `%let prefix = ${prefix};   /* EDIT: database family prefix (${DB_PREFIX[database] ?? prefix} for ${database}) */`,
+        `%let rel    = 1;${" ".repeat(Math.max(1, prefix.length - 1))}  /* EDIT: release digit in the yearly file names        */`,
+        ``,
+        ...letters.map(
+          (le) =>
+            `%macro tab_${le}(yr); raw.&prefix.${le}%substr(&yr.,3,2)&rel. %mend tab_${le};  /* ${familyComment(le)} */`
+        ),
+      ],
+      tab: (letter) => `%tab_${letter}(&yr.)`,
+      ndcRefDefault: "raw.redbook",
+    };
+  }
+
+  const schema = naming.schema;
+  const pattern = naming.pattern;
+  const hasRelease = pattern.includes("{RELEASE}");
+  const resolve = (letter: string): string =>
+    pattern
+      .replace(/\{LETTER\}/g, letter.toUpperCase())
+      .replace(/\{YEAR\}/g, "&yr.")
+      .replace(/\{RELEASE\}/g, "&release.");
+
+  if (naming.kind === "warehouse_yearly") {
+    return {
+      yearLoop: true,
+      libnameLines: [
+        `libname db  "/EDIT/warehouse/connection";   /* EDIT: map to warehouse schema "${schema}",   */`,
+        `                                            /* e.g. libname db odbc ... schema="${schema}"; */`,
+        `libname tz  "/EDIT/path/to/project/work";   /* persistent project work area                 */`,
+      ],
+      namingLines: (letters) => [
+        `/*-------------------- MarketScan physical table names -----------------------`,
+        `| Delivery style: warehouse tables per family per year in schema "${schema}"`,
+        `| following the pattern "${pattern}".`,
+        `| EDIT the libname above${hasRelease ? " and the release suffix below" : ""} to match your site.`,
+        `-----------------------------------------------------------------------------*/`,
+        ...(hasRelease ? [`%let release = R1912;   /* EDIT: release suffix in physical table names */`, ``] : []),
+        ...letters.map((le) => `%macro tab_${le}(yr); db.${resolve(le)} %mend tab_${le};  /* ${familyComment(le)} */`),
+      ],
+      tab: (letter) => `%tab_${letter}(&yr.)`,
+      ndcRefDefault: "db.redbook",
+    };
+  }
+
+  /* single_table: one physical table per family, no year iteration */
+  return {
+    yearLoop: false,
+    libnameLines: [
+      `libname db  "/EDIT/warehouse/connection";   /* EDIT: map to schema "${schema}" */`,
+      `libname tz  "/EDIT/path/to/project/work";   /* persistent project work area    */`,
+    ],
+    namingLines: (letters) => [
+      `/*-------------------- MarketScan physical table names -----------------------`,
+      `| Delivery style: one consolidated table per family in schema "${schema}"`,
+      `| following the pattern "${pattern}". No per-year iteration is needed.`,
+      `-----------------------------------------------------------------------------*/`,
+      ...letters.map((le) => `%macro tab_${le}(yr); db.${resolve(le)} %mend tab_${le};  /* ${familyComment(le)} */`),
+    ],
+    tab: (letter) => `%tab_${letter}()`,
+    ndcRefDefault: "db.redbook",
+  };
+}
+
+/** wrap a pull body in the per-year driver macro (or emit once for single tables) */
+function yearWrap(site: SiteNaming, macroName: string, body: string[]): string[] {
+  if (!site.yearLoop) return body;
+  return [
+    `%macro ${macroName};`,
+    `  %do yr = &start_year. %to &end_year.;`,
+    ``,
+    ...body.map((l) => (l === "" ? l : `    ${l}`)),
+    `  %end;`,
+    `%mend ${macroName};`,
+    ``,
+    `%${macroName};`,
+  ];
+}
+
+/* ================================================================== *
+ *  spec digestion
+ * ================================================================== */
+
+type ListKind = "dx" | "px" | "drug_name" | "ndc";
+
+interface PulledList {
+  list: CodeList;
+  kind: ListKind;
+  /** dx/px only: which care-setting sources to scan */
+  op: boolean;
+  ip: boolean;
+}
+
+function listKind(list: CodeList): ListKind {
+  switch (list.system) {
+    case "icd9cm":
+    case "icd10cm":
+      return "dx";
+    case "cpt_hcpcs":
+      return "px";
+    case "drug_name":
+      return "drug_name";
+    case "ndc":
+      return "ndc";
+  }
+}
+
+function listSources(spec: StudySpec, listId: string): { op: boolean; ip: boolean } {
+  let op = false;
+  let ip = false;
+  let referenced = false;
+  const add = (setting: CareSetting): void => {
+    referenced = true;
+    if (setting === "any" || setting === "outpatient" || setting === "pharmacy") op = true;
+    if (setting === "any" || setting === "inpatient" || setting === "pharmacy") ip = true;
+  };
+  for (const c of spec.criteria) {
+    const t = c.test;
+    if ((t.type === "diagnosis" || t.type === "procedure") && t.codeListId === listId) add(t.setting);
+  }
+  if (
+    (spec.indexEvent.type === "first_diagnosis" || spec.indexEvent.type === "first_procedure") &&
+    spec.indexEvent.codeListId === listId
+  )
+    add("any");
+  for (const b of spec.baseline) if (b.codeListId === listId) add("any");
+  if (!referenced) {
+    op = true;
+    ip = true;
+  }
+  return { op, ip };
+}
+
+/**
+ * Split a diagnosis code list into ICD-10-CM era vs ICD-9-CM era codes
+ * (claims store codes without decimal points; DXVER marks the era).
+ * Codes beginning with a digit are always ICD-9; V/E-leading codes are
+ * ambiguous and follow the list's declared system.
+ */
+function splitDxEras(list: CodeList): { icd10: string[]; icd9: string[] } {
+  const icd10: string[] = [];
+  const icd9: string[] = [];
+  for (const entry of list.codes) {
+    const c = entry.code.replace(/\./g, "").toUpperCase().trim();
+    if (c.length === 0) continue;
+    let era: "9" | "10";
+    if (/^[0-9]/.test(c)) era = "9";
+    else if (/^[VE]/.test(c)) era = list.system === "icd9cm" ? "9" : "10";
+    else era = "10";
+    (era === "9" ? icd9 : icd10).push(c);
+  }
+  return { icd10: [...new Set(icd10)], icd9: [...new Set(icd9)] };
+}
+
+/* ================================================================== *
+ *  shared SAS fragments
+ * ================================================================== */
+
+function idxExpr(n: number): string {
+  if (n === 0) return "a.index_date";
+  return n > 0 ? `a.index_date + ${n}` : `a.index_date - ${-n}`;
+}
+
+/** "and <alias>.svcdate ..." lines for a RelativeWindow vs index date */
+function windowConds(w: RelativeWindow, alias: string): string[] {
+  const out: string[] = [];
+  if (w.start !== "anytime_before") out.push(`and ${alias}.svcdate >= ${idxExpr(w.start)}`);
+  if (w.end !== "anytime_after") out.push(`and ${alias}.svcdate <= ${idxExpr(w.end)}`);
+  const startsAtOrBefore = w.start === "anytime_before" || w.start <= 0;
+  const endsAtOrAfter = w.end === "anytime_after" || w.end >= 0;
+  if (startsAtOrBefore && endsAtOrAfter && !w.includesIndex)
+    out.push(`and ${alias}.svcdate ne a.index_date`);
+  return out;
+}
+
+/** diagnosis-column scan with DXVER era handling; caller indents */
+function dxCondLines(cols: string[], mv10: string | null, mv9: string | null): string[] {
+  const branch = (ver: string, mv: string): string[] => {
+    const lines: string[] = [`(a.dxver = '${ver}' and`];
+    cols.forEach((c, i) => {
+      const head = i === 0 ? " (   " : "  or ";
+      const tail = i === cols.length - 1 ? "))" : "";
+      lines.push(`${head}a.${c.toLowerCase()} in (&${mv}.)${tail}`);
+    });
+    return lines;
+  };
+  if (mv10 && mv9) {
+    const b10 = branch("0", mv10);
+    const b9 = branch("9", mv9);
+    return [
+      "and (",
+      ...b10.map((l, i) => (i === 0 ? `      ${l}` : `       ${l}`)),
+      ...b9.map((l, i) => (i === 0 ? `   or ${l}` : `       ${l}`)),
+      "    )",
+    ];
+  }
+  const only = branch(mv10 ? "0" : "9", (mv10 ?? mv9) as string);
+  return ["and " + only[0], ...only.slice(1).map((l) => "    " + l)];
+}
+
+/** procedure-column scan (no era split); caller indents */
+function pxCondLines(cols: string[], mv: string): string[] {
+  return cols.map((c, i) => {
+    const head = i === 0 ? "and (   " : "     or ";
+    const tail = i === cols.length - 1 ? ")" : "";
+    return `${head}a.${c.toLowerCase()} in (&${mv}.)${tail}`;
+  });
+}
+
+function levelCheck(tableRef: string, note: string, extraCols: string[] = []): string[] {
+  return [
+    `title "Level check: ${tableRef}${note ? ` (${note})` : ""}";`,
+    `proc sql;`,
+    `  select count(*) as row_cnt, count(distinct enrolid) as pat_cnt${extraCols.length ? "," : ""}`,
+    ...extraCols.map((c, i) => `         ${c}${i === extraCols.length - 1 ? "" : ","}`),
+    `  from ${tableRef};`,
+    `quit;`,
+  ];
+}
+
+function header(spec: StudySpec, program: string, purpose: string[]): string[] {
+  const bar = "=".repeat(77);
+  const prov = spec.meta.provenance;
+  const provTxt =
+    prov.method === "llm_extraction"
+      ? `extracted by ${prov.model ?? "LLM"}${prov.sourceDocumentName ? ` from ${prov.sourceDocumentName}` : ""}`
+      : "manually specified";
+  return [
+    `/*${bar}`,
+    `| Project  : ${cmt(spec.meta.title)}`,
+    `| Program  : ${program}`,
+    `| Author   : TimeZero deterministic emitter (machine-generated; analyst review required)`,
+    `| Date     : run date &sysdate. / spec v${cmt(spec.meta.version)} (${provTxt})`,
+    `| Database : ${spec.meta.database} | study period ${spec.meta.studyPeriod.start} to ${spec.meta.studyPeriod.end}`,
+    ...purpose.map((p, i) => `| ${i === 0 ? "Purpose " : "        "} : ${cmt(p)}`),
+    `| Note     : Generated by TimeZero. Regenerate from the reviewed StudySpec`,
+    `|            rather than hand-editing derivation logic; every site-specific`,
+    `|            name is configured in 00_setup.sas (lines marked EDIT).`,
+    `${bar}*/`,
+    ``,
+  ];
+}
+
+const INCLUDE_SETUP = [
+  `%include "00_setup.sas";   /* EDIT: use the full site path to 00_setup.sas */`,
+  ``,
+];
+
+/* ================================================================== *
+ *  emitter context
+ * ================================================================== */
+
+interface Ctx {
+  spec: StudySpec;
+  opts: EmitOptions;
+  site: SiteNaming;
+  /** persistent project-library table reference, e.g. "tz.&tag._ev_pso_dx" */
+  tbl: (suffix: string) => string;
+  /** macro-variable name (<=32 chars, collision-free) */
+  mvar: (name: string) => string;
+  /** macro name for pull drivers */
+  mname: (name: string) => string;
+  evOf: (listId: string) => string;
+  ndcOf: (listId: string) => string;
+  pulled: PulledList[];
+  drugNameLists: CodeList[];
+  indexList: CodeList;
+  lettersUsed: string[];
+  finalCohort: string;
+}
+
+function buildCtx(spec: StudySpec, opts: EmitOptions): Ctx {
+  const tag = sasName(opts.tag);
+  const memberPool = makeNamePool(32);
+  const tbl = (suffix: string): string => {
+    const full = memberPool(`${tag}_${sasName(suffix)}`);
+    return `tz.&tag.${full.slice(tag.length)}`;
+  };
+  const mvarPool = makeNamePool(32);
+  const mvar = (name: string): string => mvarPool(sasName(name));
+  const mnamePool = makeNamePool(32);
+  const mname = (name: string): string => mnamePool(sasName(name));
+
+  const pulled: PulledList[] = spec.codeLists.map((list) => {
+    const kind = listKind(list);
+    const src = kind === "dx" || kind === "px" ? listSources(spec, list.id) : { op: false, ip: false };
+    return { list, kind, ...src };
+  });
+
+  const indexList = findCodeList(spec, spec.indexEvent.codeListId);
+  if (!indexList)
+    throw new Error(`SAS emitter: index event references missing code list "${spec.indexEvent.codeListId}"`);
+
+  const letters = new Set<string>(["t"]);
+  for (const p of pulled) {
+    if (p.kind === "drug_name" || p.kind === "ndc") letters.add("d");
+    if ((p.kind === "dx" || p.kind === "px") && p.op) letters.add("o");
+    if ((p.kind === "dx" || p.kind === "px") && p.ip) {
+      letters.add("s");
+      letters.add("i");
+    }
+  }
+  const order = ["t", "d", "o", "s", "i"];
+  const lettersUsed = order.filter((l) => letters.has(l));
+
+  const ctx: Ctx = {
+    spec,
+    opts,
+    site: makeSite(opts.naming, spec.meta.database),
+    tbl,
+    mvar,
+    mname,
+    evOf: (listId) => tbl(`ev_${sasName(listId)}`),
+    ndcOf: (listId) => tbl(`ndc_${sasName(listId)}`),
+    pulled,
+    drugNameLists: spec.codeLists.filter((l) => l.system === "drug_name"),
+    indexList,
+    lettersUsed,
+    finalCohort: "",
+  };
+  ctx.finalCohort =
+    spec.criteria.length > 0 ? ctx.tbl(`060_coh${spec.criteria.length}`) : ctx.tbl("030_index");
+  return ctx;
+}
+
+/* ================================================================== *
+ *  00_setup.sas
+ * ================================================================== */
+
+function setupProgram(ctx: Ctx): GeneratedFile {
+  const { spec, opts, site } = ctx;
+  const lines: string[] = [
+    ...header(spec, "00_setup.sas", [
+      "Site configuration and study-level macro variables.",
+      "%include this program at the top of every numbered program.",
+    ]),
+    `options mprint mlogic nocenter;   /* house standard: verbose macro logging */`,
+    ``,
+    `/*-------------------- libraries (EDIT to your site) -------------------------*/`,
+    ...site.libnameLines,
+    ``,
+    `/*-------------------- study identity ----------------------------------------*/`,
+    `%let tag = ${sasName(opts.tag)};   /* prefix on every data set this study writes */`,
+    ``,
+    `/*-------------------- study window ------------------------------------------*/`,
+    `%let study_start = ${sasDate(spec.meta.studyPeriod.start)};`,
+    `%let study_end   = ${sasDate(spec.meta.studyPeriod.end)};`,
+    `%let start_year  = ${yearOf(spec.meta.studyPeriod.start)};`,
+    `%let end_year    = ${yearOf(spec.meta.studyPeriod.end)};`,
+    ``,
+    `/*-------------------- index event period ------------------------------------*/`,
+    `%let index_start = ${sasDate(spec.indexEvent.indexPeriod.start)};`,
+    `%let index_end   = ${sasDate(spec.indexEvent.indexPeriod.end)};`,
+    ``,
+    `/*-------------------- enrollment requirements -------------------------------*/`,
+    `/* Convention: the baseline period INCLUDES the index date and runs backward; */`,
+    `/* the follow-up period EXCLUDES the index date and runs forward.             */`,
+    `%let baseline_days = ${spec.enrollment.baselineDays};`,
+    `%let followup_days = ${spec.enrollment.followupDays};`,
+    `%let gap_allowance = ${spec.enrollment.gapAllowanceDays};   /* stitch segments separated by <= this many days */`,
+    ``,
+    ...site.namingLines(ctx.lettersUsed),
+  ];
+
+  if (ctx.drugNameLists.length > 0) {
+    lines.push(
+      ``,
+      `/*-------------------- NDC reference (Redbook-style) -------------------------*/`,
+      `%let ndc_ref = ${site.ndcRefDefault};   /* EDIT: your NDC reference table, e.g. redbook_rfd_2021q3.`,
+      `                                 Expected columns: NDCNUM (11-digit NDC),`,
+      `                                 GENNME (generic name), PRODNME (product/brand name). */`
+    );
+  }
+
+  lines.push(``, `title;`, `footnote;`, ``);
+  return {
+    path: "sas/00_setup.sas",
+    language: "sas",
+    title: "00 Setup",
+    content: lines.join("\n"),
+  };
+}
+
+/* ================================================================== *
+ *  010_ndc_pull.sas
+ * ================================================================== */
+
+function ndcPullProgram(ctx: Ctx): GeneratedFile | null {
+  const { spec } = ctx;
+  if (ctx.drugNameLists.length === 0) return null;
+
+  const lines: string[] = [
+    ...header(spec, "010_ndc_pull.sas", [
+      "Build NDC lookup tables from a Redbook-style reference for every",
+      "drug-name code list (one CASE WHEN per drug, matched with",
+      "UPPER(...) LIKE against generic and product names).",
+    ]),
+    ...INCLUDE_SETUP,
+  ];
+
+  ctx.drugNameLists.forEach((list, idx) => {
+    const ndcT = ctx.ndcOf(list.id);
+    const drugs = list.codes
+      .map((c) => {
+        const alts = c.code
+          .split("|")
+          .map((a) => a.trim().toUpperCase())
+          .filter((a) => a.length > 0);
+        return { label: alts[0] ?? c.code.toUpperCase(), alts, note: c.description };
+      })
+      .filter((d) => d.alts.length > 0);
+
+    const likePair = (alt: string): string =>
+      `upper(gennme) like '%${sq(alt)}%' or upper(prodnme) like '%${sq(alt)}%'`;
+
+    lines.push(
+      `/*----------------------------------------------------------------------------`,
+      `  NDC lookup ${idx + 1} of ${ctx.drugNameLists.length}: ${cmt(list.label)} [${cmt(list.id)}]`,
+      ...(list.notes ? [`  Note: ${cmt(list.notes)}`] : []),
+      `----------------------------------------------------------------------------*/`,
+      `proc datasets lib=tz nolist nowarn;`,
+      `  delete ${ndcT.replace("tz.", "")};`,
+      `quit;`,
+      ``,
+      `proc sql;`,
+      `  create table ${ndcT} as`,
+      `  select ndcnum, gennme, prodnme,`,
+      `         case`
+    );
+    for (const d of drugs) {
+      d.alts.forEach((alt, ai) => {
+        const head = ai === 0 ? "           when " : "             or ";
+        lines.push(`${head}${likePair(alt)}`);
+      });
+      lines.push(`             then '${sq(d.label)}'${d.note ? `   /* ${cmt(d.note)} */` : ""}`);
+    }
+    lines.push(
+      `           else 'NA'`,
+      `         end as drug`,
+      `  from &ndc_ref.`,
+      `  where ndcnum is not null`,
+      `    and (`
+    );
+    const allAlts = drugs.flatMap((d) => d.alts);
+    allAlts.forEach((alt, i) => {
+      const head = i === 0 ? "            " : "         or ";
+      lines.push(`${head}${likePair(alt)}`);
+    });
+    lines.push(
+      `        );`,
+      `quit;`,
+      ``,
+      `title "Level check: ${ndcT} (${cmt(list.label)})";`,
+      `proc sql;`,
+      `  select count(*) as row_cnt, count(distinct ndcnum) as ndc_cnt`,
+      `  from ${ndcT};`,
+      ``,
+      `  select drug, count(distinct ndcnum) as ndc_cnt`,
+      `  from ${ndcT}`,
+      `  group by drug`,
+      `  order by drug;`,
+      `quit;`,
+      ``,
+      `title "NDC lookup print: ${cmt(list.id)}";`,
+      `proc print data=${ndcT};`,
+      `run;`,
+      ``
+    );
+  });
+
+  return {
+    path: "sas/010_ndc_pull.sas",
+    language: "sas",
+    title: "010 NDC pull",
+    content: lines.join("\n"),
+  };
+}
+
+/* ================================================================== *
+ *  020_events_pull.sas
+ * ================================================================== */
+
+interface DxSource {
+  key: "outpatient_services" | "inpatient_services" | "inpatient_admissions";
+  letter: string;
+  setting: "OP" | "IP";
+  dateCol: string;
+  label: string;
+  work: string;
+}
+
+function eventsProgram(ctx: Ctx): GeneratedFile | null {
+  const { spec, site } = ctx;
+  if (ctx.pulled.length === 0) return null;
+
+  const lines: string[] = [
+    ...header(spec, "020_events_pull.sas", [
+      "Pull clinical events for every code list into one work table per",
+      "list (&tag._ev_<codelist>): diagnoses from outpatient/inpatient",
+      "claims (ICD era via DXVER), drugs from pharmacy claims joined to",
+      "the 010 NDC lookups (or direct NDC lists), procedures by position.",
+    ]),
+    ...INCLUDE_SETUP,
+  ];
+
+  ctx.pulled.forEach((pl, idx) => {
+    const list = pl.list;
+    const evT = ctx.evOf(list.id);
+    const sectionHead = [
+      `/*----------------------------------------------------------------------------`,
+      `  Event pull ${idx + 1} of ${ctx.pulled.length}: ${cmt(list.label)} [${cmt(list.id)}]`,
+    ];
+
+    if (list.codes.length === 0) {
+      lines.push(
+        ...sectionHead,
+        `  NOTE: this code list has no codes yet - nothing pulled. Verify the`,
+        `  spec in the TimeZero workbench and regenerate.`,
+        `----------------------------------------------------------------------------*/`,
+        ``
+      );
+      return;
+    }
+
+    if (pl.kind === "dx") {
+      const { icd10, icd9 } = splitDxEras(list);
+      const mv10 = icd10.length > 0 ? ctx.mvar(`${list.id}_c10`) : null;
+      const mv9 = icd9.length > 0 ? ctx.mvar(`${list.id}_c9`) : null;
+      const sources: DxSource[] = [];
+      if (pl.op)
+        sources.push({
+          key: "outpatient_services",
+          letter: "o",
+          setting: "OP",
+          dateCol: "svcdate",
+          label: "outpatient services (O)",
+          work: "work._pull_o",
+        });
+      if (pl.ip) {
+        sources.push(
+          {
+            key: "inpatient_services",
+            letter: "s",
+            setting: "IP",
+            dateCol: "svcdate",
+            label: "inpatient services (S)",
+            work: "work._pull_s",
+          },
+          {
+            key: "inpatient_admissions",
+            letter: "i",
+            setting: "IP",
+            dateCol: "admdate",
+            label: "inpatient admissions (I) - PDX..DX15 at the case level",
+            work: "work._pull_i",
+          }
+        );
+      }
+
+      lines.push(
+        ...sectionHead,
+        `  Diagnosis events. Sources: ${sources.map((s) => s.label.split(" - ")[0]).join(", ")}.`,
+        `  ICD-9-CM vs ICD-10-CM era is enforced with DXVER ('9' vs '0'); codes`,
+        `  below are stored dot-stripped, as they appear on claims.`,
+        ...(list.notes ? [`  Note: ${cmt(list.notes)}`] : []),
+        `----------------------------------------------------------------------------*/`
+      );
+      if (mv10)
+        lines.push(
+          `%let ${mv10} =`,
+          ...chunkQuoted(icd10).map((l) => `  ${l}`),
+          `;   /* ICD-10-CM era (DXVER = '0') */`
+        );
+      if (mv9)
+        lines.push(
+          `%let ${mv9} =`,
+          ...chunkQuoted(icd9).map((l) => `  ${l}`),
+          `;   /* ICD-9-CM era (DXVER = '9') */`
+        );
+      lines.push(
+        ``,
+        `proc datasets lib=tz nolist nowarn;`,
+        `  delete ${evT.replace("tz.", "")};`,
+        `quit;`,
+        ``
+      );
+
+      const body: string[] = [];
+      for (const src of sources) {
+        const cols = DX_COLUMNS[src.key] ?? [];
+        const dateSel = src.dateCol === "svcdate" ? "a.svcdate" : `a.${src.dateCol} as svcdate`;
+        body.push(
+          `/* ${src.label} */`,
+          `proc sql;`,
+          `  create table ${src.work} as`,
+          `  select distinct a.enrolid, ${dateSel}, '${src.setting}' as setting,`,
+          `         a.age, a.sex`,
+          `  from ${site.tab(src.letter)} as a`,
+          `  where a.enrolid is not null`,
+          `    and a.${src.dateCol} between &study_start. and &study_end.`,
+          ...dxCondLines(cols, mv10, mv9).map((l, i, arr) =>
+            `    ${l}${i === arr.length - 1 ? ";" : ""}`
+          ),
+          `quit;`,
+          ``,
+          `proc append base=${evT} data=${src.work} force;`,
+          `run;`,
+          ``
+        );
+      }
+      lines.push(...yearWrap(site, ctx.mname(`pull_ev_${list.id}`), body), ``);
+      lines.push(
+        ...levelCheck(evT, cmt(list.label), [
+          `min(svcdate) as min_dt format=date9.`,
+          `max(svcdate) as max_dt format=date9.`,
+        ]),
+        ``
+      );
+    } else if (pl.kind === "px") {
+      const mv = ctx.mvar(`${list.id}_px`);
+      const codes = [...new Set(list.codes.map((c) => c.code.toUpperCase().trim()).filter((c) => c.length > 0))];
+      const sources: DxSource[] = [];
+      if (pl.op)
+        sources.push({
+          key: "outpatient_services",
+          letter: "o",
+          setting: "OP",
+          dateCol: "svcdate",
+          label: "outpatient services (O)",
+          work: "work._pull_o",
+        });
+      if (pl.ip) {
+        sources.push(
+          {
+            key: "inpatient_services",
+            letter: "s",
+            setting: "IP",
+            dateCol: "svcdate",
+            label: "inpatient services (S)",
+            work: "work._pull_s",
+          },
+          {
+            key: "inpatient_admissions",
+            letter: "i",
+            setting: "IP",
+            dateCol: "admdate",
+            label: "inpatient admissions (I) - PPROC..PROC15 at the case level",
+            work: "work._pull_i",
+          }
+        );
+      }
+      lines.push(
+        ...sectionHead,
+        `  Procedure events matched by claim position (PROCTYP is not filtered;`,
+        `  add a PROCTYP restriction if your protocol requires one).`,
+        ...(list.notes ? [`  Note: ${cmt(list.notes)}`] : []),
+        `----------------------------------------------------------------------------*/`,
+        `%let ${mv} =`,
+        ...chunkQuoted(codes).map((l) => `  ${l}`),
+        `;`,
+        ``,
+        `proc datasets lib=tz nolist nowarn;`,
+        `  delete ${evT.replace("tz.", "")};`,
+        `quit;`,
+        ``
+      );
+      const body: string[] = [];
+      for (const src of sources) {
+        const cols = PROC_COLUMNS[src.key] ?? [];
+        const dateSel = src.dateCol === "svcdate" ? "a.svcdate" : `a.${src.dateCol} as svcdate`;
+        body.push(
+          `/* ${src.label} */`,
+          `proc sql;`,
+          `  create table ${src.work} as`,
+          `  select distinct a.enrolid, ${dateSel}, '${src.setting}' as setting,`,
+          `         a.age, a.sex`,
+          `  from ${site.tab(src.letter)} as a`,
+          `  where a.enrolid is not null`,
+          `    and a.${src.dateCol} between &study_start. and &study_end.`,
+          ...pxCondLines(cols, mv).map((l, i, arr) => `    ${l}${i === arr.length - 1 ? ";" : ""}`),
+          `quit;`,
+          ``,
+          `proc append base=${evT} data=${src.work} force;`,
+          `run;`,
+          ``
+        );
+      }
+      lines.push(...yearWrap(site, ctx.mname(`pull_ev_${list.id}`), body), ``);
+      lines.push(
+        ...levelCheck(evT, cmt(list.label), [
+          `min(svcdate) as min_dt format=date9.`,
+          `max(svcdate) as max_dt format=date9.`,
+        ]),
+        ``
+      );
+    } else {
+      /* drug_name or direct ndc list → pharmacy claims (D) */
+      const viaLookup = pl.kind === "drug_name";
+      const mvNdc = viaLookup ? null : ctx.mvar(`${list.id}_ndc`);
+      lines.push(
+        ...sectionHead,
+        viaLookup
+          ? `  Drug claims from pharmacy claims (D) joined to the 010 NDC lookup.`
+          : `  Drug claims from pharmacy claims (D) using the direct NDC list below.`,
+        ...(list.notes ? [`  Note: ${cmt(list.notes)}`] : []),
+        `----------------------------------------------------------------------------*/`
+      );
+      if (mvNdc) {
+        const codes = [...new Set(list.codes.map((c) => c.code.trim()).filter((c) => c.length > 0))];
+        lines.push(`%let ${mvNdc} =`, ...chunkQuoted(codes).map((l) => `  ${l}`), `;`);
+      }
+      lines.push(
+        ``,
+        `proc datasets lib=tz nolist nowarn;`,
+        `  delete ${evT.replace("tz.", "")};`,
+        `quit;`,
+        ``
+      );
+      const body: string[] = [`proc sql;`, `  create table work._pull_d as`];
+      if (viaLookup) {
+        body.push(
+          `  select distinct a.enrolid, a.svcdate, b.drug, a.ndcnum, a.daysupp,`,
+          `         a.age, a.sex`,
+          `  from ${site.tab("d")} as a`,
+          `  inner join ${ctx.ndcOf(list.id)} as b`,
+          `    on a.ndcnum = b.ndcnum`,
+          `  where a.enrolid is not null`,
+          `    and a.svcdate between &study_start. and &study_end.;`
+        );
+      } else {
+        body.push(
+          `  select distinct a.enrolid, a.svcdate, a.ndcnum, a.daysupp,`,
+          `         a.age, a.sex`,
+          `  from ${site.tab("d")} as a`,
+          `  where a.enrolid is not null`,
+          `    and a.ndcnum in (&${mvNdc}.)`,
+          `    and a.svcdate between &study_start. and &study_end.;`
+        );
+      }
+      body.push(`quit;`, ``, `proc append base=${evT} data=work._pull_d force;`, `run;`, ``);
+      lines.push(...yearWrap(site, ctx.mname(`pull_ev_${list.id}`), body), ``);
+      lines.push(
+        ...levelCheck(evT, cmt(list.label), [
+          `min(svcdate) as min_dt format=date9.`,
+          `max(svcdate) as max_dt format=date9.`,
+        ]),
+        ``
+      );
+      if (viaLookup) {
+        lines.push(
+          `title "Event mix by drug: ${evT}";`,
+          `proc freq data=${evT};`,
+          `  tables drug / missing;`,
+          `run;`,
+          ``
+        );
+      }
+    }
+  });
+
+  return {
+    path: "sas/020_events_pull.sas",
+    language: "sas",
+    title: "020 Events pull",
+    content: lines.join("\n"),
+  };
+}
+
+/* ================================================================== *
+ *  030_index.sas
+ * ================================================================== */
+
+function indexProgram(ctx: Ctx): GeneratedFile {
+  const { spec } = ctx;
+  const evT = ctx.evOf(spec.indexEvent.codeListId);
+  const idxT = ctx.tbl("030_index");
+  const isDrug = spec.indexEvent.type === "first_drug_claim";
+  const drugExpr =
+    isDrug && ctx.indexList.system === "drug_name"
+      ? "min(b.drug) as index_drug"
+      : isDrug
+        ? "min(b.ndcnum) as index_drug"
+        : null;
+
+  const ruleLabel: Record<string, string> = {
+    first_drug_claim: "first qualifying drug claim",
+    first_diagnosis: "first qualifying diagnosis",
+    first_procedure: "first qualifying procedure",
+  };
+
+  const lines: string[] = [
+    ...header(spec, "030_index.sas", [
+      `Index event rule: ${ruleLabel[spec.indexEvent.type]} of`,
+      `"${ctx.indexList.label}" inside the index period defines index_date.`,
+      ...(spec.indexEvent.description ? [spec.indexEvent.description] : []),
+    ]),
+    ...INCLUDE_SETUP,
+    `proc datasets lib=tz nolist nowarn;`,
+    `  delete ${idxT.replace("tz.", "")};`,
+    `quit;`,
+    ``,
+    `/* first qualifying event inside the index period, per patient */`,
+    `proc sql;`,
+    `  create table work._030_first as`,
+    `  select enrolid,`,
+    `         min(svcdate) as index_date format=date9.`,
+    `  from ${evT}`,
+    `  where svcdate between &index_start. and &index_end.`,
+    `  group by enrolid;`,
+    `quit;`,
+    ``,
+    ...levelCheck("work._030_first", "first qualifying event"),
+    ``,
+    `/* attributes at the index claim. Same-day ties are resolved with min()`,
+    `   (alphabetical${isDrug ? "; review multi-drug index days before analysis" : ""}).`,
+    `   AGE is taken from the index claim; 070 falls back to DOBYR when missing. */`,
+    `proc sql;`,
+    `  create table ${idxT} as`,
+    `  select a.enrolid,`,
+    `         a.index_date,`,
+    ...(drugExpr ? [`         ${drugExpr},`] : []),
+    `         min(b.age) as age_at_index,`,
+    `         min(b.sex) as sex`,
+    `  from work._030_first as a`,
+    `  inner join ${evT} as b`,
+    `    on  a.enrolid = b.enrolid`,
+    `    and a.index_date = b.svcdate`,
+    `  group by a.enrolid, a.index_date;`,
+    `quit;`,
+    ``,
+    ...levelCheck(idxT, "index cohort", [
+      `min(index_date) as min_idx format=date9.`,
+      `max(index_date) as max_idx format=date9.`,
+    ]),
+    ``,
+    `title "Index cohort print (first 5 rows)";`,
+    `proc print data=${idxT} (obs=5);`,
+    `run;`,
+    ``,
+  ];
+
+  return {
+    path: "sas/030_index.sas",
+    language: "sas",
+    title: "030 Index assignment",
+    content: lines.join("\n"),
+  };
+}
+
+/* ================================================================== *
+ *  040_enroll_pull.sas
+ * ================================================================== */
+
+function enrollPullProgram(ctx: Ctx): GeneratedFile {
+  const { spec, site } = ctx;
+  const enrT = ctx.tbl("040_enroll");
+  const idxT = ctx.tbl("030_index");
+  const rxCol = spec.meta.database === "marketscan_medicaid" ? "drugcovg" : "rx";
+  const needRx = spec.enrollment.requiresRxCoverage;
+
+  const body: string[] = [
+    `proc sql;`,
+    `  create table work._pull_t as`,
+    `  select distinct a.enrolid, a.dtstart, a.dtend,`,
+    `         a.${rxCol}${rxCol === "rx" ? "" : " as rx"}, a.plantyp, a.sex, a.region, a.dobyr`,
+    `  from ${site.tab("t")} as a`,
+    `  inner join ${idxT} as b`,
+    `    on a.enrolid = b.enrolid`,
+    `  where a.enrolid is not null`,
+    `    and a.dtstart is not null`,
+    `    and a.dtend is not null`,
+  ];
+  if (needRx) {
+    body.push(`    /* pharmacy (Rx) coverage required by the spec */`);
+    body.push(`    and a.${rxCol} = '1';`);
+  } else {
+    body[body.length - 1] = body[body.length - 1] + ";";
+  }
+  body.push(`quit;`, ``, `proc append base=${enrT} data=work._pull_t force;`, `run;`, ``);
+
+  const lines: string[] = [
+    ...header(spec, "040_enroll_pull.sas", [
+      "Pull enrollment-detail segments for patients with an index date.",
+      needRx
+        ? `Segments must carry pharmacy coverage (${rxCol.toUpperCase()} = '1') per the spec.`
+        : "Pharmacy coverage is NOT required by the spec; no RX filter applied.",
+      "Demographic columns (SEX, REGION, PLANTYP, DOBYR) ride along for 070.",
+    ]),
+    ...INCLUDE_SETUP,
+    `proc datasets lib=tz nolist nowarn;`,
+    `  delete ${enrT.replace("tz.", "")};`,
+    `quit;`,
+    ``,
+    ...yearWrap(site, ctx.mname("pull_enroll"), body),
+    ``,
+    ...levelCheck(enrT, "enrollment segments", [
+      `min(dtstart) as min_dtstart format=date9.`,
+      `max(dtend)   as max_dtend   format=date9.`,
+    ]),
+    ``,
+    `title "Enrollment pull print (first 5 rows)";`,
+    `proc print data=${enrT} (obs=5);`,
+    `run;`,
+    ``,
+  ];
+
+  return {
+    path: "sas/040_enroll_pull.sas",
+    language: "sas",
+    title: "040 Enrollment pull",
+    content: lines.join("\n"),
+  };
+}
+
+/* ================================================================== *
+ *  050_enroll_stitch.sas
+ * ================================================================== */
+
+function enrollStitchProgram(ctx: Ctx): GeneratedFile {
+  const { spec } = ctx;
+  const enrT = ctx.tbl("040_enroll");
+  const epiT = ctx.tbl("050_epi");
+  const outT = ctx.tbl("050_cont_enroll");
+  const idxT = ctx.tbl("030_index");
+
+  const lines: string[] = [
+    ...header(spec, "050_enroll_stitch.sas", [
+      "Stitch enrollment segments into continuous episodes (classic sorted",
+      "DATA-step retain algorithm), then keep patients whose episode covers",
+      "&baseline_days. before through &followup_days. after the index date.",
+    ]),
+    ...INCLUDE_SETUP,
+    `proc datasets lib=tz nolist nowarn;`,
+    `  delete ${epiT.replace("tz.", "")} ${outT.replace("tz.", "")};`,
+    `quit;`,
+    ``,
+    `/* the stitching DATA step relies on this sort order */`,
+    `proc sort data=${enrT} out=work._050_seg (keep=enrolid dtstart dtend);`,
+    `  by enrolid dtstart dtend;`,
+    `run;`,
+    ``,
+    `/*----------------------------------------------------------------------------`,
+    `  Retained-variable stitching:`,
+    `    - the first segment of each patient opens episode 1;`,
+    `    - a segment starting within &gap_allowance. days of the running episode`,
+    `      end continues the episode (the running end only ever moves forward);`,
+    `    - a larger gap increments the episode counter.`,
+    `----------------------------------------------------------------------------*/`,
+    `data work._050_epi0;`,
+    `  set work._050_seg;`,
+    `  by enrolid dtstart dtend;`,
+    `  retain prev_dtend episode;`,
+    `  format prev_dtend enrolst enrolend date9.;`,
+    ``,
+    `  /* first enrollment segment of each patient */`,
+    `  if first.enrolid then do;`,
+    `    enrolst    = dtstart;`,
+    `    episode    = 1;`,
+    `    prev_dtend = dtend;`,
+    `    enrolend   = dtend;`,
+    `  end;`,
+    ``,
+    `  /* continuous, and the segment end extends the running episode */`,
+    `  else if ((dtstart - prev_dtend) le &gap_allowance.) and (dtend ge prev_dtend) then do;`,
+    `    enrolst    = dtstart;`,
+    `    episode    = episode;`,
+    `    prev_dtend = dtend;`,
+    `    enrolend   = dtend;`,
+    `  end;`,
+    ``,
+    `  /* continuous, but the segment ends inside the running episode */`,
+    `  else if ((dtstart - prev_dtend) le &gap_allowance.) and (dtend lt prev_dtend) then do;`,
+    `    enrolst    = dtstart;`,
+    `    episode    = episode;`,
+    `    prev_dtend = prev_dtend;`,
+    `    enrolend   = prev_dtend;`,
+    `  end;`,
+    ``,
+    `  /* gap larger than the allowance - open a new episode */`,
+    `  else if (dtstart - prev_dtend) gt &gap_allowance. then do;`,
+    `    enrolst    = dtstart;`,
+    `    episode    = episode + 1;`,
+    `    prev_dtend = dtend;`,
+    `    enrolend   = dtend;`,
+    `  end;`,
+    `run;`,
+    ``,
+    `title "Stitching intermediate print (first 10 rows)";`,
+    `proc print data=work._050_epi0 (obs=10);`,
+    `run;`,
+    ``,
+    `/* collapse to one row per patient-episode */`,
+    `proc sql;`,
+    `  create table ${epiT} as`,
+    `  select distinct enrolid, episode,`,
+    `         min(enrolst)  as dtstart format=date9.,`,
+    `         max(enrolend) as dtend   format=date9.`,
+    `  from work._050_epi0`,
+    `  group by enrolid, episode;`,
+    `quit;`,
+    ``,
+    ...levelCheck(epiT, "stitched episodes"),
+    ``,
+    `/*----------------------------------------------------------------------------`,
+    `  Continuous-enrollment requirement around index: the episode must start on`,
+    `  or before index - &baseline_days. and end on or after index + &followup_days.`,
+    `----------------------------------------------------------------------------*/`,
+    `proc sql;`,
+    `  create table ${outT} as`,
+    `  select distinct a.*,`,
+    `         b.episode,`,
+    `         b.dtstart as epi_start format=date9.,`,
+    `         b.dtend   as epi_end   format=date9.,`,
+    `         (a.index_date - b.dtstart) as bl_avail_days,`,
+    `         (b.dtend - a.index_date)   as fup_avail_days`,
+    `  from ${idxT} as a`,
+    `  inner join ${epiT} as b`,
+    `    on a.enrolid = b.enrolid`,
+    `  where b.dtstart <= a.index_date - &baseline_days.`,
+    `    and b.dtend   >= a.index_date + &followup_days.;`,
+    `quit;`,
+    ``,
+    ...levelCheck(outT, "index + continuous enrollment", [
+      `min(bl_avail_days)  as min_bl`,
+      `max(bl_avail_days)  as max_bl`,
+      `min(fup_avail_days) as min_fup`,
+      `max(fup_avail_days) as max_fup`,
+    ]),
+    ``,
+  ];
+
+  return {
+    path: "sas/050_enroll_stitch.sas",
+    language: "sas",
+    title: "050 Enrollment stitching",
+    content: lines.join("\n"),
+  };
+}
+
+/* ================================================================== *
+ *  060_attrition.sas
+ * ================================================================== */
+
+function attrDesc(c: Criterion): string {
+  let raw = `${c.kind}: ${c.sourceText}`;
+  if (raw.length > 200) raw = raw.slice(0, 197) + "...";
+  return sq(raw);
+}
+
+interface EventTestSql {
+  ev: string;
+  window: RelativeWindow;
+  settingCond: string | null;
+  minClaims: number;
+  sepDays?: number;
+  negate: boolean;
+}
+
+function eventWhereLines(t: EventTestSql): string[] {
+  const win = (al: string): string[] => windowConds(t.window, al);
+  const set = (al: string): string[] => (t.settingCond ? [`and ${al}${t.settingCond}`] : []);
+
+  const single = (kw: string): string[] => [
+    `  where ${kw} (`,
+    `          select 1`,
+    `          from ${t.ev} as e`,
+    `          where e.enrolid = a.enrolid`,
+    ...[...win("e"), ...set("e")].map((l) => `            ${l}`),
+    `        );`,
+  ];
+
+  const pairBody: string[] = [
+    `          select 1`,
+    `          from ${t.ev} as e1, ${t.ev} as e2`,
+    `          where e1.enrolid = a.enrolid`,
+    `            and e2.enrolid = a.enrolid`,
+    ...[...win("e1"), ...set("e1"), ...win("e2"), ...set("e2")].map((l) => `            ${l}`),
+    `            and e2.svcdate >= e1.svcdate + ${t.sepDays ?? 1}`,
+  ];
+  const pair = (kw: string): string[] => [`  where ${kw} (`, ...pairBody, `        );`];
+
+  const countLines = (cmp: string): string[] => [
+    `  where (select count(distinct e.svcdate)`,
+    `         from ${t.ev} as e`,
+    `         where e.enrolid = a.enrolid`,
+    ...[...win("e"), ...set("e")].map((l) => `           ${l}`),
+    `        ) ${cmp};`,
+  ];
+
+  if (t.minClaims <= 1) return single(t.negate ? "not exists" : "exists");
+  if (t.minClaims === 2 && t.sepDays) return pair(t.negate ? "not exists" : "exists");
+  if (!t.sepDays) return countLines(`${t.negate ? "<" : ">="} ${t.minClaims}`);
+
+  /* minClaims > 2 with a separation requirement: distinct-date count plus the
+     two-claims-apart EXISTS pattern (pairwise separation approximation). */
+  return [
+    `  where ${t.negate ? "not (" : "("}`,
+    `          (select count(distinct e.svcdate)`,
+    `           from ${t.ev} as e`,
+    `           where e.enrolid = a.enrolid`,
+    ...[...win("e"), ...set("e")].map((l) => `             ${l}`),
+    `          ) >= ${t.minClaims}`,
+    `      and exists (`,
+    ...pairBody.map((l) => `    ${l}`),
+    `          )`,
+    `        );`,
+  ];
+}
+
+function settingCondOf(setting: CareSetting): string | null {
+  if (setting === "inpatient") return `.setting = 'IP'`;
+  if (setting === "outpatient") return `.setting = 'OP'`;
+  return null;
+}
+
+function attritionProgram(ctx: Ctx): GeneratedFile | null {
+  const { spec } = ctx;
+  if (spec.criteria.length === 0) return null;
+
+  const attrT = ctx.tbl("060_attrition");
+  const idxT = ctx.tbl("030_index");
+  const epiT = ctx.tbl("050_epi");
+  const cohTables = spec.criteria.map((_, i) => ctx.tbl(`060_coh${i + 1}`));
+  const coh0 = ctx.tbl("060_coh0");
+  const deleteList = [attrT, coh0, ...cohTables].map((t) => t.replace("tz.", "")).join(" ");
+
+  const lines: string[] = [
+    ...header(spec, "060_attrition.sas", [
+      "Apply inclusion/exclusion criteria in spec order (CONSORT-style",
+      "attrition); every step writes the count of patients remaining to",
+      "&tag._060_attrition and prints a level check.",
+    ]),
+    ...INCLUDE_SETUP,
+    `proc datasets lib=tz nolist nowarn;`,
+    `  delete ${deleteList};`,
+    `quit;`,
+    ``,
+    `proc sql;`,
+    `  create table ${attrT}`,
+    `    (step num, description char(240), n num);`,
+    `quit;`,
+    ``,
+    `/*-------------------- step 0: index cohort ---------------------------------*/`,
+    `title "Attrition step 0: qualifying index event";`,
+    `data ${coh0};`,
+    `  set ${idxT};`,
+    `run;`,
+    ``,
+    `proc sql;`,
+    `  insert into ${attrT}`,
+    `  select 0, 'Patients with a qualifying index event in the index period',`,
+    `         count(distinct enrolid)`,
+    `  from ${coh0};`,
+    ``,
+    `  select count(*) as row_cnt, count(distinct enrolid) as pat_cnt`,
+    `  from ${coh0};`,
+    `quit;`,
+    ``,
+  ];
+
+  let prev = coh0;
+  spec.criteria.forEach((c, i) => {
+    const step = i + 1;
+    const cur = cohTables[i];
+    const t = c.test;
+    lines.push(
+      `/*-------------------- step ${step}: ${sasName(c.id)} (${c.kind}) ----------------------*/`,
+      `/* Source text: ${cmt(c.sourceText)} */`,
+      `title "Attrition step ${step}: ${sasName(c.id)} (${c.kind})";`
+    );
+
+    if (t.type === "unmapped") {
+      lines.push(
+        `/* !! UNMAPPED CRITERION - the extractor could not translate this criterion`,
+        `   into claims logic. The cohort is carried forward UNCHANGED below;`,
+        `   resolve it in the TimeZero workbench and regenerate before delivery. */`,
+        `data ${cur};`,
+        `  set ${prev};`,
+        `run;`,
+        ``,
+        `proc sql;`,
+        `  insert into ${attrT}`,
+        `  select ${step}, 'UNMAPPED (cohort carried forward unchanged): ${attrDesc(c)}',`,
+        `         count(distinct enrolid)`,
+        `  from ${cur};`,
+        ``,
+        `  select count(*) as row_cnt, count(distinct enrolid) as pat_cnt`,
+        `  from ${cur};`,
+        `quit;`,
+        ``
+      );
+      prev = cur;
+      return;
+    }
+
+    const negate = c.kind === "exclusion";
+    let whereLines: string[];
+
+    if (t.type === "diagnosis" || t.type === "procedure" || t.type === "drug") {
+      whereLines = eventWhereLines({
+        ev: ctx.evOf(t.codeListId),
+        window: t.window,
+        settingCond: t.type === "drug" ? null : settingCondOf(t.setting),
+        minClaims: t.minClaims,
+        sepDays: t.type === "diagnosis" ? t.claimSeparationDays : undefined,
+        negate,
+      });
+    } else if (t.type === "age_at_index") {
+      const conds: string[] = [];
+      if (t.min !== undefined) conds.push(`a.age_at_index >= ${t.min}`);
+      if (t.max !== undefined) conds.push(`a.age_at_index <= ${t.max}`);
+      if (conds.length === 0) conds.push(`1 = 1   /* no age bounds supplied */`);
+      const joined = conds.join("\n    and ");
+      whereLines = negate ? [`  where not (${joined});`] : [`  where ${joined};`];
+    } else if (t.type === "sex") {
+      const v = t.value === "M" ? "1" : "2";
+      const cond = `a.sex = '${v}'   /* '1' = male, '2' = female in MarketScan */`;
+      whereLines = negate ? [`  where not (${cond});`] : [`  where ${cond};`];
+    } else {
+      /* continuous_enrollment */
+      const bl =
+        t.baselineDays === spec.enrollment.baselineDays ? "&baseline_days." : String(t.baselineDays);
+      const fu =
+        t.followupDays === spec.enrollment.followupDays ? "&followup_days." : String(t.followupDays);
+      if (t.requiresRxCoverage !== spec.enrollment.requiresRxCoverage) {
+        lines.push(
+          `/* NOTE: this criterion's Rx-coverage requirement differs from the`,
+          `   enrollment pull in 040 - review before delivery. */`
+        );
+      }
+      const inner = [
+        `          select 1`,
+        `          from ${epiT} as b`,
+        `          where b.enrolid = a.enrolid`,
+        `            and b.dtstart <= a.index_date - ${bl}`,
+        `            and b.dtend   >= a.index_date + ${fu}`,
+      ];
+      whereLines = [`  where ${negate ? "not exists" : "exists"} (`, ...inner, `        );`];
+    }
+
+    lines.push(
+      `proc sql;`,
+      `  create table ${cur} as`,
+      `  select distinct a.*`,
+      `  from ${prev} as a`,
+      ...whereLines,
+      ``,
+      `  insert into ${attrT}`,
+      `  select ${step}, '${attrDesc(c)}',`,
+      `         count(distinct enrolid)`,
+      `  from ${cur};`,
+      ``,
+      `  select count(*) as row_cnt, count(distinct enrolid) as pat_cnt`,
+      `  from ${cur};`,
+      `quit;`,
+      ``
+    );
+    prev = cur;
+  });
+
+  lines.push(
+    `/*-------------------- attrition report -------------------------------------*/`,
+    `data work._060_report;`,
+    `  set ${attrT};`,
+    `  prev_n = lag(n);`,
+    `  if _n_ = 1 then pct_prev = 100;`,
+    `  else if prev_n > 0 then pct_prev = round(100 * n / prev_n, 0.1);`,
+    `run;`,
+    ``,
+    `title "Attrition summary: &tag.";`,
+    `proc print data=work._060_report noobs label;`,
+    `  var step description n pct_prev;`,
+    `  label step     = 'Step'`,
+    `        description = 'Criterion'`,
+    `        n        = 'Patients remaining'`,
+    `        pct_prev = 'Pct of previous step';`,
+    `run;`,
+    ``,
+    ...levelCheck(prev, "final analytic cohort"),
+    ``
+  );
+
+  return {
+    path: "sas/060_attrition.sas",
+    language: "sas",
+    title: "060 Attrition",
+    content: lines.join("\n"),
+  };
+}
+
+/* ================================================================== *
+ *  070_baseline.sas
+ * ================================================================== */
+
+function baselineProgram(ctx: Ctx): GeneratedFile | null {
+  const { spec } = ctx;
+  if (spec.baseline.length === 0) return null;
+
+  const cohT = ctx.tbl("070_cohort");
+  const demoT = ctx.tbl("070_demo");
+  const enrT = ctx.tbl("040_enroll");
+  const needsDemo = spec.baseline.some((b) =>
+    ["age", "sex", "region", "plan_type", "year"].includes(b.kind)
+  );
+  const needsFormats = spec.baseline.some((b) => b.kind === "sex" || b.kind === "region");
+
+  const lines: string[] = [
+    ...header(spec, "070_baseline.sas", [
+      "Table 1 shells for the baseline characteristics in the spec:",
+      spec.baseline.map((b) => b.label).join(", ") + ".",
+      "Baseline window convention: INCLUDES index date, runs backward",
+      "(&baseline_days. days total: index - (&baseline_days. - 1) .. index).",
+    ]),
+    ...INCLUDE_SETUP,
+    `proc datasets lib=tz nolist nowarn;`,
+    `  delete ${cohT.replace("tz.", "")}${needsDemo ? ` ${demoT.replace("tz.", "")}` : ""};`,
+    `quit;`,
+    ``,
+    `/* final analytic cohort from 060 */`,
+    `data ${cohT};`,
+    `  set ${ctx.finalCohort};`,
+    `run;`,
+    ``,
+    ...levelCheck(cohT, "Table 1 cohort"),
+    ``,
+  ];
+
+  if (needsFormats) {
+    lines.push(
+      `proc format;`,
+      `  value $tzsex  '1' = 'Male'`,
+      `                '2' = 'Female';`,
+      `  value $tzreg  '1' = 'Northeast'`,
+      `                '2' = 'North Central'`,
+      `                '3' = 'South'`,
+      `                '4' = 'West'`,
+      `                '5' = 'Unknown';`,
+      `run;`,
+      ``
+    );
+  }
+
+  if (needsDemo) {
+    lines.push(
+      `/*----------------------------------------------------------------------------`,
+      `  Demographics at index: join the enrollment segment covering the index`,
+      `  date (latest-starting segment wins when several overlap), with DOBYR as`,
+      `  the age fallback when the claim-level AGE was missing.`,
+      `----------------------------------------------------------------------------*/`,
+      `proc sql;`,
+      `  create table work._070_demo0 as`,
+      `  select a.enrolid, a.index_date, a.age_at_index, a.sex,`,
+      `         b.region, b.plantyp, b.dobyr, b.dtstart as seg_start`,
+      `  from ${cohT} as a`,
+      `  left join ${enrT} as b`,
+      `    on  a.enrolid = b.enrolid`,
+      `    and b.dtstart <= a.index_date`,
+      `    and b.dtend   >= a.index_date;`,
+      `quit;`,
+      ``,
+      `proc sort data=work._070_demo0;`,
+      `  by enrolid descending seg_start;`,
+      `run;`,
+      ``,
+      `data ${demoT};`,
+      `  set work._070_demo0;`,
+      `  by enrolid;`,
+      `  if first.enrolid;`,
+      `  if age_at_index = . and dobyr ne . then age_at_index = year(index_date) - dobyr;`,
+      `  index_year = year(index_date);`,
+      `  drop seg_start;`,
+      `run;`,
+      ``,
+      ...levelCheck(demoT, "demographics at index"),
+      ``
+    );
+  }
+
+  spec.baseline.forEach((b: BaselineCharacteristic) => {
+    const label = b.label.replace(/"/g, "'");
+    switch (b.kind) {
+      case "age":
+        lines.push(
+          `title "Table 1 - ${label} (continuous)";`,
+          `proc means data=${demoT} n mean std median min max maxdec=1;`,
+          `  var age_at_index;`,
+          `run;`,
+          ``,
+          `data work._070_age;`,
+          `  set ${demoT};`,
+          `  length age_group $8;`,
+          `  if      age_at_index =  .  then age_group = 'Missing';`,
+          `  else if age_at_index <  18 then age_group = '<18';`,
+          `  else if age_at_index <= 34 then age_group = '18-34';`,
+          `  else if age_at_index <= 44 then age_group = '35-44';`,
+          `  else if age_at_index <= 54 then age_group = '45-54';`,
+          `  else if age_at_index <= 64 then age_group = '55-64';`,
+          `  else                            age_group = '65+';`,
+          `run;`,
+          ``,
+          `title "Table 1 - ${label} (grouped)";`,
+          `proc freq data=work._070_age;`,
+          `  tables age_group / missing;`,
+          `run;`,
+          ``
+        );
+        break;
+      case "sex":
+        lines.push(
+          `title "Table 1 - ${label}";`,
+          `proc freq data=${demoT};`,
+          `  tables sex / missing;`,
+          `  format sex $tzsex.;`,
+          `run;`,
+          ``
+        );
+        break;
+      case "region":
+        lines.push(
+          `title "Table 1 - ${label}";`,
+          `proc freq data=${demoT};`,
+          `  tables region / missing;`,
+          `  format region $tzreg.;`,
+          `run;`,
+          ``
+        );
+        break;
+      case "plan_type":
+        lines.push(
+          `title "Table 1 - ${label}";`,
+          `proc freq data=${demoT};`,
+          `  tables plantyp / missing;   /* MarketScan PLANTYP codes; label at reporting time */`,
+          `run;`,
+          ``
+        );
+        break;
+      case "year":
+        lines.push(
+          `title "Table 1 - ${label}";`,
+          `proc freq data=${demoT};`,
+          `  tables index_year / missing;`,
+          `run;`,
+          ``
+        );
+        break;
+      case "comorbidity":
+      case "medication": {
+        if (!b.codeListId || !findCodeList(spec, b.codeListId)) {
+          lines.push(
+            `/* ${label}: no (valid) code list attached in the spec - resolve in the`,
+            `   TimeZero workbench and regenerate. */`,
+            ``
+          );
+          break;
+        }
+        const evT = ctx.evOf(b.codeListId);
+        const flag = sasName(b.id).toLowerCase();
+        const winLines = b.window
+          ? windowConds(b.window, "e")
+          : [
+              `and e.svcdate >= a.index_date - (&baseline_days. - 1)`,
+              `and e.svcdate <= a.index_date`,
+            ];
+        lines.push(
+          `/* ${label}: flagged from the ${b.codeListId} event table in the`,
+          `   ${b.window ? "criterion-specific window" : "baseline window"} */`,
+          `proc sql;`,
+          `  create table work._070_flag_${flag} as`,
+          `  select a.enrolid,`,
+          `         max(case when e.enrolid is not null then 1 else 0 end) as ${flag}`,
+          `  from ${cohT} as a`,
+          `  left join ${evT} as e`,
+          `    on  e.enrolid = a.enrolid`,
+          ...winLines.map((l) => `    ${l}`),
+          `  group by a.enrolid;`,
+          `quit;`,
+          ``,
+          `title "Table 1 - ${label} (baseline flag)";`,
+          `proc freq data=work._070_flag_${flag};`,
+          `  tables ${flag} / missing;`,
+          `run;`,
+          ``
+        );
+        break;
+      }
+      case "utilization":
+        lines.push(
+          `/* ${label}: utilization shell. All-cause utilization needs claim-level`,
+          `   pulls beyond the code-list event tables generated in 020 - add a`,
+          `   dedicated all-cause pull (O/S/I/D restricted to the baseline window)`,
+          `   here before running. */`,
+          ``
+        );
+        break;
+    }
+  });
+
+  return {
+    path: "sas/070_baseline.sas",
+    language: "sas",
+    title: "070 Baseline (Table 1)",
+    content: lines.join("\n"),
+  };
+}
+
+/* ================================================================== *
+ *  entry point
+ * ================================================================== */
+
+export const emitSas: SasEmitter = (spec: StudySpec, opts: EmitOptions): GeneratedFile[] => {
+  const ctx = buildCtx(spec, opts);
+  const files: GeneratedFile[] = [];
+
+  files.push(setupProgram(ctx));
+  const ndc = ndcPullProgram(ctx);
+  if (ndc) files.push(ndc);
+  const events = eventsProgram(ctx);
+  if (events) files.push(events);
+  files.push(indexProgram(ctx));
+  files.push(enrollPullProgram(ctx));
+  files.push(enrollStitchProgram(ctx));
+  const attrition = attritionProgram(ctx);
+  if (attrition) files.push(attrition);
+  const baseline = baselineProgram(ctx);
+  if (baseline) files.push(baseline);
+
+  return files;
+};

@@ -1,0 +1,60 @@
+/* TimeZero brand tokens — SINGLE source of design truth.
+   Do not re-declare palette values in components; consume the variables. */
+
+:root {
+  /* palette */
+  --paper: #FAFBF9;
+  --surface: #F1F5F3;
+  --surface-deep: #E7EEEA;
+  --ink: #16211D;
+  --ink-soft: #4A5A54;
+  --ink-faint: #7C8B85;
+  --accent: #0E7C6B;
+  --accent-ink: #0A5D51;
+  --accent-wash: #E3F0EC;
+  --warn: #B45309;
+  --warn-wash: #F7EAD9;
+  --danger: #B3403A;
+  --danger-wash: #F6E4E2;
+  --ok: #17734A;
+  --ok-wash: #E1EFE7;
+  --line: #DCE4E0;
+  --code-bg: #10201C;
+  --code-ink: #D9E6E1;
+
+  /* type */
+  --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-display: "Iowan Old Style", Palatino, "Palatino Linotype", Georgia, serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* shape + rhythm */
+  --radius: 8px;
+  --radius-lg: 12px;
+  --space-1: .25rem; --space-2: .5rem; --space-3: .75rem;
+  --space-4: 1rem; --space-5: 1.5rem; --space-6: 2rem; --space-8: 3rem;
+  --shadow: 0 1px 2px rgba(10, 30, 25, .06), 0 4px 16px rgba(10, 30, 25, .05);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #0D1512;
+    --surface: #131E1A;
+    --surface-deep: #182620;
+    --ink: #E6EDE9;
+    --ink-soft: #9DAFA7;
+    --ink-faint: #6C7D76;
+    --accent: #3ECBB1;
+    --accent-ink: #5BD8C2;
+    --accent-wash: #12302A;
+    --warn: #E0A458;
+    --warn-wash: #2E2214;
+    --danger: #E07B72;
+    --danger-wash: #331A18;
+    --ok: #5BC98F;
+    --ok-wash: #12281C;
+    --line: #24312C;
+    --code-bg: #0A100E;
+    --code-ink: #C9DAD4;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 4px 16px rgba(0, 0, 0, .3);
+  }
+}

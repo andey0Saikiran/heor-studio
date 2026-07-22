@@ -1,0 +1,513 @@
+/* Codelist workbench — component-scoped styles.
+   Consumes brand.css tokens ONLY; no palette values are declared here.
+   (The "violet-ish" imported badge is derived from tokens via color-mix:
+   interpolating danger -> accent the LONG way around the oklch hue wheel
+   passes through violet.) */
+
+.wb {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  font-family: var(--font-body);
+  color: var(--ink);
+}
+
+/* shared focus treatment for everything interactive in the workbench */
+.wb :is(button, input, select, textarea):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ---------- header ---------- */
+
+.wb-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.wb-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.3rem;
+  font-weight: 600;
+}
+
+.wb-tally {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+}
+
+/* ---------- card ---------- */
+
+.wb-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+}
+
+.wb-card--done {
+  border-color: color-mix(in srgb, var(--ok) 40%, var(--line));
+}
+
+.wb-card-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  flex-wrap: wrap;
+}
+
+.wb-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-left: calc(-1 * var(--space-1));
+  padding: var(--space-1);
+  background: none;
+  border: none;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+  color: var(--ink);
+  text-align: left;
+}
+
+.wb-toggle:hover .wb-card-label {
+  color: var(--accent-ink);
+}
+
+.wb-chevron {
+  color: var(--ink-faint);
+  font-size: 0.8em;
+  flex: none;
+}
+
+.wb-card-label {
+  overflow-wrap: anywhere;
+}
+
+.wb-sys {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.05em;
+  color: var(--accent-ink);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  padding: 0.14rem 0.5rem;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.wb-count {
+  flex: none;
+  font-size: 0.72rem;
+  color: var(--warn);
+  background: var(--warn-wash);
+  padding: 0.14rem 0.5rem;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.wb-count--done {
+  color: var(--ok);
+  background: var(--ok-wash);
+}
+
+.wb-listid {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--ink-faint);
+}
+
+.wb-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  border-top: 1px solid var(--line);
+}
+
+/* ---------- empty state ---------- */
+
+.wb-empty {
+  margin: 0;
+  padding: var(--space-4);
+  font-size: 0.95rem;
+  color: var(--ink);
+  background: var(--warn-wash);
+  border: 1px dashed color-mix(in srgb, var(--warn) 50%, transparent);
+  border-radius: var(--radius);
+}
+
+/* ---------- code table ---------- */
+
+.wb-table-wrap {
+  overflow-x: auto;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.wb-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.wb-table th {
+  text-align: left;
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-faint);
+  background: var(--surface);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.wb-table td {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+.wb-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.wb-row--unverified td {
+  background: color-mix(in srgb, var(--warn-wash) 45%, transparent);
+}
+
+.wb-code {
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+.wb-desc {
+  color: var(--ink-soft);
+  min-width: 14rem;
+}
+
+.wb-none {
+  color: var(--ink-faint);
+  font-style: italic;
+}
+
+.wb-verify-cell,
+.wb-actions-cell {
+  text-align: center;
+  white-space: nowrap;
+}
+
+.wb-check {
+  width: 1rem;
+  height: 1rem;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.wb-remove {
+  background: none;
+  border: none;
+  border-radius: var(--radius);
+  padding: 0.05rem 0.4rem;
+  font-size: 1.05rem;
+  line-height: 1.2;
+  color: var(--ink-faint);
+  cursor: pointer;
+}
+
+.wb-remove:hover {
+  color: var(--danger);
+  background: var(--danger-wash);
+}
+
+.wb-rowactions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+/* ---------- provenance badges ---------- */
+
+.wb-src {
+  display: inline-block;
+  font-size: 0.7rem;
+  padding: 0.12rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
+  white-space: nowrap;
+}
+
+.wb-src--ai_suggested {
+  color: var(--warn);
+  background: var(--warn-wash);
+}
+
+.wb-src--vocabulary_lookup {
+  color: var(--accent-ink);
+  background: var(--accent-wash);
+}
+
+.wb-src--user_entered {
+  color: var(--ink-soft);
+  background: var(--surface-deep);
+}
+
+.wb-src--imported {
+  /* fallback when color-mix hue interpolation is unavailable */
+  color: var(--danger);
+  background: var(--danger-wash);
+  /* token-derived violet: danger -> accent, long way around the hue wheel */
+  color: color-mix(
+    in srgb,
+    color-mix(in oklch longer hue, var(--danger) 50%, var(--accent)) 82%,
+    var(--ink)
+  );
+  background: color-mix(in oklch longer hue, var(--danger-wash) 50%, var(--accent-wash));
+}
+
+/* ---------- add-code (search + manual) ---------- */
+
+.wb-label {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--ink-soft);
+  margin-bottom: var(--space-1);
+}
+
+.wb-input,
+.wb-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  font-size: 0.9rem;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-3);
+}
+
+.wb-input::placeholder,
+.wb-textarea::placeholder {
+  color: var(--ink-faint);
+}
+
+.wb-textarea {
+  resize: vertical;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+}
+
+.wb-notes .wb-textarea {
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+}
+
+.wb-select {
+  cursor: pointer;
+}
+
+.wb-addrow {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.wb-field {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+.wb-field--code {
+  flex: 0 1 14rem;
+}
+
+.wb-search {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.wb-search .wb-label {
+  margin-bottom: 0;
+}
+
+.wb-search-status {
+  min-height: 1rem;
+  font-size: 0.8rem;
+  color: var(--ink-faint);
+}
+
+.wb-error {
+  color: var(--danger);
+}
+
+.wb-results {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 16rem;
+  overflow-y: auto;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.wb-results li + li {
+  border-top: 1px solid var(--line);
+}
+
+.wb-result {
+  display: flex;
+  gap: var(--space-2);
+  align-items: baseline;
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  background: none;
+  border: none;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.85rem;
+  color: var(--ink);
+  text-align: left;
+}
+
+.wb-result:hover {
+  background: var(--accent-wash);
+}
+
+.wb-result-code {
+  font-family: var(--font-mono);
+  color: var(--accent-ink);
+  white-space: nowrap;
+}
+
+.wb-result-desc {
+  flex: 1;
+  color: var(--ink-soft);
+}
+
+.wb-result-meta {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--ink-faint);
+}
+
+/* ---------- buttons ---------- */
+
+.wb-btn {
+  align-self: flex-start;
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--accent-ink);
+  background: var(--accent-wash);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  border-radius: var(--radius);
+  padding: var(--space-1) var(--space-3);
+  cursor: pointer;
+}
+
+.wb-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 16%, var(--accent-wash));
+}
+
+.wb-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.wb-btn--ghost {
+  color: var(--ink-soft);
+  background: transparent;
+  border-color: var(--line);
+  font-weight: 500;
+}
+
+.wb-btn--ghost:hover:not(:disabled) {
+  background: var(--surface-deep);
+}
+
+/* ---------- import panel ---------- */
+
+.wb-import {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.wb-import-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.wb-import .wb-label code,
+.wb-hint code,
+.wb-listid {
+  font-family: var(--font-mono);
+}
+
+/* ---------- new list form ---------- */
+
+.wb-newlist {
+  background: var(--surface);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4);
+}
+
+.wb-newlist-title {
+  margin: 0 0 var(--space-3);
+  font-family: var(--font-display);
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.wb-newlist-fields {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.wb-newlist-fields .wb-btn {
+  align-self: flex-end;
+  padding-top: var(--space-2);
+  padding-bottom: var(--space-2);
+}
+
+.wb-hint {
+  margin: var(--space-2) 0 0;
+  font-size: 0.78rem;
+  color: var(--ink-faint);
+}
+
+/* ---------- utilities ---------- */
+
+.wb-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
