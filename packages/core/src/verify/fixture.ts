@@ -133,15 +133,20 @@ export const EXPECTED = {
   finalCohortN: 10, // drop P12 (age 10)
   armX: [1, 2, 3, 4, 5],
   armY: [6, 7, 8, 9, 10],
-  // descriptive epi (verified once the incidence module lands)
+  // descriptive epi — VERIFIED in PGlite against the emitted incidence SQL
+  // (see verify/proto_incidence.ts). Person-time constant = 365.25 everywhere
+  // (internally consistent: rate = cases*1000/person_years). NOTE for the owner:
+  // a common AE-rate convention §4 uses 365 for the AE rate specifically — switching to 365
+  // gives rate 451.55 and CI (90.76, 1319.66); it is a single repo-wide constant.
   prevalentM: 2,
   baselinePrevalence: 0.2,
   atRiskDenominator: 8,
   incidentCases: 3,
   personDays: 2425,
   personDaysByArm: { X: 1030, Y: 1395 },
-  crudeRatePer1000PY: 451.55, // 3*365*1000/2425
-  byarCiPer1000PY: [90.76, 1319.66] as [number, number],
+  personYears: 6.6393, // 2425 / 365.25
+  crudeRatePer1000PY: 451.86, // 3 * 1000 * 365.25 / 2425
+  byarCiPer1000PY: [90.82, 1320.24] as [number, number], // z=1.96, 365.25 scaling
   cumulativeIncidence: 0.375, // 3/8
   wilsonCi: [0.13684, 0.69426] as [number, number],
   smdAge: -0.63246,
