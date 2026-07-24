@@ -1,0 +1,27 @@
+{
+  "name": "@heor-studio/mcp",
+  "version": "0.1.0",
+  "description": "MCP server for HEOR Studio — turns a reviewed study spec into deterministic SAS + SQL for MarketScan. Deterministic tools by default; an LLM extract tool activates only when an API key is present.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "heor-studio-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsup src/index.ts --format esm --platform node --target node20 --clean",
+    "smoke": "tsx test/smoke.ts"
+  },
+  "dependencies": {
+    "@heor-studio/core": "*",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "jszip": "^3.10.1",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.0"
+  }
+}

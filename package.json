@@ -10,7 +10,8 @@
   "scripts": {
     "dev": "npm run dev -w @heor-studio/web",
     "build": "npm run build -w @heor-studio/web",
-    "typecheck": "tsc -p packages/core/tsconfig.json && tsc -p packages/web/tsconfig.app.json",
+    "typecheck": "tsc -p packages/core/tsconfig.json && tsc -p packages/web/tsconfig.app.json && tsc -p packages/mcp/tsconfig.json",
+    "mcp:smoke": "npm run smoke -w @heor-studio/mcp",
     "lint": "oxlint"
   },
   "devDependencies": {
