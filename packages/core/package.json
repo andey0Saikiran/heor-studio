@@ -9,5 +9,12 @@
   },
   "files": [
     "src"
-  ]
+  ],
+  "dependencies": {
+    "@electric-sql/pglite": "^0.5.4"
+  },
+  "scripts": {
+    "verify": "tsx src/verify/cli.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  }
 }
