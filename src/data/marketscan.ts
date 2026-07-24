@@ -1,9 +1,9 @@
 /**
- * MarketScan® native schema map — written in TimeZero's own words from
+ * MarketScan® native schema map — written in HEOR Studio's own words from
  * long-public sources (peer-reviewed methods papers, OHDSI/Janssen open ETL
  * documentation, university methods pages). No vendor documentation text is
  * reproduced. MarketScan is a registered trademark of Merative US L.P.;
- * TimeZero is independent and unaffiliated. Using generated code requires
+ * HEOR Studio is independent and unaffiliated. Using generated code requires
  * your own valid MarketScan license.
  *
  * Table letter conventions (CCAE = Commercial, MDCR = Medicare Supplemental,

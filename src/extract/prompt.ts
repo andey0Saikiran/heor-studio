@@ -359,7 +359,7 @@ const CRITERION_SCHEMA = {
 export const SPEC_JSON_SCHEMA: Record<string, unknown> = {
   type: "object",
   description:
-    "A complete TimeZero study specification extracted from a clinical " +
+    "A complete HEOR Studio study specification extracted from a clinical " +
     "protocol or statistical analysis plan (SAP), targeting a MarketScan " +
     "claims database.",
   properties: {

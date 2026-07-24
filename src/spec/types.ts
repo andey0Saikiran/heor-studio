@@ -1,5 +1,5 @@
 /**
- * TimeZero study specification — the single source of truth.
+ * HEOR Studio study specification — the single source of truth.
  *
  * The LLM's ONLY job is to produce this structure from a protocol/SAP.
  * All code (SAS, SQL) is generated deterministically from it by emitters.

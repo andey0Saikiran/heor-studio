@@ -19,7 +19,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   persistKey: false,
 };
 
-const SETTINGS_KEY = "timezero.settings";
+const SETTINGS_KEY = "heor-studio.settings";
 
 export function loadSettings(): AppSettings {
   try {

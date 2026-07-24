@@ -181,7 +181,7 @@ export default function CodePanel({
           Code generation is locked
         </h2>
         <p className="card-sub">
-          TimeZero will not generate code from an unreviewed spec — that is the point of the tool.
+          HEOR Studio will not generate code from an unreviewed spec — that is the point of the tool.
           Resolve these first:
         </p>
         <div className="banner banner-warn" role="status">

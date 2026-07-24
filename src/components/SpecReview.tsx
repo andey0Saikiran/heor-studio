@@ -750,7 +750,7 @@ function AddCriterionForm({
             onAdd({
               id,
               kind,
-              sourceText: sourceText.trim() || "Added manually in TimeZero (no protocol quote).",
+              sourceText: sourceText.trim() || "Added manually in HEOR Studio (no protocol quote).",
               test: buildDefaultTest(type, spec, chosenList),
               confidence: "high",
               reviewed: false,

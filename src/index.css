@@ -1,4 +1,4 @@
-/* TimeZero global base — consumes brand.css tokens only. */
+/* HEOR Studio global base — consumes brand.css tokens only. */
 @import "./brand.css";
 
 :root {

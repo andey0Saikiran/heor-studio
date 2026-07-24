@@ -15,7 +15,7 @@ import CodelistWorkbench from "./components/CodelistWorkbench";
 import { extractSpec } from "./extract/anthropic";
 import "./App.css";
 
-const DRAFT_KEY = "timezero.draft";
+const DRAFT_KEY = "heor-studio.draft";
 
 const STEPS = [
   { n: 1, label: "Protocol" },
@@ -349,8 +349,8 @@ export default function App() {
     <div className="app-shell">
       <header className="app-header">
         <div className="app-header-inner">
-          <h1 className="wordmark">TimeZero</h1>
-          <span className="tagline">Protocol to verified study code</span>
+          <h1 className="wordmark">HEOR Studio</h1>
+          <span className="tagline">Protocol to verified study code, for MarketScan</span>
           <div className="header-actions">
             <button type="button" className="btn btn-sm" onClick={() => setSettingsOpen(true)}>
               Settings
@@ -469,8 +469,9 @@ export default function App() {
             your key. Nothing touches our servers.
           </p>
           <span className="footer-note">
-            TimeZero (working name). Generated code requires analyst verification and a valid
-            MarketScan license.
+            HEOR Studio is an independent open-source project, not affiliated with or endorsed by
+            Merative. MarketScan&reg; is a registered trademark of Merative US&nbsp;L.P. Generated
+            code requires analyst verification and a valid MarketScan license.
           </span>
         </div>
       </footer>
