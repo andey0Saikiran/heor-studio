@@ -1,0 +1,13 @@
+{
+  "name": "@heor-studio/core",
+  "version": "0.1.0",
+  "description": "HEOR Studio engine: study-spec schema, protocol extractor, deterministic SAS/SQL emitters, and MarketScan schema map.",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src"
+  ]
+}

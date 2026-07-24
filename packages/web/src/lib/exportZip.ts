@@ -3,11 +3,11 @@
  * zipped client-side and delivered via a blob download. Nothing leaves the browser.
  */
 import JSZip from "jszip";
-import type { CodeList, StudySpec } from "../spec/types";
-import { specReadiness, unreviewedCriteria, unverifiedCodeCount } from "../spec/types";
-import type { EmitOptions, GeneratedFile } from "../emitters/types";
-import { emitSas } from "../emitters/sas";
-import { emitSql } from "../emitters/sql";
+import type { CodeList, StudySpec } from "@heor-studio/core";
+import { specReadiness, unreviewedCriteria, unverifiedCodeCount } from "@heor-studio/core";
+import type { EmitOptions, GeneratedFile } from "@heor-studio/core";
+import { emitSas } from "@heor-studio/core";
+import { emitSql } from "@heor-studio/core";
 
 export interface BundleEntry {
   path: string;

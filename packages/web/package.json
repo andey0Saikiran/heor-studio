@@ -1,0 +1,25 @@
+{
+  "name": "@heor-studio/web",
+  "private": true,
+  "version": "0.0.0",
+  "description": "HEOR Studio web app — the browser wizard over @heor-studio/core.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@heor-studio/core": "*",
+    "jszip": "^3.10.1",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@rolldown/binding-darwin-arm64": "^1.1.5",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
+    "vite": "^8.1.1"
+  }
+}

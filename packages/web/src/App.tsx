@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import type { StudySpec } from "./spec/types";
+import type { StudySpec } from "@heor-studio/core";
 import { PSO_DEMO_SPEC } from "./fixtures/pso";
-import type { EmitOptions } from "./emitters/types";
-import { DEFAULT_EMIT_OPTIONS } from "./emitters/types";
+import type { EmitOptions } from "@heor-studio/core";
+import { DEFAULT_EMIT_OPTIONS } from "@heor-studio/core";
 import SpecReview from "./components/SpecReview";
 import CodePanel from "./components/CodePanel";
 import ExportPanel from "./components/ExportPanel";
@@ -12,7 +12,7 @@ import SettingsModal, {
   type AppSettings,
 } from "./components/SettingsModal";
 import CodelistWorkbench from "./components/CodelistWorkbench";
-import { extractSpec } from "./extract/anthropic";
+import { extractSpec } from "@heor-studio/core";
 import "./App.css";
 
 const DRAFT_KEY = "heor-studio.draft";

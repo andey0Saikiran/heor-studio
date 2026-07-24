@@ -6,8 +6,8 @@ import type {
   DatabaseId,
   RelativeWindow,
   StudySpec,
-} from "../spec/types";
-import { findCodeList, specReadiness } from "../spec/types";
+} from "@heor-studio/core";
+import { findCodeList, specReadiness } from "@heor-studio/core";
 
 type Test = Criterion["test"];
 type TestType = Test["type"];

@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
-import type { StudySpec } from "../spec/types";
-import { specReadiness } from "../spec/types";
-import type { EmitOptions } from "../emitters/types";
+import type { StudySpec } from "@heor-studio/core";
+import { specReadiness } from "@heor-studio/core";
+import type { EmitOptions } from "@heor-studio/core";
 import {
   bundleFilename,
   buildZip,

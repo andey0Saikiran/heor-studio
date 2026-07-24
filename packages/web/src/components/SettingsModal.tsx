@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef } from "react";
-import { listModels } from "../extract/anthropic";
+import { listModels } from "@heor-studio/core";
 
 /** Connection settings for the user's own LLM endpoint (BYOK). */
 export interface AppSettings {

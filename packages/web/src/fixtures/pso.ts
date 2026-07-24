@@ -1,4 +1,4 @@
-import type { StudySpec } from "../spec/types";
+import type { StudySpec } from "@heor-studio/core";
 
 /**
  * Demo fixture: new-user cohort of IL-17/IL-23/IL-12/23 biologics in

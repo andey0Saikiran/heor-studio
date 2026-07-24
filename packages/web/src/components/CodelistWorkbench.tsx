@@ -12,8 +12,8 @@ import type {
   CodeSource,
   CodeSystem,
   StudySpec,
-} from "../spec/types";
-import { searchDrugNames, searchIcd10cm } from "../lib/vocab";
+} from "@heor-studio/core";
+import { searchDrugNames, searchIcd10cm } from "@heor-studio/core";
 import "./workbench.css";
 
 /* ---------- constants & pure helpers ---------- */

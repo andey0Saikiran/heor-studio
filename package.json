@@ -2,27 +2,21 @@
   "name": "heor-studio",
   "private": true,
   "version": "0.0.0",
+  "description": "HEOR Studio — protocol/SAP to verified, deterministic SAS + SQL for Merative MarketScan studies. Independent, open source; not affiliated with Merative.",
   "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
-    "lint": "oxlint",
-    "preview": "vite preview"
-  },
-  "dependencies": {
-    "jszip": "^3.10.1",
-    "react": "^19.2.7",
-    "react-dom": "^19.2.7"
+    "dev": "npm run dev -w @heor-studio/web",
+    "build": "npm run build -w @heor-studio/web",
+    "typecheck": "tsc -p packages/core/tsconfig.json && tsc -p packages/web/tsconfig.app.json",
+    "lint": "oxlint"
   },
   "devDependencies": {
-    "@rolldown/binding-darwin-arm64": "^1.1.5",
     "@types/node": "^24.13.2",
-    "@types/react": "^19.2.17",
-    "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^6.0.3",
     "oxlint": "^1.71.0",
     "tsx": "^4.23.1",
-    "typescript": "~6.0.2",
-    "vite": "^8.1.1"
+    "typescript": "~6.0.2"
   }
 }

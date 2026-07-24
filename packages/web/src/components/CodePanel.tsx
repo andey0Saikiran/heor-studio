@@ -1,11 +1,11 @@
 import { useId, useMemo, useState } from "react";
-import type { StudySpec } from "../spec/types";
-import { specReadiness } from "../spec/types";
-import type { EmitOptions, GeneratedFile } from "../emitters/types";
-import type { TableNamingStrategy } from "../data/marketscan";
-import { DB_PREFIX } from "../data/marketscan";
-import { emitSas } from "../emitters/sas";
-import { emitSql } from "../emitters/sql";
+import type { StudySpec } from "@heor-studio/core";
+import { specReadiness } from "@heor-studio/core";
+import type { EmitOptions, GeneratedFile } from "@heor-studio/core";
+import type { TableNamingStrategy } from "@heor-studio/core";
+import { DB_PREFIX } from "@heor-studio/core";
+import { emitSas } from "@heor-studio/core";
+import { emitSql } from "@heor-studio/core";
 
 type TabId = "sas" | "postgres" | "snowflake";
 
