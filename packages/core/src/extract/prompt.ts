@@ -10,7 +10,7 @@
  */
 
 import type {
-  AnalysisRequest,
+  LegacyAnalysisType,
   BaselineCharacteristic,
   CareSetting,
   CodeEntry,
@@ -96,7 +96,7 @@ export const BASELINE_KINDS = enumValues<BaselineCharacteristic["kind"]>({
   utilization: true,
 });
 
-export const ANALYSIS_TYPES = enumValues<AnalysisRequest["type"]>({
+export const ANALYSIS_TYPES = enumValues<LegacyAnalysisType>({
   attrition: true,
   table1: true,
   treatment_patterns: true,

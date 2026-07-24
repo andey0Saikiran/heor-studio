@@ -1049,7 +1049,7 @@ export default function SpecReview({
                 <dt>Analyses</dt>
                 <dd>
                   {spec.analyses
-                    .map((a) => `${a.type}${a.enabled ? "" : " (off)"}`)
+                    .map((a) => `${a.label}${a.enabled ? "" : " (off)"}`)
                     .join(", ")}
                 </dd>
               </>

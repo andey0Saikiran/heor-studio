@@ -17,7 +17,9 @@
  */
 
 import type {
-  AnalysisRequest,
+  Analysis,
+  LegacyAnalysisType,
+  LegacyAnalysisRequest,
   BaselineCharacteristic,
   CodeEntry,
   CodeList,
@@ -27,6 +29,7 @@ import type {
   RelativeWindow,
   StudySpec,
 } from "../spec/types";
+import { migrateLegacyAnalyses } from "../spec/types";
 import {
   ANALYSIS_TYPES,
   BASELINE_KINDS,
@@ -318,26 +321,32 @@ export function normalizeSpec(raw: unknown, ctx: NormalizeContext): StudySpec {
     .filter(isObject)
     .map((b, i) => normalizeBaseline(b, i, listIds, usedBaselineIds));
 
-  /* --- analyses (dedupe by type, keep first) --- */
+  /* --- analyses: LLM emits the legacy 7 names; migrate to the analysis layer.
+   *  Only the two emittable kinds (attrition, table1) stay enabled; richer
+   *  requests are recorded as disabled shells/stubs so they are visible in
+   *  review but do not block readiness until their emitter lands. Outcome/group/
+   *  comparison catalogs start empty (the analyst builds them during review). --- */
   const seenAnalyses = new Set<string>();
-  const analyses: AnalysisRequest[] = [];
+  const legacy: LegacyAnalysisRequest[] = [];
   for (const a of arr(root.analyses)) {
     if (!isObject(a)) continue;
-    const type = pick(a.type, ANALYSIS_TYPES);
+    const type = pick(a.type, ANALYSIS_TYPES) as LegacyAnalysisType | undefined;
     if (type === undefined || seenAnalyses.has(type)) continue;
     seenAnalyses.add(type);
     const notes = optStr(a.notes);
-    analyses.push({
-      type,
-      enabled: bool(a.enabled, true),
-      ...(notes !== undefined ? { notes } : {}),
-    });
+    legacy.push({ type, enabled: bool(a.enabled, true), ...(notes !== undefined ? { notes } : {}) });
   }
+  const analyses: Analysis[] = migrateLegacyAnalyses(legacy).map((a): Analysis =>
+    a.kind === "attrition" || a.kind === "table1" ? a : { ...a, enabled: false },
+  );
 
   /* --- meta --- */
   const meta = normalizeMeta(root.meta, ctx);
 
-  return { meta, codeLists, indexEvent, enrollment, criteria, baseline, analyses };
+  return {
+    meta, codeLists, indexEvent, enrollment, criteria, baseline,
+    outcomes: [], groupVars: [], comparisons: [], analyses,
+  };
 }
 
 function normalizeMeta(v: unknown, ctx: NormalizeContext): StudySpec["meta"] {

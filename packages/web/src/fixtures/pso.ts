@@ -127,11 +127,19 @@ export const PSO_DEMO_SPEC: StudySpec = {
     { id: "b_plan", label: "Plan type", kind: "plan_type" },
     { id: "b_year", label: "Index year", kind: "year" },
   ],
+  outcomes: [],
+  groupVars: [],
+  comparisons: [],
   analyses: [
-    { type: "attrition", enabled: true },
-    { type: "table1", enabled: true },
-    { type: "treatment_patterns", enabled: true, notes: "Switching, discontinuation (60-day gap), adherence (PDC) over 12-month follow-up." },
-    { type: "hcru_cost", enabled: false },
-    { type: "km_survival", enabled: false },
+    { id: "a_attrition", label: "Attrition", kind: "attrition", enabled: true },
+    { id: "a_table1", label: "Baseline characteristics", kind: "table1", enabled: true },
+    // Recorded but disabled until their emitters land (P2+): visible in review, non-blocking.
+    {
+      id: "a_treatment_patterns", label: "Treatment patterns", kind: "future_stub",
+      plannedKind: "treatment_switching", enabled: false,
+      notes: "Switching, discontinuation (60-day gap), adherence (PDC) over 12-month follow-up.",
+    },
+    { id: "a_hcru_cost", label: "HCRU & cost", kind: "future_stub", plannedKind: "cost", enabled: false },
+    { id: "a_km", label: "Kaplan-Meier survival", kind: "future_stub", plannedKind: "km_survival", enabled: false },
   ],
 };

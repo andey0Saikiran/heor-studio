@@ -85,9 +85,12 @@ function blankSpec(): StudySpec {
     },
     criteria: [],
     baseline: [],
+    outcomes: [],
+    groupVars: [],
+    comparisons: [],
     analyses: [
-      { type: "attrition", enabled: true },
-      { type: "table1", enabled: true },
+      { id: "a_attrition", label: "Attrition", kind: "attrition", enabled: true },
+      { id: "a_table1", label: "Baseline characteristics", kind: "table1", enabled: true },
     ],
   };
 }
