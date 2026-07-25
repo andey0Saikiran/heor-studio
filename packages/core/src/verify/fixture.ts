@@ -203,5 +203,17 @@ export const GOLD_A_SPEC: StudySpec = {
   analyses: [
     { id: "a_attrition", label: "Attrition", kind: "attrition", enabled: true },
     { id: "a_table1", label: "Baseline characteristics", kind: "table1", enabled: true },
+    {
+      id: "a_incidence", label: "Incidence rate of AE (E11.9)", kind: "incidence_rate", enabled: true,
+      outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "outpatient", diagnosisPosition: "any" },
+      caseStatus: "incident",
+      washout: { start: -365, end: 0, includesIndex: true },
+      denominatorRule: "person_time",
+      personTimeRule: { start: "index", censorAt: ["outcome", "disenrollment", "study_end", "max_followup"], maxFollowupDays: 365 },
+      recurrence: "first_only",
+      rateMultiplier: 1000,
+      ciMethod: "poisson_byar",
+      stratifyBy: [],
+    },
   ],
 };

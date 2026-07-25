@@ -23,6 +23,7 @@ import type {
   BaselineCharacteristic,
   CodeList,
   Criterion,
+  IncidenceRateAnalysis,
   RelativeWindow,
   StudySpec,
 } from "../spec/types";
@@ -89,6 +90,8 @@ interface Dialect {
   year(dateExpr: string): string;
   /** Round a numeric expression to one decimal place. */
   round1(expr: string): string;
+  /** Round a numeric expression to n decimal places (Postgres needs a NUMERIC cast). */
+  roundN(expr: string, n: number): string;
 }
 
 function makeDialect(id: SqlDialect): Dialect {
@@ -104,6 +107,7 @@ function makeDialect(id: SqlDialect): Dialect {
       createTableAs: (n) => `DROP TABLE IF EXISTS ${n};\nCREATE TABLE ${n} AS`,
       year: (e) => `CAST(EXTRACT(YEAR FROM ${e}) AS INT)`,
       round1: (e) => `ROUND(CAST(${e} AS NUMERIC), 1)`,
+      roundN: (e, n) => `ROUND(CAST(${e} AS NUMERIC), ${n})`,
     };
   }
   return {
@@ -116,6 +120,7 @@ function makeDialect(id: SqlDialect): Dialect {
     createTableAs: (n) => `CREATE OR REPLACE TABLE ${n} AS`,
     year: (e) => `YEAR(${e})`,
     round1: (e) => `ROUND(${e}, 1)`,
+    roundN: (e, n) => `ROUND(${e}, ${n})`,
   };
 }
 
@@ -1306,6 +1311,97 @@ function build06(ctx: Ctx): string {
 }
 
 /* ------------------------------------------------------------------ */
+/* 07 - Incidence rate (person-time)                                   */
+/* ------------------------------------------------------------------ */
+
+/** Mean days per year — internally consistent constant for rate/person-years/CI.
+ *  NOTE: a common AE-rate convention uses 365 for the AE rate specifically; switching this
+ *  one constant to "365" reproduces that convention. */
+const DAYS_PER_YEAR = "365.25";
+
+/**
+ * Incidence rate / density with prevalent-case washout, person-time censoring,
+ * and a Byar exact-Poisson CI computed closed-form in SQL. Reads the cohort,
+ * event, and enrollment-episode work tables built by 01-05. Verified against
+ * the synthetic fixture (verify/proto_incidence.ts): 3 cases / 8 at-risk /
+ * 2425 person-days / 451.86 per 1,000 PY / Byar CI (90.82, 1320.24).
+ */
+function build07Incidence(ctx: Ctx, an: IncidenceRateAnalysis): string {
+  const { d, wp, spec } = ctx;
+  const out = `${wp}_incidence`;
+  const clid = an.outcomeDefinition.codeListId;
+  const M = an.rateMultiplier;
+  const Y = DAYS_PER_YEAR;
+  const maxFu = an.personTimeRule.maxFollowupDays;
+  const studyEnd = spec.meta.studyPeriod.end;
+
+  // prevalent-case washout predicate (an outcome anywhere in this pre-index window)
+  const wc = windowConds(an.washout, "a.event_date", "c.index_date", d);
+  const washoutPred = wc.length > 0 ? wc.join("\n      AND ") : "TRUE";
+
+  // administrative-censoring terms from personTimeRule.censorAt (death omitted:
+  // MarketScan mortality is unascertainable — BR-LIM-002)
+  const terms: string[] = [];
+  const cens = an.personTimeRule.censorAt;
+  if (cens.includes("disenrollment")) terms.push("ep.episode_end");
+  if (cens.includes("study_end")) terms.push(`DATE '${studyEnd}'`);
+  if (cens.includes("max_followup") && maxFu != null) terms.push(d.offset("c.index_date", maxFu));
+  if (terms.length === 0) terms.push(`DATE '${studyEnd}'`); // always bound follow-up
+  const adminCensor = terms.length === 1 ? terms[0] : `LEAST(${terms.join(", ")})`;
+  const censorFinal = cens.includes("outcome")
+    ? `LEAST(COALESCE(fu_date, DATE '9999-12-31'), admin_censor)`
+    : `admin_censor`;
+
+  const byarLow = `(CASE WHEN patients = 0 THEN 0 ELSE POWER(1 - 1.0/(9*patients) - 1.96/(3*SQRT(patients)), 3) * patients END)`;
+  const byarHigh = `POWER(1 - 1.0/(9*(patients+1)) + 1.96/(3*SQRT(patients+1)), 3) * (patients+1)`;
+  const scale = `* ${M} * ${Y} / NULLIF(person_days, 0)`;
+
+  const L: string[] = [];
+  L.push(d.createTableAs(out));
+  L.push(`WITH cohort AS (SELECT enrolid, index_date FROM ${wp}_cohort),`);
+  L.push(`ae AS (SELECT enrolid, event_date FROM ${wp}_events WHERE code_list_id = '${q(clid)}'),`);
+  L.push(`prevalent AS (   -- washout: ${describeWindow(an.washout)}`);
+  L.push(`  SELECT DISTINCT c.enrolid`);
+  L.push(`  FROM cohort c JOIN ae a ON a.enrolid = c.enrolid`);
+  L.push(`  WHERE ${washoutPred}`);
+  L.push(`),`);
+  L.push(`atrisk AS (SELECT c.* FROM cohort c WHERE c.enrolid NOT IN (SELECT enrolid FROM prevalent)),`);
+  L.push(`first_fu AS (   -- first qualifying outcome strictly after index`);
+  L.push(`  SELECT c.enrolid, MIN(a.event_date) AS fu_date`);
+  L.push(`  FROM atrisk c JOIN ae a ON a.enrolid = c.enrolid AND a.event_date > c.index_date`);
+  L.push(`  GROUP BY c.enrolid`);
+  L.push(`),`);
+  L.push(`pt AS (`);
+  L.push(`  SELECT c.enrolid, c.index_date, ${adminCensor} AS admin_censor, f.fu_date`);
+  L.push(`  FROM atrisk c`);
+  L.push(`  JOIN ${wp}_enroll_episodes ep`);
+  L.push(`    ON ep.enrolid = c.enrolid AND c.index_date BETWEEN ep.episode_start AND ep.episode_end`);
+  L.push(`  LEFT JOIN first_fu f ON f.enrolid = c.enrolid`);
+  L.push(`),`);
+  L.push(`pt2 AS (`);
+  L.push(`  SELECT ${d.daysBetween(censorFinal, "index_date")} AS person_days,`);
+  L.push(`         CASE WHEN fu_date IS NOT NULL AND fu_date <= admin_censor THEN 1 ELSE 0 END AS is_case`);
+  L.push(`  FROM pt`);
+  L.push(`),`);
+  L.push(`summ AS (`);
+  L.push(`  SELECT 'incidence' AS measure, 'Overall' AS stratum,`);
+  L.push(`         SUM(is_case) AS patients, COUNT(*) AS denominator, SUM(person_days) AS person_days`);
+  L.push(`  FROM pt2`);
+  L.push(`)`);
+  L.push(`SELECT measure, stratum, patients, denominator, person_days,`);
+  L.push(`       ${d.roundN(`person_days / ${Y}`, 4)} AS person_years,`);
+  L.push(`       ${d.roundN(`patients * ${M} * ${Y} / NULLIF(person_days, 0)`, 2)} AS rate_per_1000py,`);
+  L.push(`       ${d.roundN(`${byarLow} ${scale}`, 2)} AS ci_low,`);
+  L.push(`       ${d.roundN(`${byarHigh} ${scale}`, 2)} AS ci_high,`);
+  L.push(`       '${an.ciMethod}' AS ci_method`);
+  L.push(`FROM summ;`);
+  L.push("");
+  L.push(`-- REVIEW: incidence rate per ${M} person-years.`);
+  L.push(`SELECT * FROM ${out};`);
+  return L.join("\n");
+}
+
+/* ------------------------------------------------------------------ */
 /* Emitter                                                             */
 /* ------------------------------------------------------------------ */
 
@@ -1357,7 +1453,7 @@ export const emitSql: SqlEmitter = (spec, dialect, opts) => {
     content: `${header(ctx, `${num}_${slug}.sql`, subtitle, tables, extra)}\n\n${body}\n`,
   });
 
-  return [
+  const files: GeneratedFile[] = [
     mk(
       "01",
       "ndc_lookup",
@@ -1416,4 +1512,25 @@ export const emitSql: SqlEmitter = (spec, dialect, opts) => {
       build06(ctx)
     ),
   ];
+
+  // 07+ analysis modules (one file per enabled analysis). Descriptive-epi first.
+  const incAnalyses = spec.analyses.filter(
+    (a): a is IncidenceRateAnalysis => a.kind === "incidence_rate" && a.enabled
+  );
+  incAnalyses.forEach((an, i) => {
+    const suffix = incAnalyses.length > 1 ? `_${an.id.toLowerCase().replace(/[^a-z0-9]+/g, "_")}` : "";
+    files.push(
+      mk(
+        String(7 + i).padStart(2, "0"),
+        `incidence${suffix}`,
+        `07 Incidence rate${suffix ? ` (${an.label})` : ""}`,
+        "person-time incidence rate with washout + Byar CI",
+        [],
+        [`Analysis: ${oneLine(an.label)} (id ${an.id}); outcome code list "${an.outcomeDefinition.codeListId}".`],
+        build07Incidence(ctx, an)
+      )
+    );
+  });
+
+  return files;
 };
