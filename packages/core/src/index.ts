@@ -20,3 +20,4 @@ export * from "./emitters/sql";
 export * from "./data/marketscan";
 export * from "./lib/vocab";
 export * from "./bundle";
+export * from "./feedback/types";

@@ -37,13 +37,13 @@ async function connect(env: Record<string, string>) {
 }
 
 async function main() {
-  // ---- 1. keyless (path A): 6 tools, no extract_spec ----
+  // ---- 1. keyless (path A): 7 tools, no extract_spec ----
   console.log("\n# Keyless server (path A)");
   const a = await connect({ ANTHROPIC_API_KEY: "" });
   const toolsA = (await a.listTools()).tools.map((t) => t.name).sort();
-  check("6 tools registered", toolsA.length === 6, toolsA.join(", "));
+  check("7 tools registered", toolsA.length === 7, toolsA.join(", "));
   check("extract_spec NOT present without key", !toolsA.includes("extract_spec"));
-  check("core tools present", ["search_codes", "validate_spec", "generate_code", "get_artifact", "export_bundle", "run_verification"].every((t) => toolsA.includes(t)));
+  check("core tools present", ["search_codes", "validate_spec", "generate_code", "get_artifact", "export_bundle", "run_verification", "report_correction"].every((t) => toolsA.includes(t)));
 
   const resources = (await a.listResources()).resources.map((r) => r.uri).sort();
   check("3 resources", resources.length === 3, resources.join(", "));
@@ -78,13 +78,19 @@ async function main() {
   const exp = parse(await a.callTool({ name: "export_bundle", arguments: { artifact_id: gen.artifact_id } }));
   check("export_bundle wrote a zip", typeof exp.zip_path === "string" && exp.bytes > 0, `${exp.zip_path} (${exp.bytes} bytes)`);
 
+  // ---- 5b. learning protocol: report_correction records with a reason ----
+  const corr = parse(await a.callTool({ name: "report_correction", arguments: {
+    target_kind: "statistic", target_ref: "smoke-test-rate", claim: "rate looks off", reason: "smoke-test reason",
+  } }));
+  check("report_correction records with a reason", corr.status === "recorded" && typeof corr.id === "string" && typeof corr.shareable_markdown === "string", corr.id ?? corr);
+
   await a.close();
 
-  // ---- 6. with a key present: 7 tools incl. extract_spec (not called) ----
+  // ---- 6. with a key present: 8 tools incl. extract_spec (not called) ----
   console.log("\n# Keyed server (path B available)");
   const b = await connect({ ANTHROPIC_API_KEY: "sk-ant-dummy-not-called" });
   const toolsB = (await b.listTools()).tools.map((t) => t.name);
-  check("7 tools registered with key", toolsB.length === 7, `${toolsB.length}`);
+  check("8 tools registered with key", toolsB.length === 8, `${toolsB.length}`);
   check("extract_spec present with key", toolsB.includes("extract_spec"));
   await b.close();
 

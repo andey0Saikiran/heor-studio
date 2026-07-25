@@ -37,7 +37,8 @@ import {
   searchIcd10cm,
   searchDrugNames,
 } from "@heor-studio/core";
-import type { StudySpec, BundleEntry, EmitOptions, ExtractSource } from "@heor-studio/core";
+import type { StudySpec, BundleEntry, EmitOptions, ExtractSource, CorrectionTargetKind, CorrectionClass } from "@heor-studio/core";
+import { newCorrection, formatCorrectionMarkdown } from "@heor-studio/core";
 import { putSpec, getSpec, putArtifact, getArtifact } from "./session.js";
 
 const log = (msg: string) => console.error(`[heor-studio-mcp] ${msg}`);
@@ -272,6 +273,60 @@ server.registerTool(
       bytes: buf.byteLength,
       sha256: createHash("sha256").update(buf).digest("hex"),
       file_count: art.entries.length,
+    });
+  },
+);
+
+server.registerTool(
+  "report_correction",
+  {
+    title: "Report that something is wrong (learning protocol)",
+    description:
+      "Record a correction when the analyst says a generated program, a business rule, a statistic, " +
+      "or a code list is wrong. HEOR Studio always asks WHY: a reason is REQUIRED — if the analyst " +
+      "only said 'this is wrong', ask them why before calling this. The correction is written LOCALLY " +
+      "and NOTHING is transmitted; the response includes a shareable Markdown record the analyst may " +
+      "choose to submit upstream. Corrections never silently change generation — they are triaged into " +
+      "a gold-case fix, a new spec option, or a doc change (see docs/LEARNING-PROTOCOL.md).",
+    inputSchema: {
+      target_kind: z.enum(["generated_code", "business_rule", "spec_field", "code_list", "statistic", "terminology", "other"]),
+      target_ref: z.string().describe("What is contested, e.g. '07_incidence.sql', 'BR-FIN-001', a rate value"),
+      claim: z.string().min(1).describe("What looks wrong"),
+      reason: z.string().min(1).describe("WHY the analyst believes it is wrong — required; ask the analyst if not given"),
+      suggested_correct: z.string().optional().describe("What it should be, if the analyst offered it"),
+      spec_version: z.string().optional(),
+      reporter_role: z.string().optional(),
+      reporter_org: z.string().optional(),
+      classification: z.enum(["correctness_bug", "methodological_choice", "site_preference", "data_vintage", "terminology", "misunderstanding", "unclassified"]).optional(),
+    },
+  },
+  async (a) => {
+    let correction;
+    try {
+      correction = newCorrection({
+        createdAt: new Date().toISOString(),
+        target: { kind: a.target_kind as CorrectionTargetKind, ref: a.target_ref, specVersion: a.spec_version },
+        claim: a.claim,
+        reason: a.reason,
+        suggestedCorrect: a.suggested_correct,
+        reporter: a.reporter_role || a.reporter_org ? { role: a.reporter_role, org: a.reporter_org } : undefined,
+        classification: a.classification as CorrectionClass | undefined,
+      });
+    } catch (e) {
+      return fail((e as Error).message);
+    }
+    const dir = process.env.HEOR_CORRECTIONS_DIR ?? join(process.cwd(), "heor-corrections");
+    await mkdir(dir, { recursive: true });
+    const filePath = join(dir, `${correction.id}.json`);
+    await writeFile(filePath, JSON.stringify(correction, null, 2) + "\n");
+    log(`correction recorded: ${correction.id} -> ${filePath}`);
+    return json({
+      status: "recorded",
+      id: correction.id,
+      saved_to: filePath,
+      note: "Saved locally. Nothing was transmitted. To help fix it for everyone, share the record below " +
+        "upstream (it will become a gold-case fix, a spec option, or a doc change).",
+      shareable_markdown: formatCorrectionMarkdown(correction),
     });
   },
 );

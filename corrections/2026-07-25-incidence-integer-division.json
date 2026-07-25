@@ -1,0 +1,17 @@
+{
+  "id": "07_incidence-int-div-1",
+  "createdAt": "2026-07-25",
+  "target": { "kind": "generated_code", "ref": "07_incidence.sql", "artifactPath": "sql/postgres/07_incidence.sql", "specVersion": "1.0" },
+  "claim": "With daysPerYear=365 the incidence rate comes out 451, not 451.55.",
+  "reason": "An integer annualization constant made the SQL numerator all-integer, so the division was integer division (1095000/2425 = 451) instead of numeric. The 365.25 default only worked because the decimal silently coerced the arithmetic to numeric.",
+  "suggestedCorrect": "Force numeric arithmetic regardless of whether the constant is an integer.",
+  "reporter": { "role": "verification harness" },
+  "classification": "correctness_bug",
+  "status": "accepted",
+  "resolution": {
+    "outcome": "emitter_fix_with_gold_case",
+    "notes": "Render the person-time constant as a decimal literal (e.g. 365.0) so the rate arithmetic is always numeric. Locked in as a permanent regression guard.",
+    "goldCaseId": "verifyDaysPerYearChoice (365.25->451.86, 365->451.55)",
+    "commit": "de8696c"
+  }
+}
