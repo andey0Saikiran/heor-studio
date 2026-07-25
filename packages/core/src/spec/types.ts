@@ -462,6 +462,11 @@ export interface StudySpec {
     database: DatabaseId;
     studyPeriod: { start: string; end: string };  // ISO dates, absolute claim window
     description?: string;
+    /** Days per person-year for rate/person-year/CI arithmetic. The analyst's
+     *  methodological choice — default 365.25 (mean Gregorian year, internally
+     *  consistent); some shops use 365 (e.g. a common AE-rate convention AE-rate convention).
+     *  It changes reported rates, so it lives in the spec for reproducibility. */
+    daysPerYear?: number;
     /** Provenance: how this spec was produced. */
     provenance: {
       method: "llm_extraction" | "manual";

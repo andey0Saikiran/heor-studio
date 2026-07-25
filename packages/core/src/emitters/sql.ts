@@ -1314,10 +1314,10 @@ function build06(ctx: Ctx): string {
 /* 07 - Incidence rate (person-time)                                   */
 /* ------------------------------------------------------------------ */
 
-/** Mean days per year — internally consistent constant for rate/person-years/CI.
- *  NOTE: a common AE-rate convention uses 365 for the AE rate specifically; switching this
- *  one constant to "365" reproduces that convention. */
-const DAYS_PER_YEAR = "365.25";
+/** Default mean days per year — internally consistent (rate/person-years/CI all
+ *  agree). Overridable per study via spec.meta.daysPerYear (e.g. 365 for the HEOR
+ *  Handbook AE-rate convention) so the analyst decides per their requirements. */
+const DEFAULT_DAYS_PER_YEAR = 365.25;
 
 /**
  * Incidence rate / density with prevalent-case washout, person-time censoring,
@@ -1331,7 +1331,10 @@ function build07Incidence(ctx: Ctx, an: IncidenceRateAnalysis): string {
   const out = `${wp}_incidence`;
   const clid = an.outcomeDefinition.codeListId;
   const M = an.rateMultiplier;
-  const Y = DAYS_PER_YEAR;
+  // Always render as a DECIMAL literal (e.g. "365.0") so the rate arithmetic is
+  // numeric — an integer constant would trigger integer division (451 vs 451.55).
+  const yNum = spec.meta.daysPerYear ?? DEFAULT_DAYS_PER_YEAR;
+  const Y = Number.isInteger(yNum) ? yNum.toFixed(1) : String(yNum);
   const maxFu = an.personTimeRule.maxFollowupDays;
   const studyEnd = spec.meta.studyPeriod.end;
 

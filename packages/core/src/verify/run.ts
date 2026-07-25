@@ -37,6 +37,21 @@ export async function verifySpec(spec: StudySpec, opts: EmitOptions): Promise<Ve
   };
 }
 
+/** Regression guard for the analyst-configurable person-time constant
+ *  (spec.meta.daysPerYear). Asserts 365.25 -> 451.86 and 365 -> 451.55, locking
+ *  in the fix for the integer-division bug the config first exposed. */
+export async function verifyDaysPerYearChoice(): Promise<Check[]> {
+  const out: Check[] = [];
+  for (const [days, wantRate] of [[365.25, 451.86], [365, 451.55]] as const) {
+    const spec: StudySpec = { ...GOLD_A_SPEC, meta: { ...GOLD_A_SPEC.meta, daysPerYear: days } };
+    const { db, ok } = await seedAndRun(spec, GOLD_A_OPTS);
+    const rate = ok ? await scalar<number>(db, "SELECT rate_per_1000py::float8 FROM tz_study_incidence WHERE stratum='Overall'") : undefined;
+    const got = rate == null ? NaN : Number(rate);
+    out.push({ name: `daysPerYear=${days} -> rate ${wantRate}`, status: Math.abs(got - wantRate) <= 0.01 ? "pass" : "fail", detail: `got ${got}` });
+  }
+  return out;
+}
+
 /** Full Gold Case A verification: execute + assert the hand-computed spine
  *  ground truth + invariants. (Descriptive-epi value checks activate once the
  *  incidence module lands in Step 4.) */
