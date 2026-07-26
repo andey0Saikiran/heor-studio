@@ -1,6 +1,7 @@
 # HEOR Studio — Status & Roadmap
 
-_Snapshot of what exists vs what's left. Last updated 2026-07-25, at commit `46b5627`._
+_Snapshot of what exists vs what's left. Last updated 2026-07-26 (overnight build;
+see `docs/NIGHT-REPORT-2026-07-26.md`), at commit `c937898`._
 
 Repo: private `github.com/andey0Saikiran/heor-studio` · monorepo (`packages/core`, `packages/web`, `packages/mcp`).
 Everything below is committed and pushed unless noted.
@@ -28,14 +29,22 @@ Everything below is committed and pushed unless noted.
 - `spec.meta.daysPerYear` — analyst-configurable person-time constant (default 365.25).
 - Readiness validation walks the whole spec.
 
-### Code generation (deterministic emitters)
+### Code generation (deterministic emitters) — modular, both languages
 - **Cohort spine — SQL (Postgres + Snowflake) AND SAS:** code/NDC pull → events → index → enrollment pull → stitch → continuous-enrollment → attrition → **Table 1**.
-- **Incidence-rate module — SQL:** ✅ **generated + machine-verified** (washout, person-time clipping at earliest of event/disenroll/study-end/max-follow-up, crude rate, Byar exact-Poisson CI, arm strata).
+- **Per-analysis module registry** (`emitters/modules/` + `registry.ts`): each analysis is one file exposing twin `sql()`/`sas()`; adding one touches no emitter core. Proven zero-behavior-change on refactor (43 emitted files byte-identical).
+- **Descriptive-epi quartet — SAS + SQL, all machine-verified:**
+  - **Incidence rate** ✅ (washout, person-time clipping at earliest of event/disenroll/study-end/max-follow-up, crude rate, Byar exact-Poisson CI, demographic strata; SAS twin + parity).
+  - **Point prevalence** ✅ (cohort-enrolled-on-anchor denom, fixed/index anchor, Wilson CI, strata, zero-denominator NULLs).
+  - **Period prevalence** ✅ (enrolled-anytime overlap denom, event-in-period numerator with no carry-in, Wilson CI, panel-churn warning).
+  - **Cumulative incidence (risk)** ✅ (at-risk denom, first event within horizon, naive risk + Wilson CI; KM/CIF honestly deferred to SAS).
+- **Outcome care-setting filter** applied in both twins (shared `outcomeSettingPlan`), with a planted inpatient negative control.
+- **Honest labeling:** unimplemented options (Clopper-Pearson, Wald, KM, competing risk, minClaims>1, dx-position) → computed-with-closest-method + visible `REVIEW` note in both languages.
 
-### Verification harness (the "machine-verified" engine)
+### Verification harness (the "machine-verified" engine) — **207 passing checks**
 - PGlite (real Postgres-16 wasm) executes the **actual emitted SQL** against a 12-patient synthetic MarketScan fixture with hand-computed ground truth.
-- **Gold Case A passes:** spine 12→11→10 (incl. stitch-success & stitch-fail), incidence 3 cases / 8 at-risk / 2425 person-days / rate 451.86 / Byar CI (90.82, 1320.24).
-- Invariant catalog (attrition monotonic, numerator≤denominator, CI ordering, no negatives, pct bounds) + `daysPerYear` regression guard.
+- **Gold Case A passes:** spine 12→11→10; incidence 3/8/2425/451.86/Byar CI + 6 stratum rows; point prevalence 4/10 + 7 strata; period prevalence 3/10 + 6 strata; cumulative incidence 3/8 = 0.375 Wilson (0.13684, 0.69426) + strata; plus zero-denominator and horizon-bound edge cases.
+- **SAS↔SQL parity harness:** every analysis stamps a `PARITY` record of consumed parameters; the harness deep-compares the two languages' stamps + arithmetic signatures, so a drifting twin fails verification.
+- Invariant catalog (attrition monotonic, numerator≤denominator, CI ordering, no negatives, pct bounds) + `daysPerYear` regression guard + care-setting negative control.
 - `npm run verify -w @heor-studio/core`.
 
 ### MCP server
@@ -54,18 +63,15 @@ Everything below is committed and pushed unless noted.
 
 ## 🔨 NEED TO BUILD
 
-### A. Finish the incidence module (closest to done)
-- **Incidence-rate SAS twin** (SAS stops at Table 1 today) + **SAS↔SQL structural parity** checks.
-- Verify **stratified** output (arm/age/sex rows), not just Overall.
-- **Wire `run_verification` MCP tool to the real harness** (currently returns `not_implemented`; the harness exists — just connect it).
-- **Snowflake** parity verification (PGlite only runs the Postgres twin).
+### A. Finish the incidence module — ✅ DONE
+- SAS twin ✅, SAS↔SQL parity ✅, stratified output ✅, `run_verification` wired ✅.
+- _Remaining:_ **Snowflake** execution parity (PGlite only runs the Postgres twin; the Snowflake SQL is emitted through the Dialect layer but not yet executed in CI).
 
-### B. P1 — descriptive epi + stat engine (10; incidence done)
-- **Prevalence** (point + period) — SQL + SAS. _Cheapest next win — reuses the verified washout/denominator machinery._
-- **Cumulative incidence** (risk; KM-based when censored).
-- **Age/sex standardization** (`PROC STDRATE`; SQL partial).
-- **Calendar trends** (+ panel-churn safeguards).
-- **Deterministic test-selection engine** + comparison tables (chi-square/Fisher, t/Wilcoxon, ANOVA/Kruskal-Wallis, **SMD balance table + Love plot**, McNemar).
+### B. P1 — remaining 3 modules (descriptive-epi quartet ✅ done)
+Each has a real prerequisite — deliberately left for an awake session (see NIGHT-REPORT §"What did NOT finish"). Design drafts in `docs/blueprints/p1/` (UNVERIFIED).
+- **Age/sex standardization** — needs the reference-population weight tables (US 2000 / WHO / ESP) entered as verified constants + composition over a base measure.
+- **Calendar trends** — needs a multi-period fixture extension (fixture indexes all in 2019) + a p-value policy (SQL has no chi-square CDF).
+- **Deterministic test-selection engine + SMD balance table** — needs a **two-exposure-cohort spine extension** first (the single-cohort spine can't produce the drug X-vs-Y partition the SMD gold requires); highest value once the spine supports exposure groups.
 
 ### C. P2 — patterns + economics (21)
 - **HCRU** (PPPM/PPPY by setting), **Cost** (all-cause vs disease-related, CPI adjustment, gamma-log GLM, two-part), **Adherence** (PDC/MPR), **Line of therapy**, **Switching / persistence**.
@@ -99,7 +105,7 @@ Everything below is committed and pushed unless noted.
 - Whether to bundle a MarketScan-shaped synthetic dataset publicly (verification uses one internally).
 
 ## Suggested order when resuming
-1. Wire `run_verification` to the harness (small, high-value).
-2. Incidence SAS twin + stratified verify (finishes the first full module across both languages).
-3. Prevalence (cheapest P1) → cumulative incidence → standardization → trend → stat engine.
+1. ✅ ~~Wire `run_verification`~~ · ✅ ~~Incidence SAS twin + stratified~~ · ✅ ~~Prevalence + cumulative incidence~~ (all done overnight).
+2. **Statistical engine** — first add the two-exposure-cohort spine extension, then the SMD balance table (pinned gold smdAge = −0.63246 is waiting).
+3. **Standardization** (enter + double-check the standard-pop weight tables) → **calendar trend** (multi-year fixture extension + p-value policy).
 4. Then P2 economics (where MarketScan demand concentrates).
