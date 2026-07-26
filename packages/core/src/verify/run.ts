@@ -192,6 +192,30 @@ export async function verifyGoldA(): Promise<VerificationResult> {
       1,
     );
 
+    // ---- period prevalence (executed vs hand-computed Wilson ground truth) ----
+    const perp = EXPECTED.periodPrevalence;
+    eq(
+      `period-prevalence rows = ${perp.p2019.rowCount} (Overall + strata)`,
+      await scalar<number>(db, "SELECT count(*)::int FROM tz_study_periodprev_a_perp_2019"),
+      perp.p2019.rowCount,
+    );
+    checkPp("perp_2019 Overall", await ppRow("tz_study_periodprev_a_perp_2019", "Overall", "Overall"), perp.p2019.overall);
+    for (const [stratifier, levels] of Object.entries(perp.p2019.strata)) {
+      for (const [stratum, want] of Object.entries(levels)) {
+        checkPp(`perp_2019 ${stratifier}/${stratum}`, await ppRow("tz_study_periodprev_a_perp_2019", stratifier, stratum), want);
+      }
+    }
+    // empty period (after every episode) → zero denominator, NULL statistics
+    eq("perp_empty rows = 1", await scalar<number>(db, "SELECT count(*)::int FROM tz_study_periodprev_a_perp_empty"), 1);
+    const perpEmpty = await ppRow("tz_study_periodprev_a_perp_empty", "Overall", "Overall");
+    eq("perp_empty cases = 0", Number(perpEmpty?.patients), perp.empty.patients);
+    eq("perp_empty denominator = 0", Number(perpEmpty?.denominator), perp.empty.denominator);
+    eq(
+      "perp_empty prevalence/CI all NULL",
+      await scalar<number>(db, "SELECT count(*)::int FROM tz_study_periodprev_a_perp_empty WHERE prevalence IS NULL AND ci_low IS NULL AND ci_high IS NULL"),
+      1,
+    );
+
     invariants.push(...(await runInvariants(db, "tz_study")));
   }
 

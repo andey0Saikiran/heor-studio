@@ -226,6 +226,32 @@ export const EXPECTED = {
     // denominator 0; prevalence + both CI bounds NULL.
     eos: { patients: 0, denominator: 0 },
   },
+  /* Period prevalence — Wilson score CI. Denominator = cohort members whose
+   * stitched episode overlaps the period; numerator = a qualifying OUTPATIENT
+   * event DATED inside the period (no carry-in). */
+  periodPrevalence: {
+    // a_perp_2019: 2019 full year. All 10 enrolled. Events dated in 2019
+    // (outpatient): P02,P03,P07 → k=3/n=10. P01/P06 (2018 events) are
+    // denominator-only, pinning the NO-carry-in rule.
+    p2019: {
+      rowCount: 7, // Overall + Male/Female + 4 age bands (35-44,45-54,55-64,65+)
+      overall: { patients: 3, denominator: 10, prevalence: 0.3, pct: 30, ci: [0.10779, 0.60323] as [number, number] },
+      strata: {
+        Sex: {
+          Male:   { patients: 1, denominator: 6, prevalence: 0.16667, pct: 16.67, ci: [0.03005, 0.56351] as [number, number] },
+          Female: { patients: 2, denominator: 4, prevalence: 0.5,     pct: 50,    ci: [0.15004, 0.84996] as [number, number] },
+        },
+        "Age band": {
+          "35-44": { patients: 0, denominator: 1, prevalence: 0,    pct: 0,  ci: [0, 0.79346] as [number, number] },
+          "45-54": { patients: 3, denominator: 4, prevalence: 0.75, pct: 75, ci: [0.30064, 0.95441] as [number, number] },
+          "55-64": { patients: 0, denominator: 4, prevalence: 0,    pct: 0,  ci: [0, 0.4899] as [number, number] },
+          "65+":   { patients: 0, denominator: 1, prevalence: 0,    pct: 0,  ci: [0, 0.79346] as [number, number] },
+        },
+      } as Record<string, Record<string, { patients: number; denominator: number; prevalence: number; pct: number; ci: [number, number] }>>,
+    },
+    // a_perp_empty: 2021 is after every episode end → denominator 0, NULLs.
+    empty: { patients: 0, denominator: 0 },
+  },
 } as const;
 
 /* ---------------- Gold Case A spec (cohort spine; incidence analysis added at Step 4) ---------------- */
@@ -325,6 +351,28 @@ export const GOLD_A_SPEC: StudySpec = {
       anchorDate: { kind: "fixed", date: "2020-12-31" },
       denominatorRule: "enrolled_midperiod",
       ciMethod: "clopper_pearson", // exercises honest labeling: Wilson computed + labeled
+      stratifyBy: [],
+    },
+    // --- period prevalence (2 analyses: calendar-year window + strata, empty-period) ---
+    {
+      id: "a_perp_2019", label: "Period prevalence of AE in 2019", kind: "period_prevalence", enabled: true,
+      outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "outpatient", diagnosisPosition: "any" },
+      caseStatus: "prevalent",
+      prevalencePeriod: { start: "2019-01-01", end: "2019-12-31" },
+      denominatorRule: "enrolled_anytime",
+      ciMethod: "wilson",
+      stratifyBy: [
+        { id: "s_sex", label: "Sex", source: { kind: "demographic", axis: "sex" } },
+        { id: "s_age", label: "Age band", source: { kind: "demographic", axis: "age_band" }, ageBandLowerBounds: [0, 18, 35, 45, 55, 65] },
+      ],
+    },
+    {
+      id: "a_perp_empty", label: "Period prevalence of AE in 2021", kind: "period_prevalence", enabled: true,
+      outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "outpatient", diagnosisPosition: "any" },
+      caseStatus: "prevalent",
+      prevalencePeriod: { start: "2021-01-01", end: "2021-12-31" }, // after every episode end
+      denominatorRule: "enrolled_anytime",
+      ciMethod: "wilson",
       stratifyBy: [],
     },
   ],

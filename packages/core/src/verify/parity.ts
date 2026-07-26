@@ -78,6 +78,20 @@ const SIGNATURES: Record<string, { sql: string[]; sas: string[] }> = {
       "e.svcdate <= a.anchor_date", // on-or-before-anchor case predicate
     ],
   },
+  period_prevalence: {
+    sql: [
+      "1.9208",
+      "3.8416",
+      "0.9604",
+      "e.event_date BETWEEN", // event-dated-in-period case predicate
+    ],
+    sas: [
+      "1.9208",
+      "3.8416",
+      "0.9604",
+      "e.svcdate between", // event-dated-in-period case predicate
+    ],
+  },
 };
 
 /** Emit both languages for the spec and cross-check every analysis twin.

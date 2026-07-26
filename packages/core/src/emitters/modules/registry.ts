@@ -13,10 +13,12 @@ import type { Analysis } from "../../spec/types";
 import type { AnalysisModule } from "./types";
 import { incidenceModule } from "./incidence";
 import { pointPrevalenceModule } from "./point_prevalence";
+import { periodPrevalenceModule } from "./period_prevalence";
 
 export const ANALYSIS_MODULES: Partial<Record<Analysis["kind"], AnalysisModule<never>>> = {
   incidence_rate: incidenceModule as AnalysisModule<never>,
   point_prevalence: pointPrevalenceModule as AnalysisModule<never>,
+  period_prevalence: periodPrevalenceModule as AnalysisModule<never>,
 };
 
 /** analysis kind → PARITY stamp kind, for the verification harness. */

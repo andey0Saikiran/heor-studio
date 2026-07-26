@@ -16,6 +16,7 @@ import type {
   CodeSystem,
   IncidenceRateAnalysis,
   OutcomeDefinition,
+  PeriodPrevalenceAnalysis,
   PointPrevalenceAnalysis,
   RelativeWindow,
   Stratifier,
@@ -300,6 +301,71 @@ export function pointPrevalenceParity(
     denominator: "cohort_enrolled_on_anchor",
     caseRule: "ever_on_or_before_anchor",
     // what the twins actually compute today (limitations make this loud)
+    ciMethod: "wilson",
+    settingFilter: consumed.settingFilter,
+    strata: consumed.strata,
+  };
+}
+
+/* ================================================================== *
+ *  Period prevalence
+ * ================================================================== */
+
+/** The parameter set a period-prevalence twin must consume identically. */
+export interface PeriodPrevalenceParity {
+  id: string;
+  codeListId: string;
+  period: { start: string; end: string };
+  denominatorRule: "enrolled_anytime";
+  /** numerator definition actually computed (event dated inside the period) */
+  numeratorRule: "event_in_period";
+  ciMethod: string; // the method actually computed ("wilson")
+  settingFilter: string;
+  strata: SupportedStratifier[];
+}
+
+/** Spec options the period-prevalence twins do NOT implement yet. */
+export function periodPrevalenceLimitations(
+  an: PeriodPrevalenceAnalysis,
+  listSystem: CodeSystem
+): string[] {
+  const out: string[] = [];
+  const od = an.outcomeDefinition;
+  if (od.minClaims > 1)
+    out.push(`outcome minClaims=${od.minClaims} is NOT yet enforced - any single qualifying claim in the period counts as a case`);
+  const settingNote = outcomeSettingPlan(od, listSystem).note;
+  if (settingNote) out.push(settingNote);
+  if (od.diagnosisPosition !== "any")
+    out.push(`diagnosisPosition="primary" is NOT yet applied - any-position diagnoses count (the events spine does not record claim position yet)`);
+  if (an.ciMethod === "clopper_pearson")
+    out.push(`ciMethod "clopper_pearson" is NOT implemented (needs an exact beta inverse, SAS-only: proc freq ... / binomial(cl=clopperpearson)) - the Wilson score interval is produced and labeled wilson`);
+  if (an.ciMethod === "wald")
+    out.push(`ciMethod "wald" is NOT implemented (poor small-sample coverage; Newcombe 1998) - the Wilson score interval is produced and labeled wilson`);
+  for (const s of splitStratifiers(an.stratifyBy).unsupported)
+    out.push(`stratifier "${s.id}" (${s.source.kind}-sourced) is NOT yet emitted - demographic axes only for now`);
+  if (an.referenceStratum)
+    out.push(`referenceStratum "${an.referenceStratum}" is NOT used - no prevalence-ratio column is produced yet`);
+  return out;
+}
+
+/** Method notes ALWAYS emitted (describe what IS computed). */
+export const PERIOD_PREVALENCE_METHOD_NOTES = [
+  `denominator is COHORT-based (final analysis cohort enrolled at ANY time in the period), not a population denominator - MarketScan carries no general-population denominator and the spine pulls enrollment for indexed members only`,
+  `PANEL CHURN: partial-period enrollees enter the denominator with less than full observation, so the estimate is conservative (biased down) versus a fully-enrolled denominator, and it moves whenever the denominator rule moves`,
+  `numerator = a qualifying event DATED inside the period; there is NO carry-in (a member whose only qualifying claims predate the period is not counted), so this undercounts true clinical prevalence of chronic disease`,
+];
+
+/** The parity record for a period-prevalence twin, from consumed values. */
+export function periodPrevalenceParity(
+  an: PeriodPrevalenceAnalysis,
+  consumed: { settingFilter: string; strata: SupportedStratifier[] }
+): PeriodPrevalenceParity {
+  return {
+    id: an.id,
+    codeListId: an.outcomeDefinition.codeListId,
+    period: { start: an.prevalencePeriod.start, end: an.prevalencePeriod.end },
+    denominatorRule: "enrolled_anytime",
+    numeratorRule: "event_in_period",
     ciMethod: "wilson",
     settingFilter: consumed.settingFilter,
     strata: consumed.strata,
