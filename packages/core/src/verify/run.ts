@@ -7,6 +7,7 @@
  */
 import { seedAndRun, scalar, rows } from "./engine";
 import { runInvariants, type InvariantResult } from "./invariants";
+import { sasSqlParityChecks } from "./parity";
 import { GOLD_A_SPEC, GOLD_A_OPTS, EXPECTED } from "./fixture";
 import type { StudySpec, EmitOptions } from "../index";
 
@@ -28,11 +29,12 @@ export interface VerificationResult {
 export async function verifySpec(spec: StudySpec, opts: EmitOptions): Promise<VerificationResult> {
   const { db, steps, ok } = await seedAndRun(spec, opts);
   const invariants = ok ? await runInvariants(db, opts.tag.toLowerCase()) : [];
-  const anyInvariantFail = invariants.some((i) => i.status === "fail");
+  const checks = sasSqlParityChecks(spec, opts);
+  const anyFail = invariants.some((i) => i.status === "fail") || checks.some((c) => c.status === "fail");
   return {
-    status: ok && !anyInvariantFail ? "passed" : "failed",
+    status: ok && !anyFail ? "passed" : "failed",
     execution: steps,
-    checks: [],
+    checks,
     invariants,
   };
 }
@@ -89,6 +91,10 @@ export async function verifyGoldA(): Promise<VerificationResult> {
 
     invariants.push(...(await runInvariants(db, "tz_study")));
   }
+
+  // SAS↔SQL twin parity: the SAS twin inherits this run's ground truth only if
+  // it consumed identical parameters and carries the same arithmetic.
+  checks.push(...sasSqlParityChecks(GOLD_A_SPEC, GOLD_A_OPTS));
 
   const anyFail = !ok || checks.some((c) => c.status === "fail") || invariants.some((i) => i.status === "fail");
   return { status: anyFail ? "failed" : "passed", execution: steps, checks, invariants };

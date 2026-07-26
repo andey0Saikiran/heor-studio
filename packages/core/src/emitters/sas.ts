@@ -21,10 +21,17 @@ import type {
   CareSetting,
   CodeList,
   Criterion,
+  IncidenceRateAnalysis,
   RelativeWindow,
   StudySpec,
 } from "../spec/types";
 import type { EmitOptions, GeneratedFile, SasEmitter } from "./types";
+import {
+  incidenceLimitations,
+  incidenceParity,
+  parityStamp,
+  renderDaysPerYear,
+} from "./parity";
 
 /* ================================================================== *
  *  small utilities
@@ -415,6 +422,9 @@ interface Ctx {
   indexList: CodeList;
   lettersUsed: string[];
   finalCohort: string;
+  /** the person-time constant literal 00_setup embeds in %let days_per_year —
+   *  analysis programs stamp exactly this value into their parity headers */
+  daysPerYearLit: string;
 }
 
 function buildCtx(spec: StudySpec, opts: EmitOptions): Ctx {
@@ -465,6 +475,7 @@ function buildCtx(spec: StudySpec, opts: EmitOptions): Ctx {
     indexList,
     lettersUsed,
     finalCohort: "",
+    daysPerYearLit: renderDaysPerYear(spec),
   };
   ctx.finalCohort =
     spec.criteria.length > 0 ? ctx.tbl(`060_coh${spec.criteria.length}`) : ctx.tbl("030_index");
@@ -495,6 +506,10 @@ function setupProgram(ctx: Ctx): GeneratedFile {
     `%let study_end   = ${sasDate(spec.meta.studyPeriod.end)};`,
     `%let start_year  = ${yearOf(spec.meta.studyPeriod.start)};`,
     `%let end_year    = ${yearOf(spec.meta.studyPeriod.end)};`,
+    ``,
+    `/* person-time constant for rate denominators (spec.meta.daysPerYear -`,
+    `   an analyst choice; 365.25 default, 365 = AE-rate convention AE convention) */`,
+    `%let days_per_year = ${ctx.daysPerYearLit};`,
     ``,
     `/*-------------------- index event period ------------------------------------*/`,
     `%let index_start = ${sasDate(spec.indexEvent.indexPeriod.start)};`,
@@ -1652,6 +1667,227 @@ function baselineProgram(ctx: Ctx): GeneratedFile | null {
 }
 
 /* ================================================================== *
+ *  080_incidence.sas (one program per enabled incidence_rate analysis)
+ * ================================================================== */
+
+function describeWin(w: RelativeWindow): string {
+  const s = w.start === "anytime_before" ? "anytime before" : `day ${w.start}`;
+  const e = w.end === "anytime_after" ? "anytime after" : `day ${w.end}`;
+  return `${s} .. ${e} relative to index (${w.includesIndex ? "includes" : "excludes"} the index date)`;
+}
+
+/**
+ * SAS twin of the SQL build07Incidence: prevalent-case washout, at-risk
+ * denominator, first outcome strictly after index, person-time censored at the
+ * earliest of outcome / episode end / study end / max follow-up, and the SAME
+ * Byar exact-Poisson closed form — so both languages produce identical numbers
+ * from the same spec. SAS has no free runtime in the harness; correctness is
+ * inherited from the machine-verified SQL twin via the PARITY header contract
+ * (see emitters/parity.ts) plus matching arithmetic signatures.
+ */
+function incidencePrograms(ctx: Ctx): GeneratedFile[] {
+  const { spec } = ctx;
+  const analyses = spec.analyses.filter(
+    (a): a is IncidenceRateAnalysis => a.kind === "incidence_rate" && a.enabled
+  );
+
+  return analyses.map((an, i) => {
+    const num = String((8 + i) * 10).padStart(3, "0"); // 080, 090, 100, ...
+    const suffix = analyses.length > 1 ? `_${sasName(an.id).toLowerCase()}` : "";
+    const outT = ctx.tbl(`${num}_incidence${suffix}`);
+    const cohT = ctx.finalCohort;
+    const evT = ctx.evOf(an.outcomeDefinition.codeListId);
+    const epiT = ctx.tbl("050_epi");
+    const M = an.rateMultiplier;
+    const cens = an.personTimeRule.censorAt;
+    const maxFu = an.personTimeRule.maxFollowupDays;
+
+    // administrative-censoring terms — mirrors the SQL twin exactly (death
+    // omitted: MarketScan mortality is unascertainable — BR-LIM-002)
+    const terms: string[] = [];
+    if (cens.includes("disenrollment")) terms.push("ep.dtend");
+    if (cens.includes("study_end")) terms.push("&study_end.");
+    if (cens.includes("max_followup") && maxFu != null) terms.push(`a.index_date + ${maxFu}`);
+    if (terms.length === 0) terms.push("&study_end."); // always bound follow-up
+    const adminExpr = terms.length === 1 ? terms[0] : `min(${terms.join(", ")})`;
+    const censorsAtOutcome = cens.includes("outcome");
+    const censorWords = [
+      ...(censorsAtOutcome ? ["first outcome"] : []),
+      ...(cens.includes("disenrollment") ? ["disenrollment (episode end)"] : []),
+      ...(cens.includes("study_end") || terms.includes("&study_end.") ? ["study end"] : []),
+      ...(cens.includes("max_followup") && maxFu != null ? [`index + ${maxFu}d max follow-up`] : []),
+    ].join(" / ");
+
+    const washLines = windowConds(an.washout, "e");
+    const limits = incidenceLimitations(an);
+    const label = an.label.replace(/"/g, "'");
+
+    const lines: string[] = [
+      ...header(spec, `${num}_incidence${suffix}.sas`, [
+        `Incidence rate (person-time) for "${an.label}":`,
+        `prevalent-case washout, at-risk denominator, follow-up censored`,
+        `at the earliest of ${censorWords},`,
+        `crude rate per ${M} person-years with a Byar exact-Poisson CI.`,
+        `Twin of the machine-verified SQL 07_incidence; keep both in sync.`,
+      ]),
+      // machine-readable twin contract: the harness compares this stamp against
+      // the SQL twin's — built from the values THIS program consumed
+      `/* ${parityStamp("incidence", incidenceParity(an, { daysPerYear: ctx.daysPerYearLit, censorTerms: cens }))} */`,
+      ``,
+    ];
+
+    if (limits.length > 0) {
+      lines.push(
+        `/* REVIEW - spec options this program does not implement yet:`,
+        ...limits.map((l) => `   * ${cmt(l)}`),
+        `*/`,
+        ``
+      );
+    }
+
+    lines.push(
+      ...INCLUDE_SETUP,
+      `proc datasets lib=tz nolist nowarn;`,
+      `  delete ${outT.replace("tz.", "")};`,
+      `quit;`,
+      ``,
+      `/*----------------------------------------------------------------------------`,
+      `  Prevalent-case washout: any qualifying outcome event inside the washout`,
+      `  window (${cmt(describeWin(an.washout))})`,
+      `  marks the patient PREVALENT - excluded so only new-onset cases count.`,
+      `----------------------------------------------------------------------------*/`,
+      `proc sql;`,
+      `  create table work._${num}_prev as`,
+      `  select distinct a.enrolid`,
+      `  from ${cohT} as a`,
+      `  inner join ${evT} as e`,
+      `    on e.enrolid = a.enrolid`,
+      `  where 1 = 1`,
+      ...washLines.map((l, idx) => `    ${l}${idx === washLines.length - 1 ? ";" : ""}`),
+      ...(washLines.length === 0 ? [`  ;   /* washout window is unbounded - any prior event counts */`] : []),
+      `quit;`,
+      ``,
+      `title "Washout: prevalent patients excluded (${label})";`,
+      `proc sql;`,
+      `  select count(distinct enrolid) as prevalent_pat`,
+      `  from work._${num}_prev;`,
+      `quit;`,
+      ``,
+      `/*-------------------- at-risk denominator ----------------------------------*/`,
+      `proc sql;`,
+      `  create table work._${num}_atrisk as`,
+      `  select a.*`,
+      `  from ${cohT} as a`,
+      `  where a.enrolid not in (select enrolid from work._${num}_prev);`,
+      `quit;`,
+      ``,
+      ...levelCheck(`work._${num}_atrisk`, "at-risk cohort"),
+      ``,
+      `/*-------------------- first outcome strictly after index -------------------*/`,
+      `proc sql;`,
+      `  create table work._${num}_first_fu as`,
+      `  select a.enrolid,`,
+      `         min(e.svcdate) as fu_date format=date9.`,
+      `  from work._${num}_atrisk as a`,
+      `  inner join ${evT} as e`,
+      `    on  e.enrolid = a.enrolid`,
+      `    and e.svcdate > a.index_date`,
+      `  group by a.enrolid;`,
+      `quit;`,
+      ``,
+      `/*----------------------------------------------------------------------------`,
+      `  Person-time: administrative censor = earliest of`,
+      ...terms.map((t) => `    - ${cmt(t)}`),
+      `  taken on the stitched enrollment episode covering the index date.`,
+      `----------------------------------------------------------------------------*/`,
+      `proc sql;`,
+      `  create table work._${num}_pt as`,
+      `  select a.enrolid, a.index_date,`,
+      `         ${adminExpr} as admin_censor format=date9.,`,
+      `         b.fu_date`,
+      `  from work._${num}_atrisk as a`,
+      `  inner join ${epiT} as ep`,
+      `    on  ep.enrolid = a.enrolid`,
+      `    and a.index_date between ep.dtstart and ep.dtend`,
+      `  left join work._${num}_first_fu as b`,
+      `    on b.enrolid = a.enrolid;`,
+      `quit;`,
+      ``,
+      `data work._${num}_pt2;`,
+      `  set work._${num}_pt;`,
+      `  /* a case = first outcome on or before the administrative censor date */`,
+      `  is_case = (fu_date ne . and fu_date <= admin_censor);`,
+      ...(censorsAtOutcome
+        ? [`  /* follow-up stops at the earliest of outcome and admin censoring */`,
+           `  censor_date = min(coalesce(fu_date, '31DEC9999'd), admin_censor);`]
+        : [`  /* follow-up runs to the admin censor date (no censoring at outcome) */`,
+           `  censor_date = admin_censor;`]),
+      `  person_days = censor_date - index_date;`,
+      `  format censor_date date9.;`,
+      `run;`,
+      ``,
+      ...levelCheck(`work._${num}_pt2`, "person-time rows", [
+        `sum(is_case) as cases`,
+        `sum(person_days) as person_days`,
+      ]),
+      ``,
+      `/*----------------------------------------------------------------------------`,
+      `  Crude rate per ${M} person-years + Byar exact-Poisson CI - the SAME closed`,
+      `  form as the SQL twin (Ulm AJE 1990;131:373), so both languages agree to`,
+      `  the last rounded digit:`,
+      `    low  = (1 - 1/(9x) - 1.96/(3*sqrt(x)))^3 * x          (0 when x = 0)`,
+      `    high = (1 - 1/(9(x+1)) + 1.96/(3*sqrt(x+1)))^3 * (x+1)`,
+      `----------------------------------------------------------------------------*/`,
+      `proc sql;`,
+      `  create table work._${num}_summ as`,
+      `  select count(*) as denominator,`,
+      `         sum(is_case) as patients,`,
+      `         sum(person_days) as person_days`,
+      `  from work._${num}_pt2;`,
+      `quit;`,
+      ``,
+      `data ${outT};`,
+      `  set work._${num}_summ;`,
+      `  length measure $20 stratum $40 ci_method $16;`,
+      `  measure   = 'incidence';`,
+      `  stratum   = 'Overall';`,
+      `  /* labeled with the method actually computed, never the merely-requested one */`,
+      `  ci_method = 'poisson_byar';`,
+      `  person_years = round(person_days / &days_per_year., 0.0001);`,
+      `  if person_days > 0 then do;`,
+      `    rate_per_1000py = round(patients * ${M} * &days_per_year. / person_days, 0.01);`,
+      `    if patients = 0 then _byar_low = 0;`,
+      `    else _byar_low = ((1 - 1/(9*patients) - 1.96/(3*sqrt(patients)))**3) * patients;`,
+      `    _byar_high = ((1 - 1/(9*(patients+1)) + 1.96/(3*sqrt(patients+1)))**3) * (patients+1);`,
+      `    ci_low  = round(_byar_low  * ${M} * &days_per_year. / person_days, 0.01);`,
+      `    ci_high = round(_byar_high * ${M} * &days_per_year. / person_days, 0.01);`,
+      `  end;`,
+      `  else do;`,
+      `    rate_per_1000py = .;`,
+      `    ci_low  = .;`,
+      `    ci_high = .;`,
+      `  end;`,
+      `  drop _byar_low _byar_high;`,
+      `run;`,
+      ``,
+      `title "Incidence rate per ${M} person-years: ${label}";`,
+      `proc print data=${outT} noobs;`,
+      `  var measure stratum patients denominator person_days person_years`,
+      `      rate_per_1000py ci_low ci_high ci_method;`,
+      `run;`,
+      ``
+    );
+
+    return {
+      path: `sas/${num}_incidence${suffix}.sas`,
+      language: "sas" as const,
+      title: `${num} Incidence rate${suffix ? ` (${an.label})` : ""}`,
+      content: lines.join("\n"),
+    };
+  });
+}
+
+/* ================================================================== *
  *  entry point
  * ================================================================== */
 
@@ -1671,6 +1907,7 @@ export const emitSas: SasEmitter = (spec: StudySpec, opts: EmitOptions): Generat
   if (attrition) files.push(attrition);
   const baseline = baselineProgram(ctx);
   if (baseline) files.push(baseline);
+  files.push(...incidencePrograms(ctx));
 
   return files;
 };

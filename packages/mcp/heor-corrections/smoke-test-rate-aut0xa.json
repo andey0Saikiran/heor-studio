@@ -1,0 +1,12 @@
+{
+  "id": "smoke-test-rate-aut0xa",
+  "createdAt": "2026-07-26T05:38:01.302Z",
+  "target": {
+    "kind": "statistic",
+    "ref": "smoke-test-rate"
+  },
+  "claim": "rate looks off",
+  "reason": "smoke-test reason",
+  "classification": "unclassified",
+  "status": "open"
+}

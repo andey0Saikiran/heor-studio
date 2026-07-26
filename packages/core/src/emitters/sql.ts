@@ -41,6 +41,12 @@ import type {
   SqlDialect,
   SqlEmitter,
 } from "./types";
+import {
+  incidenceLimitations,
+  incidenceParity,
+  parityStamp,
+  renderDaysPerYear,
+} from "./parity";
 
 /* ------------------------------------------------------------------ */
 /* Small utilities                                                     */
@@ -1314,11 +1320,6 @@ function build06(ctx: Ctx): string {
 /* 07 - Incidence rate (person-time)                                   */
 /* ------------------------------------------------------------------ */
 
-/** Default mean days per year — internally consistent (rate/person-years/CI all
- *  agree). Overridable per study via spec.meta.daysPerYear (e.g. 365 for the HEOR
- *  Handbook AE-rate convention) so the analyst decides per their requirements. */
-const DEFAULT_DAYS_PER_YEAR = 365.25;
-
 /**
  * Incidence rate / density with prevalent-case washout, person-time censoring,
  * and a Byar exact-Poisson CI computed closed-form in SQL. Reads the cohort,
@@ -1326,15 +1327,14 @@ const DEFAULT_DAYS_PER_YEAR = 365.25;
  * the synthetic fixture (verify/proto_incidence.ts): 3 cases / 8 at-risk /
  * 2425 person-days / 451.86 per 1,000 PY / Byar CI (90.82, 1320.24).
  */
-function build07Incidence(ctx: Ctx, an: IncidenceRateAnalysis): string {
+function build07Incidence(ctx: Ctx, an: IncidenceRateAnalysis, suffix = ""): string {
   const { d, wp, spec } = ctx;
-  const out = `${wp}_incidence`;
+  const out = `${wp}_incidence${suffix}`;
   const clid = an.outcomeDefinition.codeListId;
   const M = an.rateMultiplier;
-  // Always render as a DECIMAL literal (e.g. "365.0") so the rate arithmetic is
+  // Rendered as a DECIMAL literal (e.g. "365.0") so the rate arithmetic is
   // numeric — an integer constant would trigger integer division (451 vs 451.55).
-  const yNum = spec.meta.daysPerYear ?? DEFAULT_DAYS_PER_YEAR;
-  const Y = Number.isInteger(yNum) ? yNum.toFixed(1) : String(yNum);
+  const Y = renderDaysPerYear(spec);
   const maxFu = an.personTimeRule.maxFollowupDays;
   const studyEnd = spec.meta.studyPeriod.end;
 
@@ -1360,6 +1360,14 @@ function build07Incidence(ctx: Ctx, an: IncidenceRateAnalysis): string {
   const scale = `* ${M} * ${Y} / NULLIF(person_days, 0)`;
 
   const L: string[] = [];
+  // machine-readable twin contract: the harness compares this stamp against the
+  // SAS twin's — built from the values THIS builder consumed (see parity.ts)
+  L.push(`-- ${parityStamp("incidence", incidenceParity(an, { daysPerYear: Y, censorTerms: cens }))}`);
+  const limits = incidenceLimitations(an);
+  if (limits.length > 0) {
+    L.push(`-- REVIEW - spec options this program does not implement yet:`);
+    for (const lim of limits) L.push(`--   * ${lim}`);
+  }
   L.push(d.createTableAs(out));
   L.push(`WITH cohort AS (SELECT enrolid, index_date FROM ${wp}_cohort),`);
   L.push(`ae AS (SELECT enrolid, event_date FROM ${wp}_events WHERE code_list_id = '${q(clid)}'),`);
@@ -1396,7 +1404,9 @@ function build07Incidence(ctx: Ctx, an: IncidenceRateAnalysis): string {
   L.push(`       ${d.roundN(`patients * ${M} * ${Y} / NULLIF(person_days, 0)`, 2)} AS rate_per_1000py,`);
   L.push(`       ${d.roundN(`${byarLow} ${scale}`, 2)} AS ci_low,`);
   L.push(`       ${d.roundN(`${byarHigh} ${scale}`, 2)} AS ci_high,`);
-  L.push(`       '${an.ciMethod}' AS ci_method`);
+  // labeled with the method actually computed (Byar), never the merely-requested
+  // one — a mislabeled statistic is worse than a visibly-substituted one
+  L.push(`       'poisson_byar' AS ci_method`);
   L.push(`FROM summ;`);
   L.push("");
   L.push(`-- REVIEW: incidence rate per ${M} person-years.`);
@@ -1530,7 +1540,9 @@ export const emitSql: SqlEmitter = (spec, dialect, opts) => {
         "person-time incidence rate with washout + Byar CI",
         [],
         [`Analysis: ${oneLine(an.label)} (id ${an.id}); outcome code list "${an.outcomeDefinition.codeListId}".`],
-        build07Incidence(ctx, an)
+        // suffix flows into the output table name too, so multiple incidence
+        // analyses never clobber each other's {wp}_incidence table
+        build07Incidence(ctx, an, suffix)
       )
     );
   });
