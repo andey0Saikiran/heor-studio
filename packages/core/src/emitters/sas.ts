@@ -30,6 +30,7 @@ import {
   cmt,
   header,
   levelCheck,
+  sasDate,
   sasName,
   sq,
   windowConds,
@@ -41,14 +42,6 @@ import { moduleAnalyses } from "./modules/registry";
 /* ================================================================== *
  *  small utilities
  * ================================================================== */
-
-const MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
-
-/** ISO date → SAS date literal, e.g. "2016-01-01" → '01JAN2016'd */
-function sasDate(iso: string): string {
-  const [y, m, d] = iso.split("-").map(Number);
-  return `'${String(d).padStart(2, "0")}${MONTHS[(m ?? 1) - 1]}${y}'d`;
-}
 
 function yearOf(iso: string): number {
   return Number(iso.slice(0, 4));

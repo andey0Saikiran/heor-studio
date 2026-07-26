@@ -149,6 +149,49 @@ export async function verifyGoldA(): Promise<VerificationResult> {
       }
     }
 
+    // ---- point prevalence (executed vs hand-computed Wilson ground truth) ----
+    const pp = EXPECTED.pointPrevalence;
+    eq(
+      `point-prevalence rows = ${pp.main.rowCount} (Overall + strata)`,
+      await scalar<number>(db, "SELECT count(*)::int FROM tz_study_pointprev_a_pp_main"),
+      pp.main.rowCount,
+    );
+    const ppRow = async (table: string, stratifier: string, stratum: string) =>
+      (
+        await rows<{ patients: number; denominator: number; prevalence: number; prevalence_pct: number; ci_low: number; ci_high: number }>(
+          db,
+          `SELECT patients, denominator, prevalence::float8, prevalence_pct::float8, ci_low::float8, ci_high::float8
+           FROM ${table} WHERE stratifier = '${stratifier}' AND stratum = '${stratum}'`,
+        )
+      )[0];
+    const checkPp = (tag: string, r: Awaited<ReturnType<typeof ppRow>>, w: { patients: number; denominator: number; prevalence: number; pct: number; ci: [number, number] }) => {
+      if (!r) { checks.push({ name: tag, status: "fail", detail: "row missing" }); return; }
+      eq(`${tag}: cases = ${w.patients}`, Number(r.patients), w.patients);
+      eq(`${tag}: denominator = ${w.denominator}`, Number(r.denominator), w.denominator);
+      approx(`${tag}: prevalence = ${w.prevalence}`, Number(r.prevalence), w.prevalence, 0.00001);
+      approx(`${tag}: pct = ${w.pct}`, Number(r.prevalence_pct), w.pct, 0.01);
+      approx(`${tag}: Wilson CI low = ${w.ci[0]}`, Number(r.ci_low), w.ci[0], 0.00001);
+      approx(`${tag}: Wilson CI high = ${w.ci[1]}`, Number(r.ci_high), w.ci[1], 0.00001);
+    };
+    checkPp("pp_main Overall", await ppRow("tz_study_pointprev_a_pp_main", "Overall", "Overall"), pp.main.overall);
+    for (const [stratifier, levels] of Object.entries(pp.main.strata)) {
+      for (const [stratum, want] of Object.entries(levels)) {
+        checkPp(`pp_main ${stratifier}/${stratum}`, await ppRow("tz_study_pointprev_a_pp_main", stratifier, stratum), want);
+      }
+    }
+    // index anchor reproduces the frozen baseline prevalence (0.2) via a distinct path
+    checkPp("pp_idx Overall", await ppRow("tz_study_pointprev_a_pp_idx", "Overall", "Overall"), pp.idx);
+    // end-of-study anchor: after every episode → zero denominator, NULL statistics
+    eq("pp_eos rows = 1", await scalar<number>(db, "SELECT count(*)::int FROM tz_study_pointprev_a_pp_eos"), 1);
+    const eos = await ppRow("tz_study_pointprev_a_pp_eos", "Overall", "Overall");
+    eq("pp_eos cases = 0", Number(eos?.patients), pp.eos.patients);
+    eq("pp_eos denominator = 0", Number(eos?.denominator), pp.eos.denominator);
+    eq(
+      "pp_eos prevalence/CI all NULL",
+      await scalar<number>(db, "SELECT count(*)::int FROM tz_study_pointprev_a_pp_eos WHERE prevalence IS NULL AND ci_low IS NULL AND ci_high IS NULL"),
+      1,
+    );
+
     invariants.push(...(await runInvariants(db, "tz_study")));
   }
 

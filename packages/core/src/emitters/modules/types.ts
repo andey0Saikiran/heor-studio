@@ -28,6 +28,8 @@ export type { SqlCtx, SasCtx };
 export interface SqlModuleFile {
   /** file slug, e.g. "incidence" (suffix already applied by the module) */
   slug: string;
+  /** BARE title (no file number) — the emitter prepends the NN so the displayed
+   *  title always matches the actual NN_slug filename */
   title: string;
   subtitle: string;
   /** extra CONFIGURE header lines */

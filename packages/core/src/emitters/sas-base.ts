@@ -12,6 +12,14 @@ import type { EmitOptions } from "./types";
  *  small utilities
  * ------------------------------------------------------------------ */
 
+const MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+
+/** ISO date → SAS date literal, e.g. "2016-01-01" → '01JAN2016'd */
+export function sasDate(iso: string): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  return `'${String(d).padStart(2, "0")}${MONTHS[(m ?? 1) - 1]}${y}'d`;
+}
+
 /** make an arbitrary id safe as (part of) a SAS name */
 export function sasName(s: string): string {
   return s.replace(/[^A-Za-z0-9_]/g, "_");

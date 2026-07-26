@@ -193,6 +193,39 @@ export const EXPECTED = {
     rate: 689.48, // 4 * 1000 * 365.25 / 2119
     ci: [185.49, 1765.21] as [number, number],
   },
+  /* Point prevalence — Wilson score CI (z=1.96), hand-derived on the frozen
+   * fixture. setting "outpatient" is APPLIED, so P05's inpatient AE is excluded
+   * (the numerator uses only the 5 outpatient E119 events). */
+  pointPrevalence: {
+    // a_pp_main: fixed anchor 2019-07-20. Denominator = 10 (whole cohort enrolled).
+    // Cases on-or-before D: P01,P02,P03,P06 (P03's event lands exactly ON D);
+    // P07's event 2019-10-28 is after D. k=4/n=10.
+    main: {
+      rowCount: 8, // Overall + Male/Female + 4 age bands (0-17,18-34 empty→absent) + Anchor year 2019
+      overall: { patients: 4, denominator: 10, prevalence: 0.4, pct: 40, ci: [0.16818, 0.68733] as [number, number] },
+      strata: {
+        Sex: {
+          Male:   { patients: 3, denominator: 6, prevalence: 0.5,  pct: 50, ci: [0.18761, 0.81239] as [number, number] },
+          Female: { patients: 1, denominator: 4, prevalence: 0.25, pct: 25, ci: [0.04559, 0.69936] as [number, number] },
+        },
+        "Age band": {
+          "35-44": { patients: 1, denominator: 1, prevalence: 1,    pct: 100, ci: [0.20654, 1] as [number, number] },
+          "45-54": { patients: 3, denominator: 4, prevalence: 0.75, pct: 75,  ci: [0.30064, 0.95441] as [number, number] },
+          "55-64": { patients: 0, denominator: 4, prevalence: 0,    pct: 0,   ci: [0, 0.4899] as [number, number] },
+          "65+":   { patients: 0, denominator: 1, prevalence: 0,    pct: 0,   ci: [0, 0.79346] as [number, number] },
+        },
+        "Anchor year": {
+          "2019": { patients: 4, denominator: 10, prevalence: 0.4, pct: 40, ci: [0.16818, 0.68733] as [number, number] },
+        },
+      } as Record<string, Record<string, { patients: number; denominator: number; prevalence: number; pct: number; ci: [number, number] }>>,
+    },
+    // a_pp_idx: anchor = each subject's index (2019-01-01). Cases before index:
+    // P01,P06 only → k=2/n=10, reproducing baselinePrevalence=0.2 independently.
+    idx: { patients: 2, denominator: 10, prevalence: 0.2, pct: 20, ci: [0.05668, 0.50984] as [number, number] },
+    // a_pp_eos: anchor 2020-12-31 is after every episode end (2020-06-30) →
+    // denominator 0; prevalence + both CI bounds NULL.
+    eos: { patients: 0, denominator: 0 },
+  },
 } as const;
 
 /* ---------------- Gold Case A spec (cohort spine; incidence analysis added at Step 4) ---------------- */
@@ -261,6 +294,38 @@ export const GOLD_A_SPEC: StudySpec = {
         { id: "s_age", label: "Age band", source: { kind: "demographic", axis: "age_band" }, ageBandLowerBounds: [0, 18, 35, 45, 55, 65] },
         { id: "s_year", label: "Index year", source: { kind: "demographic", axis: "year" } },
       ],
+    },
+    // --- point prevalence (3 analyses: fixed-anchor + strata, index-anchor, EOS zero-denominator) ---
+    {
+      id: "a_pp_main", label: "Point prevalence of AE on 2019-07-20", kind: "point_prevalence", enabled: true,
+      outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "outpatient", diagnosisPosition: "any" },
+      caseStatus: "prevalent",
+      anchorDate: { kind: "fixed", date: "2019-07-20" },
+      denominatorRule: "enrolled_midperiod",
+      ciMethod: "wilson",
+      stratifyBy: [
+        { id: "s_sex", label: "Sex", source: { kind: "demographic", axis: "sex" } },
+        { id: "s_age", label: "Age band", source: { kind: "demographic", axis: "age_band" }, ageBandLowerBounds: [0, 18, 35, 45, 55, 65] },
+        { id: "s_ppyear", label: "Anchor year", source: { kind: "demographic", axis: "year" } },
+      ],
+    },
+    {
+      id: "a_pp_idx", label: "Point prevalence of AE at index", kind: "point_prevalence", enabled: true,
+      outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "outpatient", diagnosisPosition: "any" },
+      caseStatus: "prevalent",
+      anchorDate: { kind: "index" },
+      denominatorRule: "enrolled_midperiod",
+      ciMethod: "wilson",
+      stratifyBy: [],
+    },
+    {
+      id: "a_pp_eos", label: "Point prevalence of AE on 2020-12-31", kind: "point_prevalence", enabled: true,
+      outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "outpatient", diagnosisPosition: "any" },
+      caseStatus: "prevalent",
+      anchorDate: { kind: "fixed", date: "2020-12-31" },
+      denominatorRule: "enrolled_midperiod",
+      ciMethod: "clopper_pearson", // exercises honest labeling: Wilson computed + labeled
+      stratifyBy: [],
     },
   ],
 };

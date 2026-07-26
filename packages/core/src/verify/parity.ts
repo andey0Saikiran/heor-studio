@@ -64,6 +64,20 @@ const SIGNATURES: Record<string, { sql: string[]; sas: string[] }> = {
       "**3",            // cubing — SAS power operator
     ],
   },
+  point_prevalence: {
+    sql: [
+      "1.9208", // z^2/2
+      "3.8416", // z^2
+      "0.9604", // z^2/4
+      "e.event_date <= den.anchor_date", // on-or-before-anchor case predicate
+    ],
+    sas: [
+      "1.9208",
+      "3.8416",
+      "0.9604",
+      "e.svcdate <= a.anchor_date", // on-or-before-anchor case predicate
+    ],
+  },
 };
 
 /** Emit both languages for the spec and cross-check every analysis twin.
@@ -109,7 +123,7 @@ export function sasSqlParityChecks(spec: StudySpec, opts: EmitOptions): Check[] 
         status: missSql.length === 0 && missSas.length === 0 ? "pass" : "fail",
         detail:
           missSql.length === 0 && missSas.length === 0
-            ? "Byar closed form + strictly-after-index predicate present in both"
+            ? `all ${sig.sql.length + sig.sas.length} arithmetic/predicate signatures present in both twins`
             : `missing in sql: [${missSql.join(" | ")}]; missing in sas: [${missSas.join(" | ")}]`,
       });
     }

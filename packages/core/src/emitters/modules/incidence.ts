@@ -207,7 +207,7 @@ function sqlIncidence(ctx: SqlCtx, an: IncidenceRateAnalysis, suffix: string): S
 
   return {
     slug: `incidence${suffix}`,
-    title: `07 Incidence rate${suffix ? ` (${an.label})` : ""}`,
+    title: `Incidence rate${suffix ? ` (${an.label})` : ""}`,
     subtitle: "person-time incidence rate with washout + Byar CI",
     extra: [`Analysis: ${oneLine(an.label)} (id ${an.id}); outcome code list "${an.outcomeDefinition.codeListId}".`],
     body: L.join("\n"),

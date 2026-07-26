@@ -16,6 +16,7 @@ import type {
   CodeSystem,
   IncidenceRateAnalysis,
   OutcomeDefinition,
+  PointPrevalenceAnalysis,
   RelativeWindow,
   Stratifier,
 } from "../spec/types";
@@ -226,6 +227,80 @@ export function incidenceParity(
     // what the twins actually compute today (limitations above make this loud)
     ciMethod: "poisson_byar",
     recurrence: "first_only",
+    settingFilter: consumed.settingFilter,
+    strata: consumed.strata,
+  };
+}
+
+/* ================================================================== *
+ *  Point prevalence
+ * ================================================================== */
+
+/** The parameter set a point-prevalence twin must consume identically. */
+export interface PointPrevalenceParity {
+  id: string;
+  codeListId: string;
+  /** the anchor actually rendered: fixed date literal, or per-subject index */
+  anchor: { kind: "fixed" | "index"; date: string | null };
+  /** denominator basis actually computed (cohort-based, enrolled-on-anchor) */
+  denominator: "cohort_enrolled_on_anchor";
+  /** case definition actually computed */
+  caseRule: "ever_on_or_before_anchor";
+  ciMethod: string; // the method actually computed ("wilson"), never the requested one
+  /** the care-setting filter ACTUALLY applied to outcome events */
+  settingFilter: string;
+  /** strata the twin actually emitted (id/axis/bands), in spec order */
+  strata: SupportedStratifier[];
+}
+
+/** Spec options the point-prevalence twins do NOT implement yet — visible REVIEW
+ *  notes in both languages so a program never silently claims behavior it lacks. */
+export function pointPrevalenceLimitations(
+  an: PointPrevalenceAnalysis,
+  listSystem: CodeSystem
+): string[] {
+  const out: string[] = [];
+  const od = an.outcomeDefinition;
+  if (od.minClaims > 1)
+    out.push(`outcome minClaims=${od.minClaims} is NOT yet enforced - any single qualifying claim counts as a prevalent case`);
+  const settingNote = outcomeSettingPlan(od, listSystem).note;
+  if (settingNote) out.push(settingNote);
+  if (od.diagnosisPosition !== "any")
+    out.push(`diagnosisPosition="primary" is NOT yet applied - any-position diagnoses count (the events spine does not record claim position yet)`);
+  if (an.ciMethod === "clopper_pearson")
+    out.push(`ciMethod "clopper_pearson" is NOT implemented (needs an exact beta inverse, SAS-only: proc freq ... / binomial(cl=clopperpearson)) - the Wilson score interval is produced and labeled wilson`);
+  if (an.ciMethod === "wald")
+    out.push(`ciMethod "wald" is NOT implemented (poor small-sample coverage; Newcombe 1998) - the Wilson score interval is produced and labeled wilson`);
+  for (const s of splitStratifiers(an.stratifyBy).unsupported)
+    out.push(`stratifier "${s.id}" (${s.source.kind}-sourced) is NOT yet emitted - demographic axes only for now`);
+  if (an.referenceStratum)
+    out.push(`referenceStratum "${an.referenceStratum}" is NOT used - no prevalence-ratio column is produced yet`);
+  return out;
+}
+
+/** Method notes ALWAYS emitted (describe what IS computed, so never conditional). */
+export const POINT_PREVALENCE_METHOD_NOTES = [
+  `denominator is COHORT-based (final analysis cohort enrolled on the anchor date), not a population denominator - MarketScan carries no general-population denominator and the spine pulls enrollment for indexed members only`,
+  `"alive on the anchor date" is proxied by enrollment on the anchor date; mortality is unascertainable in core MarketScan (BR-LIM-002)`,
+  `case = >= 1 qualifying event on-or-BEFORE the anchor date within the study period (all-available lookback; the spec has no activeLookbackWindow field)`,
+];
+
+/** The parity record for a point-prevalence twin, from values the caller consumed. */
+export function pointPrevalenceParity(
+  an: PointPrevalenceAnalysis,
+  consumed: { settingFilter: string; strata: SupportedStratifier[] }
+): PointPrevalenceParity {
+  return {
+    id: an.id,
+    codeListId: an.outcomeDefinition.codeListId,
+    anchor: {
+      kind: an.anchorDate.kind,
+      date: an.anchorDate.kind === "fixed" ? an.anchorDate.date : null,
+    },
+    denominator: "cohort_enrolled_on_anchor",
+    caseRule: "ever_on_or_before_anchor",
+    // what the twins actually compute today (limitations make this loud)
+    ciMethod: "wilson",
     settingFilter: consumed.settingFilter,
     strata: consumed.strata,
   };

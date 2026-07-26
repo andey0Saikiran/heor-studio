@@ -1325,8 +1325,11 @@ export const emitSql: SqlEmitter = (spec, dialect, opts) => {
   // table names) disambiguates several analyses of the same kind.
   moduleAnalyses(spec.analyses).forEach(({ an, mod, multi }, i) => {
     const suffix = multi ? `_${an.id.toLowerCase().replace(/[^a-z0-9]+/g, "_")}` : "";
+    const num = String(7 + i).padStart(2, "0");
     const f = mod.sql(ctx, an as never, suffix);
-    files.push(mk(String(7 + i).padStart(2, "0"), f.slug, f.title, f.subtitle, [], f.extra, f.body));
+    // the module returns a bare title; the emitter owns the file number so the
+    // displayed title always matches the actual NN_slug filename
+    files.push(mk(num, f.slug, `${num} ${f.title}`, f.subtitle, [], f.extra, f.body));
   });
 
   return files;
