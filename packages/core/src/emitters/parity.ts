@@ -12,7 +12,13 @@
  * same consumed parameters plus matching arithmetic signatures — is how the SAS
  * twin inherits the SQL twin's machine-verified ground truth.
  */
-import type { IncidenceRateAnalysis, RelativeWindow, Stratifier } from "../spec/types";
+import type {
+  CodeSystem,
+  IncidenceRateAnalysis,
+  OutcomeDefinition,
+  RelativeWindow,
+  Stratifier,
+} from "../spec/types";
 import type { StudySpec } from "../spec/types";
 
 /** Default mean days per year — internally consistent (rate/person-years/CI all
@@ -40,6 +46,8 @@ export interface IncidenceParity {
   maxFollowupDays: number | null;
   ciMethod: string;   // the method actually computed (not merely requested)
   recurrence: string; // the recurrence actually produced
+  /** the care-setting filter ACTUALLY applied to outcome events */
+  settingFilter: string;
   /** strata the twin actually emitted (id/axis/bands), in spec order */
   strata: SupportedStratifier[];
 }
@@ -136,20 +144,59 @@ export function splitStratifiers(stratifyBy: Stratifier[]): {
   return { supported, unsupported };
 }
 
+/* ------------------------------------------------------------------ *
+ *  Outcome care-setting enforcement — shared so both twins apply (and
+ *  stamp) exactly the same filter.
+ * ------------------------------------------------------------------ */
+
+export interface SettingPlan {
+  /** the setting filter both twins enforce; null = no filter */
+  enforce: "outpatient" | "inpatient" | null;
+  /** stamped value: the filter ACTUALLY applied ("any" when none) */
+  stamped: string;
+  /** REVIEW note when the requested setting cannot be enforced */
+  note: string | null;
+}
+
+/** Decide how an OutcomeDefinition's care setting is enforced for a given
+ *  code-list system. Drug/NDC events are inherently pharmacy claims: a
+ *  "pharmacy" filter on them is a no-op, and inpatient/outpatient filters on
+ *  pharmacy events are unsatisfiable — surfaced, never silently applied. */
+export function outcomeSettingPlan(od: OutcomeDefinition, listSystem: CodeSystem): SettingPlan {
+  const isDrugList = listSystem === "drug_name" || listSystem === "ndc";
+  if (od.setting === "any") return { enforce: null, stamped: "any", note: null };
+  if (isDrugList) {
+    if (od.setting === "pharmacy")
+      return { enforce: null, stamped: "pharmacy_all", note: null }; // all drug events ARE pharmacy
+    return {
+      enforce: null,
+      stamped: "any",
+      note: `outcome care-setting "${od.setting}" cannot apply to pharmacy (drug) events - no filter applied; review the outcome definition`,
+    };
+  }
+  if (od.setting === "pharmacy")
+    return {
+      enforce: null,
+      stamped: "any",
+      note: `outcome care-setting "pharmacy" cannot apply to a diagnosis/procedure code list - no filter applied; review the outcome definition`,
+    };
+  return { enforce: od.setting, stamped: od.setting, note: null };
+}
+
 /**
  * Spec options the incidence twins do NOT yet implement. Emitted as visible
  * review notes in BOTH languages so a generated program never silently claims
  * behavior it doesn't have; the modules land these one by one.
  */
-export function incidenceLimitations(an: IncidenceRateAnalysis): string[] {
+export function incidenceLimitations(an: IncidenceRateAnalysis, listSystem: CodeSystem): string[] {
   const out: string[] = [];
   const od = an.outcomeDefinition;
   if (od.minClaims > 1)
     out.push(`outcome minClaims=${od.minClaims} is NOT yet enforced - any single qualifying claim counts as the outcome`);
-  if (od.setting !== "any")
-    out.push(`outcome care-setting filter "${od.setting}" is NOT yet applied - events from all settings count`);
+  const settingNote = outcomeSettingPlan(od, listSystem).note;
+  if (settingNote) out.push(settingNote);
   if (od.diagnosisPosition !== "any")
-    out.push(`diagnosisPosition="primary" is NOT yet applied - any-position diagnoses count`);
+    out.push(`diagnosisPosition="primary" is NOT yet applied - any-position diagnoses count (the events spine does not record claim position yet)`);
   if (an.recurrence !== "first_only")
     out.push(`recurrence="all_events" is NOT implemented - FIRST-event incidence is produced`);
   if (an.ciMethod !== "poisson_byar")
@@ -162,7 +209,7 @@ export function incidenceLimitations(an: IncidenceRateAnalysis): string[] {
 /** The parity record for an incidence twin, from values the caller consumed. */
 export function incidenceParity(
   an: IncidenceRateAnalysis,
-  consumed: { daysPerYear: string; censorTerms: string[]; strata: SupportedStratifier[] }
+  consumed: { daysPerYear: string; censorTerms: string[]; settingFilter: string; strata: SupportedStratifier[] }
 ): IncidenceParity {
   return {
     id: an.id,
@@ -179,6 +226,7 @@ export function incidenceParity(
     // what the twins actually compute today (limitations above make this loud)
     ciMethod: "poisson_byar",
     recurrence: "first_only",
+    settingFilter: consumed.settingFilter,
     strata: consumed.strata,
   };
 }

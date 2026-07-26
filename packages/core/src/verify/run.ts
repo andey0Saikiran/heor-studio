@@ -54,6 +54,37 @@ export async function verifyDaysPerYearChoice(): Promise<Check[]> {
   return out;
 }
 
+/** Negative control for the outcome care-setting filter: the gold analysis
+ *  (setting "outpatient") must EXCLUDE P05's planted inpatient AE (asserted in
+ *  verifyGoldA: 3 cases / 2425 pd); this clone with setting "any" must INCLUDE
+ *  it. If the filter were silently dropped, verifyGoldA would fail; if it were
+ *  over-applied, this check would. */
+export async function verifySettingFilterControl(): Promise<Check[]> {
+  const spec: StudySpec = JSON.parse(JSON.stringify(GOLD_A_SPEC));
+  const an = spec.analyses.find((a) => a.kind === "incidence_rate");
+  if (an && an.kind === "incidence_rate") an.outcomeDefinition.setting = "any";
+  const { db, ok } = await seedAndRun(spec, GOLD_A_OPTS);
+  const out: Check[] = [];
+  if (!ok) return [{ name: "setting=any control executes", status: "fail", detail: "execution failed" }];
+  const row = (
+    await rows<{ patients: number; person_days: number; rate_per_1000py: number; ci_low: number; ci_high: number }>(
+      db,
+      "SELECT patients, person_days::float8, rate_per_1000py::float8, ci_low::float8, ci_high::float8 FROM tz_study_incidence WHERE stratum = 'Overall'",
+    )
+  )[0];
+  const want = EXPECTED.settingAny;
+  const push = (name: string, cond: boolean, detail: string) =>
+    out.push({ name, status: cond ? "pass" : "fail", detail });
+  if (!row) return [{ name: "setting=any control row", status: "fail", detail: "no Overall row" }];
+  push(`setting=any -> cases ${want.cases} (inpatient AE included)`, Number(row.patients) === want.cases, `got ${row.patients}`);
+  push(`setting=any -> person-days ${want.personDays}`, Number(row.person_days) === want.personDays, `got ${row.person_days}`);
+  push(`setting=any -> rate ${want.rate}`, Math.abs(Number(row.rate_per_1000py) - want.rate) <= 0.01, `got ${row.rate_per_1000py}`);
+  push(`setting=any -> Byar CI (${want.ci[0]}, ${want.ci[1]})`,
+    Math.abs(Number(row.ci_low) - want.ci[0]) <= 0.05 && Math.abs(Number(row.ci_high) - want.ci[1]) <= 0.05,
+    `got (${row.ci_low}, ${row.ci_high})`);
+  return out;
+}
+
 /** Full Gold Case A verification: execute + assert the hand-computed spine
  *  ground truth + invariants. (Descriptive-epi value checks activate once the
  *  incidence module lands in Step 4.) */

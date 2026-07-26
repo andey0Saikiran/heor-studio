@@ -246,6 +246,14 @@ function listSources(spec: StudySpec, listId: string): { op: boolean; ip: boolea
   )
     add("any");
   for (const b of spec.baseline) if (b.codeListId === listId) add("any");
+  // Analysis outcome lists must be pulled from ALL settings: the analysis
+  // module applies its own care-setting filter downstream, so restricting the
+  // pull here (because another reference was setting-narrow) would silently
+  // starve the analysis of events.
+  for (const a of spec.analyses) {
+    const od = (a as { outcomeDefinition?: { codeListId?: string } }).outcomeDefinition;
+    if (od?.codeListId === listId) add("any");
+  }
   if (!referenced) {
     op = true;
     ip = true;

@@ -93,6 +93,13 @@ const AE: Array<[number, string]> = [
   [7, "2019-10-28"], // P07 index+300 -> INCIDENT
 ];
 
+// NEGATIVE CONTROL for the outcome care-setting filter: P05 gets an INPATIENT
+// AE (index+59). The gold analysis (setting "outpatient") MUST exclude it —
+// gold numbers stay 3/2425. A setting:"any" clone MUST include it (P05 becomes
+// a case censored at day 59): 4 cases / 2119 pd — see EXPECTED.settingAny.
+// A broken (unapplied) filter now fails the harness instead of passing silently.
+const AE_IP: Array<[number, string]> = [[5, "2019-03-01"]];
+
 function q(v: string | number): string {
   return typeof v === "number" ? String(v) : `'${v}'`;
 }
@@ -115,6 +122,13 @@ export function fixtureSeedSql(): string {
   const aeVals = AE.map(([id, d]) => `(${id}, DATE '${d}', '0', 'E119', NULL, NULL, NULL, NULL, NULL, NULL)`).join(",\n  ");
   lines.push(
     `INSERT INTO ccaeo_all (enrolid,svcdate,dxver,dx1,dx2,dx3,dx4,proc1,proctyp,stdplac) VALUES\n  ${aeVals};`,
+  );
+
+  const aeIpVals = AE_IP.map(
+    ([id, d]) => `(${id}, DATE '${d}', DATE '${d}', '0', 'E119', NULL, NULL, NULL, NULL, NULL, NULL, NULL)`,
+  ).join(",\n  ");
+  lines.push(
+    `INSERT INTO ccaes_all (enrolid,admdate,svcdate,dxver,pdx,dx1,dx2,dx3,dx4,pproc,proc1,proctyp) VALUES\n  ${aeIpVals};`,
   );
 
   lines.push(
@@ -169,6 +183,16 @@ export const EXPECTED = {
     },
   } as Record<string, Record<string, { cases: number; denominator: number; personDays: number; rate: number; ci: [number, number] }>>,
   incidenceRowCount: 7, // 1 Overall + 2 sex + 3 age bands + 1 year
+  /* setting:"any" clone of the gold incidence analysis — picks up P05's
+   * INPATIENT AE at index+59 (negative-control row): P05 censors at day 59
+   * instead of 365, so person-days = 2425 - 365 + 59 = 2119. */
+  settingAny: {
+    cases: 4,
+    personDays: 2119,
+    personYears: 5.8015,
+    rate: 689.48, // 4 * 1000 * 365.25 / 2119
+    ci: [185.49, 1765.21] as [number, number],
+  },
 } as const;
 
 /* ---------------- Gold Case A spec (cohort spine; incidence analysis added at Step 4) ---------------- */

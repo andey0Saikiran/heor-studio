@@ -20,6 +20,7 @@
  * index year) — all hand-derived, all asserted in verify/run.ts.
  */
 import type { IncidenceRateAnalysis } from "../../spec/types";
+import { findCodeList } from "../../spec/types";
 import type { GeneratedFile } from "../types";
 import type { AnalysisModule, SqlCtx, SasCtx, SqlModuleFile } from "./types";
 import { describeWindow, oneLine, q, windowConds } from "../sql-base";
@@ -36,6 +37,7 @@ import {
   ageBandLabels,
   incidenceLimitations,
   incidenceParity,
+  outcomeSettingPlan,
   parityStamp,
   renderDaysPerYear,
   splitStratifiers,
@@ -53,6 +55,8 @@ function sqlIncidence(ctx: SqlCtx, an: IncidenceRateAnalysis, suffix: string): S
   const { d, wp, spec } = ctx;
   const out = `${wp}_incidence${suffix}`;
   const clid = an.outcomeDefinition.codeListId;
+  const listSystem = findCodeList(spec, clid)?.system ?? "icd10cm";
+  const setting = outcomeSettingPlan(an.outcomeDefinition, listSystem);
   const M = an.rateMultiplier;
   // Rendered as a DECIMAL literal (e.g. "365.0") so the rate arithmetic is
   // numeric — an integer constant would trigger integer division (451 vs 451.55).
@@ -117,15 +121,19 @@ function sqlIncidence(ctx: SqlCtx, an: IncidenceRateAnalysis, suffix: string): S
   const L: string[] = [];
   // machine-readable twin contract: the harness compares this stamp against the
   // SAS twin's — built from the values THIS builder consumed (see parity.ts)
-  L.push(`-- ${parityStamp("incidence", incidenceParity(an, { daysPerYear: Y, censorTerms: cens, strata }))}`);
-  const limits = incidenceLimitations(an);
+  L.push(`-- ${parityStamp("incidence", incidenceParity(an, { daysPerYear: Y, censorTerms: cens, settingFilter: setting.stamped, strata }))}`);
+  const limits = incidenceLimitations(an, listSystem);
   if (limits.length > 0) {
     L.push(`-- REVIEW - spec options this program does not implement yet:`);
     for (const lim of limits) L.push(`--   * ${lim}`);
   }
   L.push(d.createTableAs(out));
   L.push(`WITH cohort AS (SELECT enrolid, index_date FROM ${wp}_cohort),`);
-  L.push(`ae AS (SELECT enrolid, event_date FROM ${wp}_events WHERE code_list_id = '${q(clid)}'),`);
+  L.push(
+    `ae AS (SELECT enrolid, event_date FROM ${wp}_events WHERE code_list_id = '${q(clid)}'` +
+      (setting.enforce ? ` AND setting = '${setting.enforce}'` : ``) +
+      `),`
+  );
   L.push(`prevalent AS (   -- washout: ${describeWindow(an.washout)}`);
   L.push(`  SELECT DISTINCT c.enrolid`);
   L.push(`  FROM cohort c JOIN ae a ON a.enrolid = c.enrolid`);
@@ -216,6 +224,12 @@ function sasIncidence(ctx: SasCtx, an: IncidenceRateAnalysis, num: string, suffi
   const cohT = ctx.finalCohort;
   const evT = ctx.evOf(an.outcomeDefinition.codeListId);
   const epiT = ctx.tbl("050_epi");
+  const listSystem = findCodeList(spec, an.outcomeDefinition.codeListId)?.system ?? "icd10cm";
+  const setting = outcomeSettingPlan(an.outcomeDefinition, listSystem);
+  // SAS event tables store setting as 'OP'/'IP' (SQL stores 'outpatient'/'inpatient')
+  const sasSettingCond =
+    setting.enforce === "outpatient" ? `and e.setting = 'OP'` :
+    setting.enforce === "inpatient" ? `and e.setting = 'IP'` : null;
   const M = an.rateMultiplier;
   const cens = an.personTimeRule.censorAt;
   const maxFu = an.personTimeRule.maxFollowupDays;
@@ -275,8 +289,11 @@ function sasIncidence(ctx: SasCtx, an: IncidenceRateAnalysis, num: string, suffi
     ...(cens.includes("max_followup") && maxFu != null ? [`index + ${maxFu}d max follow-up`] : []),
   ].join(" / ");
 
-  const washLines = sasWindowConds(an.washout, "e");
-  const limits = incidenceLimitations(an);
+  const washLines = [
+    ...(sasSettingCond ? [sasSettingCond] : []),
+    ...sasWindowConds(an.washout, "e"),
+  ];
+  const limits = incidenceLimitations(an, listSystem);
   const label = an.label.replace(/"/g, "'");
 
   const lines: string[] = [
@@ -289,7 +306,7 @@ function sasIncidence(ctx: SasCtx, an: IncidenceRateAnalysis, num: string, suffi
     ]),
     // machine-readable twin contract: the harness compares this stamp against
     // the SQL twin's — built from the values THIS program consumed
-    `/* ${parityStamp("incidence", incidenceParity(an, { daysPerYear: ctx.daysPerYearLit, censorTerms: cens, strata }))} */`,
+    `/* ${parityStamp("incidence", incidenceParity(an, { daysPerYear: ctx.daysPerYearLit, censorTerms: cens, settingFilter: setting.stamped, strata }))} */`,
     ``,
   ];
 
@@ -349,6 +366,7 @@ function sasIncidence(ctx: SasCtx, an: IncidenceRateAnalysis, num: string, suffi
     `  inner join ${evT} as e`,
     `    on  e.enrolid = a.enrolid`,
     `    and e.svcdate > a.index_date`,
+    ...(sasSettingCond ? [`    ${sasSettingCond}`] : []),
     `  group by a.enrolid;`,
     `quit;`,
     ``,
