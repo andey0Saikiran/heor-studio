@@ -89,6 +89,35 @@ export async function verifyGoldA(): Promise<VerificationResult> {
       approx("Byar CI high = 1320.24", Number(r0.ci_high), EXPECTED.byarCiPer1000PY[1], 0.05);
     }
 
+    // stratified incidence rows (executed vs hand-computed per-stratum truth)
+    eq(
+      `incidence rows = ${EXPECTED.incidenceRowCount} (Overall + strata)`,
+      await scalar<number>(db, "SELECT count(*)::int FROM tz_study_incidence"),
+      EXPECTED.incidenceRowCount,
+    );
+    for (const [stratifier, levels] of Object.entries(EXPECTED.incidenceStrata)) {
+      for (const [stratum, want] of Object.entries(levels)) {
+        const row = (
+          await rows<{ patients: number; denominator: number; person_days: number; rate_per_1000py: number; ci_low: number; ci_high: number }>(
+            db,
+            `SELECT patients, denominator, person_days::float8, rate_per_1000py::float8, ci_low::float8, ci_high::float8
+             FROM tz_study_incidence WHERE stratifier = '${stratifier}' AND stratum = '${stratum}'`,
+          )
+        )[0];
+        const tag = `stratum ${stratifier}/${stratum}`;
+        if (!row) {
+          checks.push({ name: tag, status: "fail", detail: "row missing" });
+          continue;
+        }
+        eq(`${tag}: cases = ${want.cases}`, Number(row.patients), want.cases);
+        eq(`${tag}: denominator = ${want.denominator}`, Number(row.denominator), want.denominator);
+        eq(`${tag}: person-days = ${want.personDays}`, Number(row.person_days), want.personDays);
+        approx(`${tag}: rate = ${want.rate}`, Number(row.rate_per_1000py), want.rate, 0.01);
+        approx(`${tag}: CI low = ${want.ci[0]}`, Number(row.ci_low), want.ci[0], 0.05);
+        approx(`${tag}: CI high = ${want.ci[1]}`, Number(row.ci_high), want.ci[1], 0.05);
+      }
+    }
+
     invariants.push(...(await runInvariants(db, "tz_study")));
   }
 

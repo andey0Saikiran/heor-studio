@@ -12,7 +12,7 @@
  * same consumed parameters plus matching arithmetic signatures — is how the SAS
  * twin inherits the SQL twin's machine-verified ground truth.
  */
-import type { IncidenceRateAnalysis, RelativeWindow } from "../spec/types";
+import type { IncidenceRateAnalysis, RelativeWindow, Stratifier } from "../spec/types";
 import type { StudySpec } from "../spec/types";
 
 /** Default mean days per year — internally consistent (rate/person-years/CI all
@@ -40,6 +40,8 @@ export interface IncidenceParity {
   maxFollowupDays: number | null;
   ciMethod: string;   // the method actually computed (not merely requested)
   recurrence: string; // the recurrence actually produced
+  /** strata the twin actually emitted (id/axis/bands), in spec order */
+  strata: SupportedStratifier[];
 }
 
 /** Stable-key JSON so both languages serialize byte-identically. */
@@ -70,6 +72,70 @@ export function parseParityStamps(content: string): Array<{ kind: string; values
   return out;
 }
 
+/* ------------------------------------------------------------------ *
+ *  Stratification — shared between the twins so stratum LABELS are
+ *  byte-identical across languages (a label mismatch breaks any
+ *  downstream join/report comparing SAS output to SQL output).
+ * ------------------------------------------------------------------ */
+
+/** Default age-band lower bounds when a Stratifier omits ageBandLowerBounds
+ *  (mirrors the Table-1 grouping: <18, 18-34, 35-44, 45-54, 55-64, 65+). */
+export const DEFAULT_AGE_BANDS = [0, 18, 35, 45, 55, 65];
+
+/** MarketScan coded values → the display labels BOTH twins must emit. */
+export const SEX_LABELS: Record<string, string> = { "1": "Male", "2": "Female" };
+export const REGION_LABELS: Record<string, string> = {
+  "1": "Northeast", "2": "North Central", "3": "South", "4": "West", "5": "Unknown",
+};
+
+/** Band labels from inclusive lower bounds, e.g. [0,18,65] → ["0-17","18-64","65+"]. */
+export function ageBandLabels(bounds: number[]): string[] {
+  const b = [...bounds].sort((x, y) => x - y);
+  return b.map((lo, i) => (i === b.length - 1 ? `${lo}+` : `${lo}-${b[i + 1] - 1}`));
+}
+
+/** Stratifier display label as stored in the output tables. Capped at 40 chars
+ *  because the SAS twin declares stratifier/stratum as $40 — SQL applies the
+ *  SAME cap so both languages store byte-identical values. */
+export function stratLabel(label: string): string {
+  return label.slice(0, 40);
+}
+
+export type DemographicAxis = "age_band" | "sex" | "region" | "plan_type" | "year";
+
+export interface SupportedStratifier {
+  id: string;
+  label: string;
+  axis: DemographicAxis;
+  /** sorted ascending; present only for age_band */
+  bands?: number[];
+}
+
+/** Split stratifiers into the demographic axes the incidence twins implement
+ *  vs the ones they don't (baseline-source strata need the flag machinery). */
+export function splitStratifiers(stratifyBy: Stratifier[]): {
+  supported: SupportedStratifier[];
+  unsupported: Stratifier[];
+} {
+  const supported: SupportedStratifier[] = [];
+  const unsupported: Stratifier[] = [];
+  for (const s of stratifyBy) {
+    if (s.source.kind === "demographic") {
+      supported.push({
+        id: s.id,
+        label: s.label,
+        axis: s.source.axis,
+        ...(s.source.axis === "age_band"
+          ? { bands: [...(s.ageBandLowerBounds ?? DEFAULT_AGE_BANDS)].sort((a, b) => a - b) }
+          : {}),
+      });
+    } else {
+      unsupported.push(s);
+    }
+  }
+  return { supported, unsupported };
+}
+
 /**
  * Spec options the incidence twins do NOT yet implement. Emitted as visible
  * review notes in BOTH languages so a generated program never silently claims
@@ -88,15 +154,15 @@ export function incidenceLimitations(an: IncidenceRateAnalysis): string[] {
     out.push(`recurrence="all_events" is NOT implemented - FIRST-event incidence is produced`);
   if (an.ciMethod !== "poisson_byar")
     out.push(`ciMethod "${an.ciMethod}" is NOT implemented - the Byar exact-Poisson approximation is produced and labeled poisson_byar`);
-  if (an.stratifyBy.length > 0)
-    out.push(`stratifyBy is NOT yet emitted - Overall row only`);
+  for (const s of splitStratifiers(an.stratifyBy).unsupported)
+    out.push(`stratifier "${s.id}" (${s.source.kind}-sourced) is NOT yet emitted - demographic axes only for now`);
   return out;
 }
 
 /** The parity record for an incidence twin, from values the caller consumed. */
 export function incidenceParity(
   an: IncidenceRateAnalysis,
-  consumed: { daysPerYear: string; censorTerms: string[] }
+  consumed: { daysPerYear: string; censorTerms: string[]; strata: SupportedStratifier[] }
 ): IncidenceParity {
   return {
     id: an.id,
@@ -113,6 +179,7 @@ export function incidenceParity(
     // what the twins actually compute today (limitations above make this loud)
     ciMethod: "poisson_byar",
     recurrence: "first_only",
+    strata: consumed.strata,
   };
 }
 

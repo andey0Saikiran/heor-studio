@@ -27,10 +27,16 @@ import type {
 } from "../spec/types";
 import type { EmitOptions, GeneratedFile, SasEmitter } from "./types";
 import {
+  ageBandLabels,
   incidenceLimitations,
   incidenceParity,
   parityStamp,
   renderDaysPerYear,
+  splitStratifiers,
+  stratLabel,
+  REGION_LABELS,
+  SEX_LABELS,
+  type SupportedStratifier,
 } from "./parity";
 
 /* ================================================================== *
@@ -1711,6 +1717,45 @@ function incidencePrograms(ctx: Ctx): GeneratedFile[] {
     if (terms.length === 0) terms.push("&study_end."); // always bound follow-up
     const adminExpr = terms.length === 1 ? terms[0] : `min(${terms.join(", ")})`;
     const censorsAtOutcome = cens.includes("outcome");
+
+    // demographic strata — labels shared with the SQL twin (parity.ts) so both
+    // languages emit byte-identical stratum values. Derived from the enrollment
+    // segment (dobyr/sex/region/plantyp), never claim-level AGE, so the twins
+    // cannot drift around birthday timing.
+    const { supported: strata } = splitStratifiers(an.stratifyBy);
+    const needDemo = strata.some((s) => s.axis !== "year");
+    const needAge = strata.some((s) => s.axis === "age_band");
+    const stratAssign = (s: SupportedStratifier, v: string): string[] => {
+      switch (s.axis) {
+        case "sex": {
+          const arms = Object.entries(SEX_LABELS).map(
+            ([k, lab], j) => `${j === 0 ? "if" : "else if"} sex = '${k}' then ${v} = '${lab}';`
+          );
+          return [...arms, `else ${v} = 'Unknown';`];
+        }
+        case "region": {
+          const arms = Object.entries(REGION_LABELS).map(
+            ([k, lab], j) => `${j === 0 ? "if" : "else if"} region = '${k}' then ${v} = '${lab}';`
+          );
+          return [...arms, `else ${v} = 'Unknown';`];
+        }
+        case "plan_type":
+          return [`${v} = strip(vvalue(plantyp));`, `if ${v} in ('', '.') then ${v} = 'Unknown';`];
+        case "year":
+          return [`${v} = strip(put(year(index_date), 4.));`];
+        case "age_band": {
+          const bands = s.bands ?? [];
+          const labels = ageBandLabels(bands);
+          const arms: string[] = [`if age_at_index = . then ${v} = 'Unknown';`];
+          if (bands[0] > 0) arms.push(`else if age_at_index < ${bands[0]} then ${v} = '<${bands[0]}';`);
+          for (let j = bands.length - 1; j >= 1; j--)
+            arms.push(`else if age_at_index >= ${bands[j]} then ${v} = '${labels[j]}';`);
+          arms.push(`else ${v} = '${labels[0]}';`);
+          return arms;
+        }
+      }
+    };
+
     const censorWords = [
       ...(censorsAtOutcome ? ["first outcome"] : []),
       ...(cens.includes("disenrollment") ? ["disenrollment (episode end)"] : []),
@@ -1732,7 +1777,7 @@ function incidencePrograms(ctx: Ctx): GeneratedFile[] {
       ]),
       // machine-readable twin contract: the harness compares this stamp against
       // the SQL twin's — built from the values THIS program consumed
-      `/* ${parityStamp("incidence", incidenceParity(an, { daysPerYear: ctx.daysPerYearLit, censorTerms: cens }))} */`,
+      `/* ${parityStamp("incidence", incidenceParity(an, { daysPerYear: ctx.daysPerYearLit, censorTerms: cens, strata }))} */`,
       ``,
     ];
 
@@ -1795,6 +1840,36 @@ function incidencePrograms(ctx: Ctx): GeneratedFile[] {
       `  group by a.enrolid;`,
       `quit;`,
       ``,
+      ...(needDemo
+        ? [
+            `/*----------------------------------------------------------------------------`,
+            `  Stratum demographics from the enrollment segment in force at (or latest`,
+            `  before) the index date - the SAME source and tie-break as the SQL twin,`,
+            `  so stratum values cannot drift between languages.`,
+            `----------------------------------------------------------------------------*/`,
+            `proc sql;`,
+            `  create table work._${num}_dm0 as`,
+            `  select a.enrolid, b.dobyr, b.sex, b.region, b.plantyp,`,
+            `         b.dtstart as seg_start, b.dtend as seg_end`,
+            `  from work._${num}_atrisk as a`,
+            `  left join ${ctx.tbl("040_enroll")} as b`,
+            `    on  b.enrolid = a.enrolid`,
+            `    and b.dtstart <= a.index_date;`,
+            `quit;`,
+            ``,
+            `proc sort data=work._${num}_dm0;`,
+            `  by enrolid descending seg_start descending seg_end;`,
+            `run;`,
+            ``,
+            `data work._${num}_dm;`,
+            `  set work._${num}_dm0;`,
+            `  by enrolid;`,
+            `  if first.enrolid;`,
+            `  drop seg_start seg_end;`,
+            `run;`,
+            ``,
+          ]
+        : []),
       `/*----------------------------------------------------------------------------`,
       `  Person-time: administrative censor = earliest of`,
       ...terms.map((t) => `    - ${cmt(t)}`),
@@ -1804,17 +1879,24 @@ function incidencePrograms(ctx: Ctx): GeneratedFile[] {
       `  create table work._${num}_pt as`,
       `  select a.enrolid, a.index_date,`,
       `         ${adminExpr} as admin_censor format=date9.,`,
-      `         b.fu_date`,
+      `         b.fu_date${needDemo ? "," : ""}`,
+      ...(needDemo ? [`         dm.dobyr, dm.sex, dm.region, dm.plantyp`] : []),
       `  from work._${num}_atrisk as a`,
       `  inner join ${epiT} as ep`,
       `    on  ep.enrolid = a.enrolid`,
       `    and a.index_date between ep.dtstart and ep.dtend`,
+      ...(needDemo
+        ? [`  left join work._${num}_dm as dm`, `    on dm.enrolid = a.enrolid`]
+        : []),
       `  left join work._${num}_first_fu as b`,
       `    on b.enrolid = a.enrolid;`,
       `quit;`,
       ``,
       `data work._${num}_pt2;`,
       `  set work._${num}_pt;`,
+      ...(strata.length > 0
+        ? [`  length ${strata.map((_, j) => `strat_${j}`).join(" ")} $40;`]
+        : []),
       `  /* a case = first outcome on or before the administrative censor date */`,
       `  is_case = (fu_date ne . and fu_date <= admin_censor);`,
       ...(censorsAtOutcome
@@ -1823,6 +1905,14 @@ function incidencePrograms(ctx: Ctx): GeneratedFile[] {
         : [`  /* follow-up runs to the admin censor date (no censoring at outcome) */`,
            `  censor_date = admin_censor;`]),
       `  person_days = censor_date - index_date;`,
+      ...(needAge
+        ? [`  /* enrollment-derived age (year - DOBYR), matching the SQL twin */`,
+           `  age_at_index = year(index_date) - dobyr;`]
+        : []),
+      ...strata.flatMap((s, j) => [
+        `  /* stratifier: ${cmt(stratLabel(s.label))} (${s.axis}) */`,
+        ...stratAssign(s, `strat_${j}`).map((l) => `  ${l}`),
+      ]),
       `  format censor_date date9.;`,
       `run;`,
       ``,
@@ -1840,17 +1930,25 @@ function incidencePrograms(ctx: Ctx): GeneratedFile[] {
       `----------------------------------------------------------------------------*/`,
       `proc sql;`,
       `  create table work._${num}_summ as`,
-      `  select count(*) as denominator,`,
+      `  select 'Overall' as stratifier length=40,`,
+      `         'Overall' as stratum length=40,`,
+      `         count(*) as denominator,`,
       `         sum(is_case) as patients,`,
       `         sum(person_days) as person_days`,
-      `  from work._${num}_pt2;`,
+      `  from work._${num}_pt2`,
+      ...strata.flatMap((s, j) => [
+        `  union all`,
+        `  select '${sq(stratLabel(s.label))}', strat_${j},`,
+        `         count(*), sum(is_case), sum(person_days)`,
+        `  from work._${num}_pt2 group by strat_${j}`,
+      ]),
+      `  ;`,
       `quit;`,
       ``,
       `data ${outT};`,
       `  set work._${num}_summ;`,
-      `  length measure $20 stratum $40 ci_method $16;`,
+      `  length measure $20 ci_method $16;`,
       `  measure   = 'incidence';`,
-      `  stratum   = 'Overall';`,
       `  /* labeled with the method actually computed, never the merely-requested one */`,
       `  ci_method = 'poisson_byar';`,
       `  person_years = round(person_days / &days_per_year., 0.0001);`,
@@ -1870,9 +1968,14 @@ function incidencePrograms(ctx: Ctx): GeneratedFile[] {
       `  drop _byar_low _byar_high;`,
       `run;`,
       ``,
+      `/* same presentation order as the SQL twin's REVIEW query */`,
+      `proc sort data=${outT};`,
+      `  by stratifier stratum;`,
+      `run;`,
+      ``,
       `title "Incidence rate per ${M} person-years: ${label}";`,
       `proc print data=${outT} noobs;`,
-      `  var measure stratum patients denominator person_days person_years`,
+      `  var measure stratifier stratum patients denominator person_days person_years`,
       `      rate_per_1000py ci_low ci_high ci_method;`,
       `run;`,
       ``

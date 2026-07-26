@@ -42,10 +42,16 @@ import type {
   SqlEmitter,
 } from "./types";
 import {
+  ageBandLabels,
   incidenceLimitations,
   incidenceParity,
   parityStamp,
   renderDaysPerYear,
+  splitStratifiers,
+  stratLabel,
+  REGION_LABELS,
+  SEX_LABELS,
+  type SupportedStratifier,
 } from "./parity";
 
 /* ------------------------------------------------------------------ */
@@ -1359,10 +1365,43 @@ function build07Incidence(ctx: Ctx, an: IncidenceRateAnalysis, suffix = ""): str
   const byarHigh = `POWER(1 - 1.0/(9*(patients+1)) + 1.96/(3*SQRT(patients+1)), 3) * (patients+1)`;
   const scale = `* ${M} * ${Y} / NULLIF(person_days, 0)`;
 
+  // demographic strata — labels shared with the SAS twin (parity.ts) so both
+  // languages emit byte-identical stratum values. Strata are derived from the
+  // enrollment segment (dobyr/sex/region/plantyp), never claim-level AGE, so
+  // SAS and SQL cannot drift around birthday timing.
+  const { supported: strata } = splitStratifiers(an.stratifyBy);
+  const needDemo = strata.some((s) => s.axis !== "year");
+  const ageExpr = `${d.year("index_date")} - dobyr`;
+  const stratExpr = (s: SupportedStratifier): string => {
+    switch (s.axis) {
+      case "sex":
+        return `CASE CAST(sex AS VARCHAR) ${Object.entries(SEX_LABELS)
+          .map(([k, v]) => `WHEN '${k}' THEN '${v}'`)
+          .join(" ")} ELSE 'Unknown' END`;
+      case "region":
+        return `CASE CAST(region AS VARCHAR) ${Object.entries(REGION_LABELS)
+          .map(([k, v]) => `WHEN '${k}' THEN '${v}'`)
+          .join(" ")} ELSE 'Unknown' END`;
+      case "plan_type":
+        return `COALESCE(CAST(plantyp AS VARCHAR), 'Unknown')`;
+      case "year":
+        return `CAST(${d.year("index_date")} AS VARCHAR)`;
+      case "age_band": {
+        const bands = s.bands ?? [];
+        const labels = ageBandLabels(bands);
+        const arms: string[] = [`WHEN ${ageExpr} IS NULL THEN 'Unknown'`];
+        if (bands[0] > 0) arms.push(`WHEN ${ageExpr} < ${bands[0]} THEN '<${bands[0]}'`);
+        for (let i = bands.length - 1; i >= 1; i--)
+          arms.push(`WHEN ${ageExpr} >= ${bands[i]} THEN '${labels[i]}'`);
+        return `CASE ${arms.join(" ")} ELSE '${labels[0]}' END`;
+      }
+    }
+  };
+
   const L: string[] = [];
   // machine-readable twin contract: the harness compares this stamp against the
   // SAS twin's — built from the values THIS builder consumed (see parity.ts)
-  L.push(`-- ${parityStamp("incidence", incidenceParity(an, { daysPerYear: Y, censorTerms: cens }))}`);
+  L.push(`-- ${parityStamp("incidence", incidenceParity(an, { daysPerYear: Y, censorTerms: cens, strata }))}`);
   const limits = incidenceLimitations(an);
   if (limits.length > 0) {
     L.push(`-- REVIEW - spec options this program does not implement yet:`);
@@ -1382,24 +1421,53 @@ function build07Incidence(ctx: Ctx, an: IncidenceRateAnalysis, suffix = ""): str
   L.push(`  FROM atrisk c JOIN ae a ON a.enrolid = c.enrolid AND a.event_date > c.index_date`);
   L.push(`  GROUP BY c.enrolid`);
   L.push(`),`);
+  if (needDemo) {
+    L.push(`demo AS (   -- enrollment segment in force at (or latest before) index; rn=1 wins`);
+    L.push(`  SELECT c.enrolid, en.dobyr, en.sex, en.region, en.plantyp,`);
+    L.push(`         ROW_NUMBER() OVER (PARTITION BY c.enrolid`);
+    L.push(`                            ORDER BY en.dtstart DESC, en.dtend DESC) AS rn`);
+    L.push(`  FROM atrisk c`);
+    L.push(`  JOIN ${ctx.t("enrollment_detail")} en`);
+    L.push(`    ON en.enrolid = c.enrolid`);
+    L.push(`   AND en.dtstart <= c.index_date`);
+    L.push(`),`);
+    L.push(`demo1 AS (SELECT enrolid, dobyr, sex, region, plantyp FROM demo WHERE rn = 1),`);
+  }
   L.push(`pt AS (`);
-  L.push(`  SELECT c.enrolid, c.index_date, ${adminCensor} AS admin_censor, f.fu_date`);
+  L.push(
+    `  SELECT c.enrolid, c.index_date, ${adminCensor} AS admin_censor, f.fu_date` +
+      (needDemo ? `,` : ``)
+  );
+  if (needDemo) L.push(`         dm.dobyr, dm.sex, dm.region, dm.plantyp`);
   L.push(`  FROM atrisk c`);
   L.push(`  JOIN ${wp}_enroll_episodes ep`);
   L.push(`    ON ep.enrolid = c.enrolid AND c.index_date BETWEEN ep.episode_start AND ep.episode_end`);
+  if (needDemo) L.push(`  LEFT JOIN demo1 dm ON dm.enrolid = c.enrolid`);
   L.push(`  LEFT JOIN first_fu f ON f.enrolid = c.enrolid`);
   L.push(`),`);
   L.push(`pt2 AS (`);
   L.push(`  SELECT ${d.daysBetween(censorFinal, "index_date")} AS person_days,`);
-  L.push(`         CASE WHEN fu_date IS NOT NULL AND fu_date <= admin_censor THEN 1 ELSE 0 END AS is_case`);
+  L.push(
+    `         CASE WHEN fu_date IS NOT NULL AND fu_date <= admin_censor THEN 1 ELSE 0 END AS is_case` +
+      (strata.length > 0 ? "," : "")
+  );
+  strata.forEach((s, i) => {
+    L.push(`         ${stratExpr(s)} AS strat_${i}${i < strata.length - 1 ? "," : ""}`);
+  });
   L.push(`  FROM pt`);
   L.push(`),`);
   L.push(`summ AS (`);
-  L.push(`  SELECT 'incidence' AS measure, 'Overall' AS stratum,`);
+  L.push(`  SELECT 'incidence' AS measure, 'Overall' AS stratifier, 'Overall' AS stratum,`);
   L.push(`         SUM(is_case) AS patients, COUNT(*) AS denominator, SUM(person_days) AS person_days`);
   L.push(`  FROM pt2`);
+  strata.forEach((s, i) => {
+    L.push(`  UNION ALL`);
+    L.push(`  SELECT 'incidence', '${q(stratLabel(s.label))}', strat_${i},`);
+    L.push(`         SUM(is_case), COUNT(*), SUM(person_days)`);
+    L.push(`  FROM pt2 GROUP BY strat_${i}`);
+  });
   L.push(`)`);
-  L.push(`SELECT measure, stratum, patients, denominator, person_days,`);
+  L.push(`SELECT measure, stratifier, stratum, patients, denominator, person_days,`);
   L.push(`       ${d.roundN(`person_days / ${Y}`, 4)} AS person_years,`);
   L.push(`       ${d.roundN(`patients * ${M} * ${Y} / NULLIF(person_days, 0)`, 2)} AS rate_per_1000py,`);
   L.push(`       ${d.roundN(`${byarLow} ${scale}`, 2)} AS ci_low,`);
@@ -1409,8 +1477,9 @@ function build07Incidence(ctx: Ctx, an: IncidenceRateAnalysis, suffix = ""): str
   L.push(`       'poisson_byar' AS ci_method`);
   L.push(`FROM summ;`);
   L.push("");
-  L.push(`-- REVIEW: incidence rate per ${M} person-years.`);
-  L.push(`SELECT * FROM ${out};`);
+  L.push(`-- REVIEW: incidence rate per ${M} person-years, Overall + per stratum.`);
+  L.push(`SELECT * FROM ${out}`);
+  L.push(`ORDER BY stratifier, stratum;`);
   return L.join("\n");
 }
 

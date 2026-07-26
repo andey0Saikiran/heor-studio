@@ -150,6 +150,25 @@ export const EXPECTED = {
   cumulativeIncidence: 0.375, // 3/8
   wilsonCi: [0.13684, 0.69426] as [number, number],
   smdAge: -0.63246,
+  /* stratified incidence — per-patient hand derivation (at-risk 8, index 2019-01-01,
+   * admin censor 2020-01-01 for all): P02 F45 case@100d, P03 M50 case@200d,
+   * P04 F55 365d, P05 M60 365d, P07 F50 case@300d, P08 M55 365d, P09 F60 365d,
+   * P10 M65 365d. Rates/CIs = closed-form Byar evaluated on those hand counts. */
+  incidenceStrata: {
+    Sex: {
+      Male:   { cases: 1, denominator: 4, personDays: 1295, rate: 282.05, ci: [3.69, 1569.27] },
+      Female: { cases: 2, denominator: 4, personDays: 1130, rate: 646.46, ci: [72.6, 2334.04] },
+    },
+    "Age band": {
+      "45-54": { cases: 3, denominator: 3, personDays: 600,  rate: 1826.25, ci: [367.05, 5335.99] },
+      "55-64": { cases: 0, denominator: 4, personDays: 1460, rate: 0,       ci: [0, 917.65] },
+      "65+":   { cases: 0, denominator: 1, personDays: 365,  rate: 0,       ci: [0, 3670.61] },
+    },
+    "Index year": {
+      "2019": { cases: 3, denominator: 8, personDays: 2425, rate: 451.86, ci: [90.82, 1320.24] },
+    },
+  } as Record<string, Record<string, { cases: number; denominator: number; personDays: number; rate: number; ci: [number, number] }>>,
+  incidenceRowCount: 7, // 1 Overall + 2 sex + 3 age bands + 1 year
 } as const;
 
 /* ---------------- Gold Case A spec (cohort spine; incidence analysis added at Step 4) ---------------- */
@@ -213,7 +232,11 @@ export const GOLD_A_SPEC: StudySpec = {
       recurrence: "first_only",
       rateMultiplier: 1000,
       ciMethod: "poisson_byar",
-      stratifyBy: [],
+      stratifyBy: [
+        { id: "s_sex", label: "Sex", source: { kind: "demographic", axis: "sex" } },
+        { id: "s_age", label: "Age band", source: { kind: "demographic", axis: "age_band" }, ageBandLowerBounds: [0, 18, 35, 45, 55, 65] },
+        { id: "s_year", label: "Index year", source: { kind: "demographic", axis: "year" } },
+      ],
     },
   ],
 };
