@@ -14,6 +14,7 @@
  */
 import type {
   CodeSystem,
+  CumulativeIncidenceAnalysis,
   IncidenceRateAnalysis,
   OutcomeDefinition,
   PeriodPrevalenceAnalysis,
@@ -366,6 +367,79 @@ export function periodPrevalenceParity(
     period: { start: an.prevalencePeriod.start, end: an.prevalencePeriod.end },
     denominatorRule: "enrolled_anytime",
     numeratorRule: "event_in_period",
+    ciMethod: "wilson",
+    settingFilter: consumed.settingFilter,
+    strata: consumed.strata,
+  };
+}
+
+/* ================================================================== *
+ *  Cumulative incidence (risk)
+ * ================================================================== */
+
+/** The parameter set a cumulative-incidence twin must consume identically. */
+export interface CumulativeIncidenceParity {
+  id: string;
+  codeListId: string;
+  washout: { start: number | "anytime_before"; end: number | "anytime_after"; includesIndex: boolean };
+  horizonDays: number;
+  /** the estimator actually computed (naive at-risk risk, complete-follow-up) */
+  riskMethod: "naive_at_risk";
+  ciMethod: string; // "wilson"
+  settingFilter: string;
+  strata: SupportedStratifier[];
+}
+
+/** Spec options the cumulative-incidence twins do NOT implement yet. */
+export function cumulativeIncidenceLimitations(
+  an: CumulativeIncidenceAnalysis,
+  listSystem: CodeSystem
+): string[] {
+  const out: string[] = [];
+  const od = an.outcomeDefinition;
+  if (od.minClaims > 1)
+    out.push(`outcome minClaims=${od.minClaims} is NOT yet enforced - any single qualifying claim counts as the event`);
+  const settingNote = outcomeSettingPlan(od, listSystem).note;
+  if (settingNote) out.push(settingNote);
+  if (od.diagnosisPosition !== "any")
+    out.push(`diagnosisPosition="primary" is NOT yet applied - any-position diagnoses count (the events spine does not record claim position yet)`);
+  if (an.competingRiskDeath !== "ignore")
+    out.push(`competingRiskDeath="${an.competingRiskDeath}" is NOT implemented - a naive at-risk cumulative incidence is produced; use SAS proc lifetest (1-KM) or the Aalen-Johansen CIF for censoring / competing-risk adjustment`);
+  if (an.incidentWithRespectTo !== "cohort_entry")
+    out.push(`incidentWithRespectTo="${an.incidentWithRespectTo}" is NOT implemented - incidence is defined with respect to cohort entry via the washout window only`);
+  if (an.ciMethod === "clopper_pearson")
+    out.push(`ciMethod "clopper_pearson" is NOT implemented (needs an exact beta inverse, SAS-only: proc freq ... / binomial(cl=clopperpearson)) - the Wilson score interval is produced and labeled wilson`);
+  if (an.ciMethod === "wald")
+    out.push(`ciMethod "wald" is NOT implemented (poor small-sample coverage; Newcombe 1998) - the Wilson score interval is produced and labeled wilson`);
+  for (const s of splitStratifiers(an.stratifyBy).unsupported)
+    out.push(`stratifier "${s.id}" (${s.source.kind}-sourced) is NOT yet emitted - demographic axes only for now`);
+  if (an.referenceStratum)
+    out.push(`referenceStratum "${an.referenceStratum}" is NOT used - no risk-ratio column is produced yet`);
+  return out;
+}
+
+/** Method notes ALWAYS emitted (describe what IS computed). */
+export const CUMULATIVE_INCIDENCE_METHOD_NOTES = [
+  `denominator is the at-risk set (final analysis cohort, event-free at index after the washout window); each subject is counted once (first_only)`,
+  `NAIVE risk = cases within the horizon / at-risk, assuming COMPLETE follow-up through the horizon; a subject who disenrolls before the horizon without the event is treated as a non-case, which can UNDERESTIMATE risk - set competingRiskDeath="censor" (KM, SAS-only) when censoring is material`,
+  `the risk is defined relative to cohort entry (index); the washout window removes prevalent cases so only new-onset events count`,
+];
+
+/** The parity record for a cumulative-incidence twin, from consumed values. */
+export function cumulativeIncidenceParity(
+  an: CumulativeIncidenceAnalysis,
+  consumed: { settingFilter: string; strata: SupportedStratifier[] }
+): CumulativeIncidenceParity {
+  return {
+    id: an.id,
+    codeListId: an.outcomeDefinition.codeListId,
+    washout: {
+      start: an.washout.start,
+      end: an.washout.end,
+      includesIndex: an.washout.includesIndex,
+    },
+    horizonDays: an.horizonDays,
+    riskMethod: "naive_at_risk",
     ciMethod: "wilson",
     settingFilter: consumed.settingFilter,
     strata: consumed.strata,

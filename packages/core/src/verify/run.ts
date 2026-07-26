@@ -216,6 +216,39 @@ export async function verifyGoldA(): Promise<VerificationResult> {
       1,
     );
 
+    // ---- cumulative incidence (executed vs hand-computed Wilson ground truth) ----
+    const ci = EXPECTED.cumulativeIncidence;
+    const ciRow = async (table: string, stratifier: string, stratum: string) =>
+      (
+        await rows<{ patients: number; denominator: number; risk: number; risk_pct: number; ci_low: number; ci_high: number }>(
+          db,
+          `SELECT patients, denominator, risk::float8, risk_pct::float8, ci_low::float8, ci_high::float8
+           FROM ${table} WHERE stratifier = '${stratifier}' AND stratum = '${stratum}'`,
+        )
+      )[0];
+    const checkCi = (tag: string, r: Awaited<ReturnType<typeof ciRow>>, w: { patients: number; denominator: number; risk: number; pct: number; ci: [number, number] }) => {
+      if (!r) { checks.push({ name: tag, status: "fail", detail: "row missing" }); return; }
+      eq(`${tag}: cases = ${w.patients}`, Number(r.patients), w.patients);
+      eq(`${tag}: denominator = ${w.denominator}`, Number(r.denominator), w.denominator);
+      approx(`${tag}: risk = ${w.risk}`, Number(r.risk), w.risk, 0.00001);
+      approx(`${tag}: pct = ${w.pct}`, Number(r.risk_pct), w.pct, 0.01);
+      approx(`${tag}: Wilson CI low = ${w.ci[0]}`, Number(r.ci_low), w.ci[0], 0.00001);
+      approx(`${tag}: Wilson CI high = ${w.ci[1]}`, Number(r.ci_high), w.ci[1], 0.00001);
+    };
+    eq(
+      `cumulative-incidence rows = ${ci.ci365.rowCount} (Overall + strata)`,
+      await scalar<number>(db, "SELECT count(*)::int FROM tz_study_cuminc_a_ci_365"),
+      ci.ci365.rowCount,
+    );
+    checkCi("ci365 Overall", await ciRow("tz_study_cuminc_a_ci_365", "Overall", "Overall"), ci.ci365.overall);
+    for (const [stratifier, levels] of Object.entries(ci.ci365.strata)) {
+      for (const [stratum, want] of Object.entries(levels)) {
+        checkCi(`ci365 ${stratifier}/${stratum}`, await ciRow("tz_study_cuminc_a_ci_365", stratifier, stratum), want);
+      }
+    }
+    // shorter horizon: only P02's day-100 event is within 180d → 1/8
+    checkCi("ci180 Overall", await ciRow("tz_study_cuminc_a_ci_180", "Overall", "Overall"), ci.ci180);
+
     invariants.push(...(await runInvariants(db, "tz_study")));
   }
 

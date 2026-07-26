@@ -161,9 +161,10 @@ export const EXPECTED = {
   personYears: 6.6393, // 2425 / 365.25
   crudeRatePer1000PY: 451.86, // 3 * 1000 * 365.25 / 2425
   byarCiPer1000PY: [90.82, 1320.24] as [number, number], // z=1.96, 365.25 scaling
-  cumulativeIncidence: 0.375, // 3/8
-  wilsonCi: [0.13684, 0.69426] as [number, number],
-  smdAge: -0.63246,
+  // NOTE: the legacy scalars cumulativeIncidence (0.375) and wilsonCi
+  // ([0.13684, 0.69426]) are now the live gold in EXPECTED.cumulativeIncidence
+  // (the module block below) — asserted against the executed cumulative-incidence SQL.
+  smdAge: -0.63246, // reserved for the statistical-engine module (X vs Y age SMD)
   /* stratified incidence — per-patient hand derivation (at-risk 8, index 2019-01-01,
    * admin censor 2020-01-01 for all): P02 F45 case@100d, P03 M50 case@200d,
    * P04 F55 365d, P05 M60 365d, P07 F50 case@300d, P08 M55 365d, P09 F60 365d,
@@ -251,6 +252,26 @@ export const EXPECTED = {
     },
     // a_perp_empty: 2021 is after every episode end → denominator 0, NULLs.
     empty: { patients: 0, denominator: 0 },
+  },
+  /* Cumulative incidence (risk) — naive at-risk denominator (event-free at
+   * index after washout = 8), Wilson CI. Numerator = first OUTPATIENT event
+   * within the horizon. */
+  cumulativeIncidence: {
+    // a_ci_365: horizon 365d. Cases in (index, index+365]: P02(100),P03(200),
+    // P07(300) → 3/8 = 0.375, reproducing EXPECTED.wilsonCi from this module.
+    ci365: {
+      rowCount: 3, // Overall + Male + Female
+      overall: { patients: 3, denominator: 8, risk: 0.375, pct: 37.5, ci: [0.13684, 0.69426] as [number, number] },
+      strata: {
+        Sex: {
+          Male:   { patients: 1, denominator: 4, risk: 0.25, pct: 25, ci: [0.04559, 0.69936] as [number, number] },
+          Female: { patients: 2, denominator: 4, risk: 0.5,  pct: 50, ci: [0.15004, 0.84996] as [number, number] },
+        },
+      } as Record<string, Record<string, { patients: number; denominator: number; risk: number; pct: number; ci: [number, number] }>>,
+    },
+    // a_ci_180: horizon 180d. Only P02's day-100 event is within 180d
+    // (P03 day-200, P07 day-300 excluded) → 1/8 = 0.125.
+    ci180: { patients: 1, denominator: 8, risk: 0.125, pct: 12.5, ci: [0.02242, 0.47089] as [number, number] },
   },
 } as const;
 
@@ -372,6 +393,37 @@ export const GOLD_A_SPEC: StudySpec = {
       caseStatus: "prevalent",
       prevalencePeriod: { start: "2021-01-01", end: "2021-12-31" }, // after every episode end
       denominatorRule: "enrolled_anytime",
+      ciMethod: "wilson",
+      stratifyBy: [],
+    },
+    // --- cumulative incidence (2 analyses: 365d horizon + sex strata, 180d horizon) ---
+    {
+      id: "a_ci_365", label: "1-year cumulative incidence of AE", kind: "cumulative_incidence", enabled: true,
+      outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "outpatient", diagnosisPosition: "any" },
+      caseStatus: "incident",
+      washout: { start: -365, end: 0, includesIndex: true },
+      incidentWithRespectTo: "cohort_entry",
+      denominatorRule: "at_risk_start",
+      horizonDays: 365,
+      personTimeRule: { start: "index", censorAt: ["outcome", "disenrollment", "study_end"], maxFollowupDays: 365 },
+      competingRiskDeath: "ignore",
+      recurrence: "first_only",
+      ciMethod: "wilson",
+      stratifyBy: [
+        { id: "s_sex", label: "Sex", source: { kind: "demographic", axis: "sex" } },
+      ],
+    },
+    {
+      id: "a_ci_180", label: "180-day cumulative incidence of AE", kind: "cumulative_incidence", enabled: true,
+      outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "outpatient", diagnosisPosition: "any" },
+      caseStatus: "incident",
+      washout: { start: -365, end: 0, includesIndex: true },
+      incidentWithRespectTo: "cohort_entry",
+      denominatorRule: "at_risk_start",
+      horizonDays: 180,
+      personTimeRule: { start: "index", censorAt: ["outcome", "disenrollment", "study_end"], maxFollowupDays: 180 },
+      competingRiskDeath: "censor", // exercises the KM/SAS-only limitation note
+      recurrence: "first_only",
       ciMethod: "wilson",
       stratifyBy: [],
     },

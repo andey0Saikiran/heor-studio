@@ -92,6 +92,22 @@ const SIGNATURES: Record<string, { sql: string[]; sas: string[] }> = {
       "e.svcdate between", // event-dated-in-period case predicate
     ],
   },
+  cumulative_incidence: {
+    sql: [
+      "1.9208",
+      "3.8416",
+      "0.9604",
+      "a.event_date > c.index_date", // first event strictly after index
+      "a.event_date <=", // ... and within the horizon
+    ],
+    sas: [
+      "1.9208",
+      "3.8416",
+      "0.9604",
+      "e.svcdate > a.index_date", // first event strictly after index
+      "e.svcdate <= a.index_date +", // ... and within the horizon
+    ],
+  },
 };
 
 /** Emit both languages for the spec and cross-check every analysis twin.
