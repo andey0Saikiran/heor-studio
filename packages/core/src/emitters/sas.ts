@@ -21,23 +21,22 @@ import type {
   CareSetting,
   CodeList,
   Criterion,
-  IncidenceRateAnalysis,
   RelativeWindow,
   StudySpec,
 } from "../spec/types";
 import type { EmitOptions, GeneratedFile, SasEmitter } from "./types";
+import { renderDaysPerYear } from "./parity";
 import {
-  ageBandLabels,
-  incidenceLimitations,
-  incidenceParity,
-  parityStamp,
-  renderDaysPerYear,
-  splitStratifiers,
-  stratLabel,
-  REGION_LABELS,
-  SEX_LABELS,
-  type SupportedStratifier,
-} from "./parity";
+  cmt,
+  header,
+  levelCheck,
+  sasName,
+  sq,
+  windowConds,
+  INCLUDE_SETUP,
+} from "./sas-base";
+import type { Ctx, ListKind, PulledList, SiteNaming } from "./sas-base";
+import { moduleAnalyses } from "./modules/registry";
 
 /* ================================================================== *
  *  small utilities
@@ -53,21 +52,6 @@ function sasDate(iso: string): string {
 
 function yearOf(iso: string): number {
   return Number(iso.slice(0, 4));
-}
-
-/** make an arbitrary id safe as (part of) a SAS name */
-function sasName(s: string): string {
-  return s.replace(/[^A-Za-z0-9_]/g, "_");
-}
-
-/** sanitize free text for use inside a SAS block comment */
-function cmt(s: string): string {
-  return s.replace(/\*\//g, "* /");
-}
-
-/** escape single quotes for a single-quoted SAS string literal */
-function sq(s: string): string {
-  return s.replace(/'/g, "''");
 }
 
 function qcode(s: string): string {
@@ -123,19 +107,6 @@ const FAMILY: Record<string, FamilyMeta> = {
   inpatient_services: { letter: "s", label: "inpatient services" },
   inpatient_admissions: { letter: "i", label: "inpatient admissions" },
 };
-
-interface SiteNaming {
-  /** whether the event/enrollment pulls loop over calendar years */
-  yearLoop: boolean;
-  /** libname statements for 00_setup */
-  libnameLines: string[];
-  /** naming-configuration block for 00_setup (per family letter used) */
-  namingLines: (letters: string[]) => string[];
-  /** SAS-side reference to a family table, e.g. "%tab_o(&yr.)" */
-  tab: (letter: string) => string;
-  /** where the Redbook-style NDC reference lives by default */
-  ndcRefDefault: string;
-}
 
 function makeSite(naming: TableNamingStrategy, database: string): SiteNaming {
   const familyComment = (letter: string): string => {
@@ -242,16 +213,6 @@ function yearWrap(site: SiteNaming, macroName: string, body: string[]): string[]
  *  spec digestion
  * ================================================================== */
 
-type ListKind = "dx" | "px" | "drug_name" | "ndc";
-
-interface PulledList {
-  list: CodeList;
-  kind: ListKind;
-  /** dx/px only: which care-setting sources to scan */
-  op: boolean;
-  ip: boolean;
-}
-
 function listKind(list: CodeList): ListKind {
   switch (list.system) {
     case "icd9cm":
@@ -317,23 +278,6 @@ function splitDxEras(list: CodeList): { icd10: string[]; icd9: string[] } {
  *  shared SAS fragments
  * ================================================================== */
 
-function idxExpr(n: number): string {
-  if (n === 0) return "a.index_date";
-  return n > 0 ? `a.index_date + ${n}` : `a.index_date - ${-n}`;
-}
-
-/** "and <alias>.svcdate ..." lines for a RelativeWindow vs index date */
-function windowConds(w: RelativeWindow, alias: string): string[] {
-  const out: string[] = [];
-  if (w.start !== "anytime_before") out.push(`and ${alias}.svcdate >= ${idxExpr(w.start)}`);
-  if (w.end !== "anytime_after") out.push(`and ${alias}.svcdate <= ${idxExpr(w.end)}`);
-  const startsAtOrBefore = w.start === "anytime_before" || w.start <= 0;
-  const endsAtOrAfter = w.end === "anytime_after" || w.end >= 0;
-  if (startsAtOrBefore && endsAtOrAfter && !w.includesIndex)
-    out.push(`and ${alias}.svcdate ne a.index_date`);
-  return out;
-}
-
 /** diagnosis-column scan with DXVER era handling; caller indents */
 function dxCondLines(cols: string[], mv10: string | null, mv9: string | null): string[] {
   const branch = (ver: string, mv: string): string[] => {
@@ -368,70 +312,9 @@ function pxCondLines(cols: string[], mv: string): string[] {
   });
 }
 
-function levelCheck(tableRef: string, note: string, extraCols: string[] = []): string[] {
-  return [
-    `title "Level check: ${tableRef}${note ? ` (${note})` : ""}";`,
-    `proc sql;`,
-    `  select count(*) as row_cnt, count(distinct enrolid) as pat_cnt${extraCols.length ? "," : ""}`,
-    ...extraCols.map((c, i) => `         ${c}${i === extraCols.length - 1 ? "" : ","}`),
-    `  from ${tableRef};`,
-    `quit;`,
-  ];
-}
-
-function header(spec: StudySpec, program: string, purpose: string[]): string[] {
-  const bar = "=".repeat(77);
-  const prov = spec.meta.provenance;
-  const provTxt =
-    prov.method === "llm_extraction"
-      ? `extracted by ${prov.model ?? "LLM"}${prov.sourceDocumentName ? ` from ${prov.sourceDocumentName}` : ""}`
-      : "manually specified";
-  return [
-    `/*${bar}`,
-    `| Project  : ${cmt(spec.meta.title)}`,
-    `| Program  : ${program}`,
-    `| Author   : HEOR Studio deterministic emitter (machine-generated; analyst review required)`,
-    `| Date     : run date &sysdate. / spec v${cmt(spec.meta.version)} (${provTxt})`,
-    `| Database : ${spec.meta.database} | study period ${spec.meta.studyPeriod.start} to ${spec.meta.studyPeriod.end}`,
-    ...purpose.map((p, i) => `| ${i === 0 ? "Purpose " : "        "} : ${cmt(p)}`),
-    `| Note     : Generated by HEOR Studio. Regenerate from the reviewed StudySpec`,
-    `|            rather than hand-editing derivation logic; every site-specific`,
-    `|            name is configured in 00_setup.sas (lines marked EDIT).`,
-    `${bar}*/`,
-    ``,
-  ];
-}
-
-const INCLUDE_SETUP = [
-  `%include "00_setup.sas";   /* EDIT: use the full site path to 00_setup.sas */`,
-  ``,
-];
-
 /* ================================================================== *
  *  emitter context
  * ================================================================== */
-
-interface Ctx {
-  spec: StudySpec;
-  opts: EmitOptions;
-  site: SiteNaming;
-  /** persistent project-library table reference, e.g. "tz.&tag._ev_pso_dx" */
-  tbl: (suffix: string) => string;
-  /** macro-variable name (<=32 chars, collision-free) */
-  mvar: (name: string) => string;
-  /** macro name for pull drivers */
-  mname: (name: string) => string;
-  evOf: (listId: string) => string;
-  ndcOf: (listId: string) => string;
-  pulled: PulledList[];
-  drugNameLists: CodeList[];
-  indexList: CodeList;
-  lettersUsed: string[];
-  finalCohort: string;
-  /** the person-time constant literal 00_setup embeds in %let days_per_year —
-   *  analysis programs stamp exactly this value into their parity headers */
-  daysPerYearLit: string;
-}
 
 function buildCtx(spec: StudySpec, opts: EmitOptions): Ctx {
   const tag = sasName(opts.tag);
@@ -1673,324 +1556,6 @@ function baselineProgram(ctx: Ctx): GeneratedFile | null {
 }
 
 /* ================================================================== *
- *  080_incidence.sas (one program per enabled incidence_rate analysis)
- * ================================================================== */
-
-function describeWin(w: RelativeWindow): string {
-  const s = w.start === "anytime_before" ? "anytime before" : `day ${w.start}`;
-  const e = w.end === "anytime_after" ? "anytime after" : `day ${w.end}`;
-  return `${s} .. ${e} relative to index (${w.includesIndex ? "includes" : "excludes"} the index date)`;
-}
-
-/**
- * SAS twin of the SQL build07Incidence: prevalent-case washout, at-risk
- * denominator, first outcome strictly after index, person-time censored at the
- * earliest of outcome / episode end / study end / max follow-up, and the SAME
- * Byar exact-Poisson closed form — so both languages produce identical numbers
- * from the same spec. SAS has no free runtime in the harness; correctness is
- * inherited from the machine-verified SQL twin via the PARITY header contract
- * (see emitters/parity.ts) plus matching arithmetic signatures.
- */
-function incidencePrograms(ctx: Ctx): GeneratedFile[] {
-  const { spec } = ctx;
-  const analyses = spec.analyses.filter(
-    (a): a is IncidenceRateAnalysis => a.kind === "incidence_rate" && a.enabled
-  );
-
-  return analyses.map((an, i) => {
-    const num = String((8 + i) * 10).padStart(3, "0"); // 080, 090, 100, ...
-    const suffix = analyses.length > 1 ? `_${sasName(an.id).toLowerCase()}` : "";
-    const outT = ctx.tbl(`${num}_incidence${suffix}`);
-    const cohT = ctx.finalCohort;
-    const evT = ctx.evOf(an.outcomeDefinition.codeListId);
-    const epiT = ctx.tbl("050_epi");
-    const M = an.rateMultiplier;
-    const cens = an.personTimeRule.censorAt;
-    const maxFu = an.personTimeRule.maxFollowupDays;
-
-    // administrative-censoring terms — mirrors the SQL twin exactly (death
-    // omitted: MarketScan mortality is unascertainable — BR-LIM-002)
-    const terms: string[] = [];
-    if (cens.includes("disenrollment")) terms.push("ep.dtend");
-    if (cens.includes("study_end")) terms.push("&study_end.");
-    if (cens.includes("max_followup") && maxFu != null) terms.push(`a.index_date + ${maxFu}`);
-    if (terms.length === 0) terms.push("&study_end."); // always bound follow-up
-    const adminExpr = terms.length === 1 ? terms[0] : `min(${terms.join(", ")})`;
-    const censorsAtOutcome = cens.includes("outcome");
-
-    // demographic strata — labels shared with the SQL twin (parity.ts) so both
-    // languages emit byte-identical stratum values. Derived from the enrollment
-    // segment (dobyr/sex/region/plantyp), never claim-level AGE, so the twins
-    // cannot drift around birthday timing.
-    const { supported: strata } = splitStratifiers(an.stratifyBy);
-    const needDemo = strata.some((s) => s.axis !== "year");
-    const needAge = strata.some((s) => s.axis === "age_band");
-    const stratAssign = (s: SupportedStratifier, v: string): string[] => {
-      switch (s.axis) {
-        case "sex": {
-          const arms = Object.entries(SEX_LABELS).map(
-            ([k, lab], j) => `${j === 0 ? "if" : "else if"} sex = '${k}' then ${v} = '${lab}';`
-          );
-          return [...arms, `else ${v} = 'Unknown';`];
-        }
-        case "region": {
-          const arms = Object.entries(REGION_LABELS).map(
-            ([k, lab], j) => `${j === 0 ? "if" : "else if"} region = '${k}' then ${v} = '${lab}';`
-          );
-          return [...arms, `else ${v} = 'Unknown';`];
-        }
-        case "plan_type":
-          return [`${v} = strip(vvalue(plantyp));`, `if ${v} in ('', '.') then ${v} = 'Unknown';`];
-        case "year":
-          return [`${v} = strip(put(year(index_date), 4.));`];
-        case "age_band": {
-          const bands = s.bands ?? [];
-          const labels = ageBandLabels(bands);
-          const arms: string[] = [`if age_at_index = . then ${v} = 'Unknown';`];
-          if (bands[0] > 0) arms.push(`else if age_at_index < ${bands[0]} then ${v} = '<${bands[0]}';`);
-          for (let j = bands.length - 1; j >= 1; j--)
-            arms.push(`else if age_at_index >= ${bands[j]} then ${v} = '${labels[j]}';`);
-          arms.push(`else ${v} = '${labels[0]}';`);
-          return arms;
-        }
-      }
-    };
-
-    const censorWords = [
-      ...(censorsAtOutcome ? ["first outcome"] : []),
-      ...(cens.includes("disenrollment") ? ["disenrollment (episode end)"] : []),
-      ...(cens.includes("study_end") || terms.includes("&study_end.") ? ["study end"] : []),
-      ...(cens.includes("max_followup") && maxFu != null ? [`index + ${maxFu}d max follow-up`] : []),
-    ].join(" / ");
-
-    const washLines = windowConds(an.washout, "e");
-    const limits = incidenceLimitations(an);
-    const label = an.label.replace(/"/g, "'");
-
-    const lines: string[] = [
-      ...header(spec, `${num}_incidence${suffix}.sas`, [
-        `Incidence rate (person-time) for "${an.label}":`,
-        `prevalent-case washout, at-risk denominator, follow-up censored`,
-        `at the earliest of ${censorWords},`,
-        `crude rate per ${M} person-years with a Byar exact-Poisson CI.`,
-        `Twin of the machine-verified SQL 07_incidence; keep both in sync.`,
-      ]),
-      // machine-readable twin contract: the harness compares this stamp against
-      // the SQL twin's — built from the values THIS program consumed
-      `/* ${parityStamp("incidence", incidenceParity(an, { daysPerYear: ctx.daysPerYearLit, censorTerms: cens, strata }))} */`,
-      ``,
-    ];
-
-    if (limits.length > 0) {
-      lines.push(
-        `/* REVIEW - spec options this program does not implement yet:`,
-        ...limits.map((l) => `   * ${cmt(l)}`),
-        `*/`,
-        ``
-      );
-    }
-
-    lines.push(
-      ...INCLUDE_SETUP,
-      `proc datasets lib=tz nolist nowarn;`,
-      `  delete ${outT.replace("tz.", "")};`,
-      `quit;`,
-      ``,
-      `/*----------------------------------------------------------------------------`,
-      `  Prevalent-case washout: any qualifying outcome event inside the washout`,
-      `  window (${cmt(describeWin(an.washout))})`,
-      `  marks the patient PREVALENT - excluded so only new-onset cases count.`,
-      `----------------------------------------------------------------------------*/`,
-      `proc sql;`,
-      `  create table work._${num}_prev as`,
-      `  select distinct a.enrolid`,
-      `  from ${cohT} as a`,
-      `  inner join ${evT} as e`,
-      `    on e.enrolid = a.enrolid`,
-      `  where 1 = 1`,
-      ...washLines.map((l, idx) => `    ${l}${idx === washLines.length - 1 ? ";" : ""}`),
-      ...(washLines.length === 0 ? [`  ;   /* washout window is unbounded - any prior event counts */`] : []),
-      `quit;`,
-      ``,
-      `title "Washout: prevalent patients excluded (${label})";`,
-      `proc sql;`,
-      `  select count(distinct enrolid) as prevalent_pat`,
-      `  from work._${num}_prev;`,
-      `quit;`,
-      ``,
-      `/*-------------------- at-risk denominator ----------------------------------*/`,
-      `proc sql;`,
-      `  create table work._${num}_atrisk as`,
-      `  select a.*`,
-      `  from ${cohT} as a`,
-      `  where a.enrolid not in (select enrolid from work._${num}_prev);`,
-      `quit;`,
-      ``,
-      ...levelCheck(`work._${num}_atrisk`, "at-risk cohort"),
-      ``,
-      `/*-------------------- first outcome strictly after index -------------------*/`,
-      `proc sql;`,
-      `  create table work._${num}_first_fu as`,
-      `  select a.enrolid,`,
-      `         min(e.svcdate) as fu_date format=date9.`,
-      `  from work._${num}_atrisk as a`,
-      `  inner join ${evT} as e`,
-      `    on  e.enrolid = a.enrolid`,
-      `    and e.svcdate > a.index_date`,
-      `  group by a.enrolid;`,
-      `quit;`,
-      ``,
-      ...(needDemo
-        ? [
-            `/*----------------------------------------------------------------------------`,
-            `  Stratum demographics from the enrollment segment in force at (or latest`,
-            `  before) the index date - the SAME source and tie-break as the SQL twin,`,
-            `  so stratum values cannot drift between languages.`,
-            `----------------------------------------------------------------------------*/`,
-            `proc sql;`,
-            `  create table work._${num}_dm0 as`,
-            `  select a.enrolid, b.dobyr, b.sex, b.region, b.plantyp,`,
-            `         b.dtstart as seg_start, b.dtend as seg_end`,
-            `  from work._${num}_atrisk as a`,
-            `  left join ${ctx.tbl("040_enroll")} as b`,
-            `    on  b.enrolid = a.enrolid`,
-            `    and b.dtstart <= a.index_date;`,
-            `quit;`,
-            ``,
-            `proc sort data=work._${num}_dm0;`,
-            `  by enrolid descending seg_start descending seg_end;`,
-            `run;`,
-            ``,
-            `data work._${num}_dm;`,
-            `  set work._${num}_dm0;`,
-            `  by enrolid;`,
-            `  if first.enrolid;`,
-            `  drop seg_start seg_end;`,
-            `run;`,
-            ``,
-          ]
-        : []),
-      `/*----------------------------------------------------------------------------`,
-      `  Person-time: administrative censor = earliest of`,
-      ...terms.map((t) => `    - ${cmt(t)}`),
-      `  taken on the stitched enrollment episode covering the index date.`,
-      `----------------------------------------------------------------------------*/`,
-      `proc sql;`,
-      `  create table work._${num}_pt as`,
-      `  select a.enrolid, a.index_date,`,
-      `         ${adminExpr} as admin_censor format=date9.,`,
-      `         b.fu_date${needDemo ? "," : ""}`,
-      ...(needDemo ? [`         dm.dobyr, dm.sex, dm.region, dm.plantyp`] : []),
-      `  from work._${num}_atrisk as a`,
-      `  inner join ${epiT} as ep`,
-      `    on  ep.enrolid = a.enrolid`,
-      `    and a.index_date between ep.dtstart and ep.dtend`,
-      ...(needDemo
-        ? [`  left join work._${num}_dm as dm`, `    on dm.enrolid = a.enrolid`]
-        : []),
-      `  left join work._${num}_first_fu as b`,
-      `    on b.enrolid = a.enrolid;`,
-      `quit;`,
-      ``,
-      `data work._${num}_pt2;`,
-      `  set work._${num}_pt;`,
-      ...(strata.length > 0
-        ? [`  length ${strata.map((_, j) => `strat_${j}`).join(" ")} $40;`]
-        : []),
-      `  /* a case = first outcome on or before the administrative censor date */`,
-      `  is_case = (fu_date ne . and fu_date <= admin_censor);`,
-      ...(censorsAtOutcome
-        ? [`  /* follow-up stops at the earliest of outcome and admin censoring */`,
-           `  censor_date = min(coalesce(fu_date, '31DEC9999'd), admin_censor);`]
-        : [`  /* follow-up runs to the admin censor date (no censoring at outcome) */`,
-           `  censor_date = admin_censor;`]),
-      `  person_days = censor_date - index_date;`,
-      ...(needAge
-        ? [`  /* enrollment-derived age (year - DOBYR), matching the SQL twin */`,
-           `  age_at_index = year(index_date) - dobyr;`]
-        : []),
-      ...strata.flatMap((s, j) => [
-        `  /* stratifier: ${cmt(stratLabel(s.label))} (${s.axis}) */`,
-        ...stratAssign(s, `strat_${j}`).map((l) => `  ${l}`),
-      ]),
-      `  format censor_date date9.;`,
-      `run;`,
-      ``,
-      ...levelCheck(`work._${num}_pt2`, "person-time rows", [
-        `sum(is_case) as cases`,
-        `sum(person_days) as person_days`,
-      ]),
-      ``,
-      `/*----------------------------------------------------------------------------`,
-      `  Crude rate per ${M} person-years + Byar exact-Poisson CI - the SAME closed`,
-      `  form as the SQL twin (Ulm AJE 1990;131:373), so both languages agree to`,
-      `  the last rounded digit:`,
-      `    low  = (1 - 1/(9x) - 1.96/(3*sqrt(x)))^3 * x          (0 when x = 0)`,
-      `    high = (1 - 1/(9(x+1)) + 1.96/(3*sqrt(x+1)))^3 * (x+1)`,
-      `----------------------------------------------------------------------------*/`,
-      `proc sql;`,
-      `  create table work._${num}_summ as`,
-      `  select 'Overall' as stratifier length=40,`,
-      `         'Overall' as stratum length=40,`,
-      `         count(*) as denominator,`,
-      `         sum(is_case) as patients,`,
-      `         sum(person_days) as person_days`,
-      `  from work._${num}_pt2`,
-      ...strata.flatMap((s, j) => [
-        `  union all`,
-        `  select '${sq(stratLabel(s.label))}', strat_${j},`,
-        `         count(*), sum(is_case), sum(person_days)`,
-        `  from work._${num}_pt2 group by strat_${j}`,
-      ]),
-      `  ;`,
-      `quit;`,
-      ``,
-      `data ${outT};`,
-      `  set work._${num}_summ;`,
-      `  length measure $20 ci_method $16;`,
-      `  measure   = 'incidence';`,
-      `  /* labeled with the method actually computed, never the merely-requested one */`,
-      `  ci_method = 'poisson_byar';`,
-      `  person_years = round(person_days / &days_per_year., 0.0001);`,
-      `  if person_days > 0 then do;`,
-      `    rate_per_1000py = round(patients * ${M} * &days_per_year. / person_days, 0.01);`,
-      `    if patients = 0 then _byar_low = 0;`,
-      `    else _byar_low = ((1 - 1/(9*patients) - 1.96/(3*sqrt(patients)))**3) * patients;`,
-      `    _byar_high = ((1 - 1/(9*(patients+1)) + 1.96/(3*sqrt(patients+1)))**3) * (patients+1);`,
-      `    ci_low  = round(_byar_low  * ${M} * &days_per_year. / person_days, 0.01);`,
-      `    ci_high = round(_byar_high * ${M} * &days_per_year. / person_days, 0.01);`,
-      `  end;`,
-      `  else do;`,
-      `    rate_per_1000py = .;`,
-      `    ci_low  = .;`,
-      `    ci_high = .;`,
-      `  end;`,
-      `  drop _byar_low _byar_high;`,
-      `run;`,
-      ``,
-      `/* same presentation order as the SQL twin's REVIEW query */`,
-      `proc sort data=${outT};`,
-      `  by stratifier stratum;`,
-      `run;`,
-      ``,
-      `title "Incidence rate per ${M} person-years: ${label}";`,
-      `proc print data=${outT} noobs;`,
-      `  var measure stratifier stratum patients denominator person_days person_years`,
-      `      rate_per_1000py ci_low ci_high ci_method;`,
-      `run;`,
-      ``
-    );
-
-    return {
-      path: `sas/${num}_incidence${suffix}.sas`,
-      language: "sas" as const,
-      title: `${num} Incidence rate${suffix ? ` (${an.label})` : ""}`,
-      content: lines.join("\n"),
-    };
-  });
-}
-
-/* ================================================================== *
  *  entry point
  * ================================================================== */
 
@@ -2010,7 +1575,14 @@ export const emitSas: SasEmitter = (spec: StudySpec, opts: EmitOptions): Generat
   if (attrition) files.push(attrition);
   const baseline = baselineProgram(ctx);
   if (baseline) files.push(baseline);
-  files.push(...incidencePrograms(ctx));
+
+  // 080+ analysis modules (one program per enabled analysis), dispatched
+  // through the module registry in spec order.
+  moduleAnalyses(spec.analyses).forEach(({ an, mod, multi }, i) => {
+    const num = String((8 + i) * 10).padStart(3, "0"); // 080, 090, 100, ...
+    const suffix = multi ? `_${sasName(an.id).toLowerCase()}` : "";
+    files.push(mod.sas(ctx, an as never, num, suffix));
+  });
 
   return files;
 };

@@ -19,6 +19,7 @@
 import { emitSql } from "../emitters/sql";
 import { emitSas } from "../emitters/sas";
 import { parseParityStamps } from "../emitters/parity";
+import { STAMP_KIND_BY_ANALYSIS } from "../emitters/modules/registry";
 import type { StudySpec, EmitOptions } from "../index";
 import type { Check } from "./run";
 
@@ -65,13 +66,9 @@ const SIGNATURES: Record<string, { sql: string[]; sas: string[] }> = {
   },
 };
 
-/** Analysis kinds with stamped module emitters in BOTH languages — grows as
- *  modules land. Spine kinds (attrition, table1) are always-on, not stamped. */
-const STAMP_KIND_BY_ANALYSIS: Record<string, string> = {
-  incidence_rate: "incidence",
-};
-
-/** Emit both languages for the spec and cross-check every analysis twin. */
+/** Emit both languages for the spec and cross-check every analysis twin.
+ *  The stamped-kind map derives from the module registry, so registering a
+ *  module automatically enrolls it here. */
 export function sasSqlParityChecks(spec: StudySpec, opts: EmitOptions): Check[] {
   const checks: Check[] = [];
   const sqlStamps = collect(emitSql(spec, "postgres", opts));

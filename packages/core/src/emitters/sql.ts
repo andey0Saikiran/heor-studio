@@ -23,7 +23,6 @@ import type {
   BaselineCharacteristic,
   CodeList,
   Criterion,
-  IncidenceRateAnalysis,
   RelativeWindow,
   StudySpec,
 } from "../spec/types";
@@ -36,33 +35,16 @@ import {
   PROC_COLUMNS,
 } from "../data/marketscan";
 import type {
-  EmitOptions,
   GeneratedFile,
-  SqlDialect,
   SqlEmitter,
 } from "./types";
-import {
-  ageBandLabels,
-  incidenceLimitations,
-  incidenceParity,
-  parityStamp,
-  renderDaysPerYear,
-  splitStratifiers,
-  stratLabel,
-  REGION_LABELS,
-  SEX_LABELS,
-  type SupportedStratifier,
-} from "./parity";
+import { q, oneLine, makeDialect, windowConds, describeWindow } from "./sql-base";
+import type { Ctx } from "./sql-base";
+import { moduleAnalyses } from "./modules/registry";
 
 /* ------------------------------------------------------------------ */
 /* Small utilities                                                     */
 /* ------------------------------------------------------------------ */
-
-/** Escape a value for inclusion in a single-quoted SQL literal. */
-const q = (s: string): string => s.replace(/'/g, "''");
-
-/** Collapse newlines so free text can live safely inside a `--` comment. */
-const oneLine = (s: string): string => s.replace(/\s*\r?\n\s*/g, " ").trim();
 
 const pad2 = (n: number): string => String(n).padStart(2, "0");
 
@@ -81,59 +63,6 @@ function inList(values: string[], indent: string): string {
     lines.push(indent + "  " + items.slice(i, i + 6).join(", "));
   }
   return `(\n${lines.join(",\n")}\n${indent})`;
-}
-
-/* ------------------------------------------------------------------ */
-/* Dialect                                                             */
-/* ------------------------------------------------------------------ */
-
-interface Dialect {
-  id: SqlDialect;
-  label: string;
-  /** `dateExpr` shifted by a whole number of days (may be negative). */
-  offset(dateExpr: string, days: number): string;
-  /** Whole days from `earlier` to `later` (later - earlier). */
-  daysBetween(later: string, earlier: string): string;
-  /** True when `expr` contains a match for the alternation `pattern`. */
-  regexContains(expr: string, pattern: string): string;
-  /** Statement head that (re)creates a table from the SELECT that follows. */
-  createTableAs(name: string): string;
-  /** Calendar year of a date expression, as an integer. */
-  year(dateExpr: string): string;
-  /** Round a numeric expression to one decimal place. */
-  round1(expr: string): string;
-  /** Round a numeric expression to n decimal places (Postgres needs a NUMERIC cast). */
-  roundN(expr: string, n: number): string;
-}
-
-function makeDialect(id: SqlDialect): Dialect {
-  if (id === "postgres") {
-    return {
-      id,
-      label: "PostgreSQL",
-      offset: (e, days) =>
-        days === 0 ? e : days > 0 ? `(${e} + ${days})` : `(${e} - ${-days})`,
-      daysBetween: (later, earlier) => `(${later} - ${earlier})`,
-      // SIMILAR TO understands (A|B) alternation; % makes it a contains-match.
-      regexContains: (e, p) => `${e} SIMILAR TO '%(${q(p)})%'`,
-      createTableAs: (n) => `DROP TABLE IF EXISTS ${n};\nCREATE TABLE ${n} AS`,
-      year: (e) => `CAST(EXTRACT(YEAR FROM ${e}) AS INT)`,
-      round1: (e) => `ROUND(CAST(${e} AS NUMERIC), 1)`,
-      roundN: (e, n) => `ROUND(CAST(${e} AS NUMERIC), ${n})`,
-    };
-  }
-  return {
-    id,
-    label: "Snowflake",
-    offset: (e, days) => (days === 0 ? e : `DATEADD(day, ${days}, ${e})`),
-    daysBetween: (later, earlier) => `DATEDIFF(day, ${earlier}, ${later})`,
-    // RLIKE anchors the whole string, hence the '.*' wrappers.
-    regexContains: (e, p) => `${e} RLIKE '.*(${q(p)}).*'`,
-    createTableAs: (n) => `CREATE OR REPLACE TABLE ${n} AS`,
-    year: (e) => `YEAR(${e})`,
-    round1: (e) => `ROUND(${e}, 1)`,
-    roundN: (e, n) => `ROUND(${e}, ${n})`,
-  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -207,16 +136,6 @@ function namingNote(naming: TableNamingStrategy): string[] {
 /* Shared context + file header                                        */
 /* ------------------------------------------------------------------ */
 
-interface Ctx {
-  spec: StudySpec;
-  d: Dialect;
-  opts: EmitOptions;
-  /** Work-table prefix (lower-cased study tag). */
-  wp: string;
-  /** Logical family key -> physical table name. */
-  t: (key: string) => string;
-}
-
 function header(
   ctx: Ctx,
   fileName: string,
@@ -261,39 +180,6 @@ function header(
   L.push(`-- add casts if your load stores them numerically.`);
   L.push(bar);
   return L.join("\n");
-}
-
-/* ------------------------------------------------------------------ */
-/* Relative windows                                                    */
-/* ------------------------------------------------------------------ */
-
-function describeWindow(w: RelativeWindow): string {
-  const s = w.start === "anytime_before" ? "anytime before" : `day ${w.start}`;
-  const e = w.end === "anytime_after" ? "anytime after" : `day ${w.end}`;
-  const inc = w.includesIndex ? "includes" : "excludes";
-  return `${s} .. ${e} relative to index (${inc} index date)`;
-}
-
-/** Predicates locating `dateExpr` inside window `w` around `indexExpr`. */
-function windowConds(
-  w: RelativeWindow,
-  dateExpr: string,
-  indexExpr: string,
-  d: Dialect
-): string[] {
-  const conds: string[] = [];
-  if (w.start !== "anytime_before") {
-    conds.push(`${dateExpr} >= ${d.offset(indexExpr, w.start)}`);
-  }
-  if (w.end !== "anytime_after") {
-    conds.push(`${dateExpr} <= ${d.offset(indexExpr, w.end)}`);
-  }
-  const spansStart = w.start === "anytime_before" || w.start <= 0;
-  const spansEnd = w.end === "anytime_after" || w.end >= 0;
-  if (!w.includesIndex && spansStart && spansEnd) {
-    conds.push(`${dateExpr} <> ${indexExpr}`);
-  }
-  return conds;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1323,167 +1209,6 @@ function build06(ctx: Ctx): string {
 }
 
 /* ------------------------------------------------------------------ */
-/* 07 - Incidence rate (person-time)                                   */
-/* ------------------------------------------------------------------ */
-
-/**
- * Incidence rate / density with prevalent-case washout, person-time censoring,
- * and a Byar exact-Poisson CI computed closed-form in SQL. Reads the cohort,
- * event, and enrollment-episode work tables built by 01-05. Verified against
- * the synthetic fixture (verify/proto_incidence.ts): 3 cases / 8 at-risk /
- * 2425 person-days / 451.86 per 1,000 PY / Byar CI (90.82, 1320.24).
- */
-function build07Incidence(ctx: Ctx, an: IncidenceRateAnalysis, suffix = ""): string {
-  const { d, wp, spec } = ctx;
-  const out = `${wp}_incidence${suffix}`;
-  const clid = an.outcomeDefinition.codeListId;
-  const M = an.rateMultiplier;
-  // Rendered as a DECIMAL literal (e.g. "365.0") so the rate arithmetic is
-  // numeric — an integer constant would trigger integer division (451 vs 451.55).
-  const Y = renderDaysPerYear(spec);
-  const maxFu = an.personTimeRule.maxFollowupDays;
-  const studyEnd = spec.meta.studyPeriod.end;
-
-  // prevalent-case washout predicate (an outcome anywhere in this pre-index window)
-  const wc = windowConds(an.washout, "a.event_date", "c.index_date", d);
-  const washoutPred = wc.length > 0 ? wc.join("\n      AND ") : "TRUE";
-
-  // administrative-censoring terms from personTimeRule.censorAt (death omitted:
-  // MarketScan mortality is unascertainable — BR-LIM-002)
-  const terms: string[] = [];
-  const cens = an.personTimeRule.censorAt;
-  if (cens.includes("disenrollment")) terms.push("ep.episode_end");
-  if (cens.includes("study_end")) terms.push(`DATE '${studyEnd}'`);
-  if (cens.includes("max_followup") && maxFu != null) terms.push(d.offset("c.index_date", maxFu));
-  if (terms.length === 0) terms.push(`DATE '${studyEnd}'`); // always bound follow-up
-  const adminCensor = terms.length === 1 ? terms[0] : `LEAST(${terms.join(", ")})`;
-  const censorFinal = cens.includes("outcome")
-    ? `LEAST(COALESCE(fu_date, DATE '9999-12-31'), admin_censor)`
-    : `admin_censor`;
-
-  const byarLow = `(CASE WHEN patients = 0 THEN 0 ELSE POWER(1 - 1.0/(9*patients) - 1.96/(3*SQRT(patients)), 3) * patients END)`;
-  const byarHigh = `POWER(1 - 1.0/(9*(patients+1)) + 1.96/(3*SQRT(patients+1)), 3) * (patients+1)`;
-  const scale = `* ${M} * ${Y} / NULLIF(person_days, 0)`;
-
-  // demographic strata — labels shared with the SAS twin (parity.ts) so both
-  // languages emit byte-identical stratum values. Strata are derived from the
-  // enrollment segment (dobyr/sex/region/plantyp), never claim-level AGE, so
-  // SAS and SQL cannot drift around birthday timing.
-  const { supported: strata } = splitStratifiers(an.stratifyBy);
-  const needDemo = strata.some((s) => s.axis !== "year");
-  const ageExpr = `${d.year("index_date")} - dobyr`;
-  const stratExpr = (s: SupportedStratifier): string => {
-    switch (s.axis) {
-      case "sex":
-        return `CASE CAST(sex AS VARCHAR) ${Object.entries(SEX_LABELS)
-          .map(([k, v]) => `WHEN '${k}' THEN '${v}'`)
-          .join(" ")} ELSE 'Unknown' END`;
-      case "region":
-        return `CASE CAST(region AS VARCHAR) ${Object.entries(REGION_LABELS)
-          .map(([k, v]) => `WHEN '${k}' THEN '${v}'`)
-          .join(" ")} ELSE 'Unknown' END`;
-      case "plan_type":
-        return `COALESCE(CAST(plantyp AS VARCHAR), 'Unknown')`;
-      case "year":
-        return `CAST(${d.year("index_date")} AS VARCHAR)`;
-      case "age_band": {
-        const bands = s.bands ?? [];
-        const labels = ageBandLabels(bands);
-        const arms: string[] = [`WHEN ${ageExpr} IS NULL THEN 'Unknown'`];
-        if (bands[0] > 0) arms.push(`WHEN ${ageExpr} < ${bands[0]} THEN '<${bands[0]}'`);
-        for (let i = bands.length - 1; i >= 1; i--)
-          arms.push(`WHEN ${ageExpr} >= ${bands[i]} THEN '${labels[i]}'`);
-        return `CASE ${arms.join(" ")} ELSE '${labels[0]}' END`;
-      }
-    }
-  };
-
-  const L: string[] = [];
-  // machine-readable twin contract: the harness compares this stamp against the
-  // SAS twin's — built from the values THIS builder consumed (see parity.ts)
-  L.push(`-- ${parityStamp("incidence", incidenceParity(an, { daysPerYear: Y, censorTerms: cens, strata }))}`);
-  const limits = incidenceLimitations(an);
-  if (limits.length > 0) {
-    L.push(`-- REVIEW - spec options this program does not implement yet:`);
-    for (const lim of limits) L.push(`--   * ${lim}`);
-  }
-  L.push(d.createTableAs(out));
-  L.push(`WITH cohort AS (SELECT enrolid, index_date FROM ${wp}_cohort),`);
-  L.push(`ae AS (SELECT enrolid, event_date FROM ${wp}_events WHERE code_list_id = '${q(clid)}'),`);
-  L.push(`prevalent AS (   -- washout: ${describeWindow(an.washout)}`);
-  L.push(`  SELECT DISTINCT c.enrolid`);
-  L.push(`  FROM cohort c JOIN ae a ON a.enrolid = c.enrolid`);
-  L.push(`  WHERE ${washoutPred}`);
-  L.push(`),`);
-  L.push(`atrisk AS (SELECT c.* FROM cohort c WHERE c.enrolid NOT IN (SELECT enrolid FROM prevalent)),`);
-  L.push(`first_fu AS (   -- first qualifying outcome strictly after index`);
-  L.push(`  SELECT c.enrolid, MIN(a.event_date) AS fu_date`);
-  L.push(`  FROM atrisk c JOIN ae a ON a.enrolid = c.enrolid AND a.event_date > c.index_date`);
-  L.push(`  GROUP BY c.enrolid`);
-  L.push(`),`);
-  if (needDemo) {
-    L.push(`demo AS (   -- enrollment segment in force at (or latest before) index; rn=1 wins`);
-    L.push(`  SELECT c.enrolid, en.dobyr, en.sex, en.region, en.plantyp,`);
-    L.push(`         ROW_NUMBER() OVER (PARTITION BY c.enrolid`);
-    L.push(`                            ORDER BY en.dtstart DESC, en.dtend DESC) AS rn`);
-    L.push(`  FROM atrisk c`);
-    L.push(`  JOIN ${ctx.t("enrollment_detail")} en`);
-    L.push(`    ON en.enrolid = c.enrolid`);
-    L.push(`   AND en.dtstart <= c.index_date`);
-    L.push(`),`);
-    L.push(`demo1 AS (SELECT enrolid, dobyr, sex, region, plantyp FROM demo WHERE rn = 1),`);
-  }
-  L.push(`pt AS (`);
-  L.push(
-    `  SELECT c.enrolid, c.index_date, ${adminCensor} AS admin_censor, f.fu_date` +
-      (needDemo ? `,` : ``)
-  );
-  if (needDemo) L.push(`         dm.dobyr, dm.sex, dm.region, dm.plantyp`);
-  L.push(`  FROM atrisk c`);
-  L.push(`  JOIN ${wp}_enroll_episodes ep`);
-  L.push(`    ON ep.enrolid = c.enrolid AND c.index_date BETWEEN ep.episode_start AND ep.episode_end`);
-  if (needDemo) L.push(`  LEFT JOIN demo1 dm ON dm.enrolid = c.enrolid`);
-  L.push(`  LEFT JOIN first_fu f ON f.enrolid = c.enrolid`);
-  L.push(`),`);
-  L.push(`pt2 AS (`);
-  L.push(`  SELECT ${d.daysBetween(censorFinal, "index_date")} AS person_days,`);
-  L.push(
-    `         CASE WHEN fu_date IS NOT NULL AND fu_date <= admin_censor THEN 1 ELSE 0 END AS is_case` +
-      (strata.length > 0 ? "," : "")
-  );
-  strata.forEach((s, i) => {
-    L.push(`         ${stratExpr(s)} AS strat_${i}${i < strata.length - 1 ? "," : ""}`);
-  });
-  L.push(`  FROM pt`);
-  L.push(`),`);
-  L.push(`summ AS (`);
-  L.push(`  SELECT 'incidence' AS measure, 'Overall' AS stratifier, 'Overall' AS stratum,`);
-  L.push(`         SUM(is_case) AS patients, COUNT(*) AS denominator, SUM(person_days) AS person_days`);
-  L.push(`  FROM pt2`);
-  strata.forEach((s, i) => {
-    L.push(`  UNION ALL`);
-    L.push(`  SELECT 'incidence', '${q(stratLabel(s.label))}', strat_${i},`);
-    L.push(`         SUM(is_case), COUNT(*), SUM(person_days)`);
-    L.push(`  FROM pt2 GROUP BY strat_${i}`);
-  });
-  L.push(`)`);
-  L.push(`SELECT measure, stratifier, stratum, patients, denominator, person_days,`);
-  L.push(`       ${d.roundN(`person_days / ${Y}`, 4)} AS person_years,`);
-  L.push(`       ${d.roundN(`patients * ${M} * ${Y} / NULLIF(person_days, 0)`, 2)} AS rate_per_1000py,`);
-  L.push(`       ${d.roundN(`${byarLow} ${scale}`, 2)} AS ci_low,`);
-  L.push(`       ${d.roundN(`${byarHigh} ${scale}`, 2)} AS ci_high,`);
-  // labeled with the method actually computed (Byar), never the merely-requested
-  // one — a mislabeled statistic is worse than a visibly-substituted one
-  L.push(`       'poisson_byar' AS ci_method`);
-  L.push(`FROM summ;`);
-  L.push("");
-  L.push(`-- REVIEW: incidence rate per ${M} person-years, Overall + per stratum.`);
-  L.push(`SELECT * FROM ${out}`);
-  L.push(`ORDER BY stratifier, stratum;`);
-  return L.join("\n");
-}
-
-/* ------------------------------------------------------------------ */
 /* Emitter                                                             */
 /* ------------------------------------------------------------------ */
 
@@ -1595,25 +1320,13 @@ export const emitSql: SqlEmitter = (spec, dialect, opts) => {
     ),
   ];
 
-  // 07+ analysis modules (one file per enabled analysis). Descriptive-epi first.
-  const incAnalyses = spec.analyses.filter(
-    (a): a is IncidenceRateAnalysis => a.kind === "incidence_rate" && a.enabled
-  );
-  incAnalyses.forEach((an, i) => {
-    const suffix = incAnalyses.length > 1 ? `_${an.id.toLowerCase().replace(/[^a-z0-9]+/g, "_")}` : "";
-    files.push(
-      mk(
-        String(7 + i).padStart(2, "0"),
-        `incidence${suffix}`,
-        `07 Incidence rate${suffix ? ` (${an.label})` : ""}`,
-        "person-time incidence rate with washout + Byar CI",
-        [],
-        [`Analysis: ${oneLine(an.label)} (id ${an.id}); outcome code list "${an.outcomeDefinition.codeListId}".`],
-        // suffix flows into the output table name too, so multiple incidence
-        // analyses never clobber each other's {wp}_incidence table
-        build07Incidence(ctx, an, suffix)
-      )
-    );
+  // 07+ analysis modules (one file per enabled analysis), dispatched through
+  // the module registry in spec order. The suffix (applied to slug AND output
+  // table names) disambiguates several analyses of the same kind.
+  moduleAnalyses(spec.analyses).forEach(({ an, mod, multi }, i) => {
+    const suffix = multi ? `_${an.id.toLowerCase().replace(/[^a-z0-9]+/g, "_")}` : "";
+    const f = mod.sql(ctx, an as never, suffix);
+    files.push(mk(String(7 + i).padStart(2, "0"), f.slug, f.title, f.subtitle, [], f.extra, f.body));
   });
 
   return files;
