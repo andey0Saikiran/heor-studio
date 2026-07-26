@@ -78,6 +78,11 @@ async function main() {
   const exp = parse(await a.callTool({ name: "export_bundle", arguments: { artifact_id: gen.artifact_id } }));
   check("export_bundle wrote a zip", typeof exp.zip_path === "string" && exp.bytes > 0, `${exp.zip_path} (${exp.bytes} bytes)`);
 
+  // ---- 5a. run_verification: engine proof + code smoke on the generated SQL ----
+  const ver = parse(await a.callTool({ name: "run_verification", arguments: { spec_id: s2.spec_id } }));
+  check("run_verification engine proof passes", ver.engine_proof?.status === "passed", JSON.stringify(ver.engine_proof?.status));
+  check("run_verification code smoke ran", ver.code_smoke?.status === "passed" || ver.code_smoke?.status === "failed", JSON.stringify(ver.code_smoke?.status));
+
   // ---- 5b. learning protocol: report_correction records with a reason ----
   const corr = parse(await a.callTool({ name: "report_correction", arguments: {
     target_kind: "statistic", target_ref: "smoke-test-rate", claim: "rate looks off", reason: "smoke-test reason",

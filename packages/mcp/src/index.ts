@@ -39,6 +39,7 @@ import {
 } from "@heor-studio/core";
 import type { StudySpec, BundleEntry, EmitOptions, ExtractSource, CorrectionTargetKind, CorrectionClass } from "@heor-studio/core";
 import { newCorrection, formatCorrectionMarkdown } from "@heor-studio/core";
+import { verifyGoldA, verifySpec } from "@heor-studio/core/verify";
 import { putSpec, getSpec, putArtifact, getArtifact } from "./session.js";
 
 const log = (msg: string) => console.error(`[heor-studio-mcp] ${msg}`);
@@ -228,21 +229,45 @@ server.registerTool(
 server.registerTool(
   "run_verification",
   {
-    title: "Verify generated code (planned)",
+    title: "Verify generated code against a synthetic dataset",
     description:
-      "Execute the generated SQL against a bundled synthetic MarketScan-shaped dataset and assert " +
-      "invariants (monotonic attrition, non-negative person-time, plausible rates). Not yet " +
-      "implemented — returns a not_implemented status.",
-    inputSchema: { artifact_id: z.string() },
+      "Machine-verification, two parts: (1) ENGINE PROOF — re-runs the gold case (a fixed synthetic " +
+      "MarketScan study with hand-computed ground truth) to confirm the emitter templates you are " +
+      "using produce exactly the right numbers this release; (2) optional CODE SMOKE — if you pass a " +
+      "spec_id, executes YOUR generated Postgres SQL against a synthetic MarketScan-shaped dataset in " +
+      "an embedded Postgres and checks structural invariants (attrition monotonic, numerator<=denominator, " +
+      "CI ordering, no negative person-time). The smoke proves your generated code RUNS and is internally " +
+      "consistent; it does not validate your study's numbers (that needs your own licensed data). No data " +
+      "leaves the machine.",
+    inputSchema: {
+      spec_id: z.string().optional().describe("Optional: also smoke-test this spec's generated SQL"),
+    },
   },
-  async ({ artifact_id }) => {
-    const art = getArtifact(artifact_id);
-    if (!art) return fail(`No artifact with id '${artifact_id}'.`);
-    return json({
-      status: "not_implemented",
-      note: "Execution-based verification on synthetic data lands with the verification module. " +
-        "Until then, verify by review and by running the code against your own licensed MarketScan.",
-    });
+  async ({ spec_id }) => {
+    const gold = await verifyGoldA();
+    const out: Record<string, unknown> = {
+      engine_proof: {
+        gold_case: "A (new-user AE incidence)",
+        status: gold.status,
+        checks: gold.checks.map((c) => `${c.status === "pass" ? "PASS" : "FAIL"} ${c.name}`),
+        invariants: gold.invariants.map((i) => `${i.status} ${i.name}`),
+      },
+    };
+    if (spec_id) {
+      const spec = getSpec(spec_id);
+      if (!spec) return fail(`No spec with id '${spec_id}'. Call validate_spec first.`);
+      const smoke = await verifySpec(spec, { naming: { kind: "yearly_sas", prefix: "ccae" }, tag: "verify" });
+      out.code_smoke = {
+        status: smoke.status,
+        executed: smoke.execution.map((s) => `${s.ok ? "ok" : "FAIL"} ${s.path}${s.error ? " :: " + s.error : ""}`),
+        invariants: smoke.invariants.map((i) => `${i.status} ${i.name} — ${i.detail}`),
+        note: "Structural smoke test on a synthetic dataset — proves the generated SQL runs and is " +
+          "internally consistent. Validate real numbers by running the code on your licensed MarketScan.",
+      };
+    }
+    out.overall = gold.status === "passed" && (!spec_id || (out.code_smoke as { status: string }).status === "passed")
+      ? "passed" : "failed";
+    return json(out);
   },
 );
 
