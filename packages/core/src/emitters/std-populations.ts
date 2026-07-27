@@ -164,3 +164,94 @@ export function rebaseWeights(
     coveredWeightPct: Number(pct.toFixed(2)),
   };
 }
+
+/**
+ * Collapse a reference population onto the study's OWN age bands.
+ *
+ * Direct standardization is only defined when each study band is a union of
+ * whole reference bands. If a study boundary falls INSIDE a reference band the
+ * weight would have to be split, and there is no non-arbitrary way to do it —
+ * assuming a uniform age distribution within the band is exactly the kind of
+ * invented number this project refuses to ship.
+ *
+ * Real example from the gold fixture: the default banding
+ * [0, 18, 35, 45, 55, 65] puts a boundary at 18, but US 2000 runs 15-24. The
+ * 18 boundary cuts that band in half, so the study CANNOT be standardized to
+ * US 2000 without interpolation. The honest response is to say so and name the
+ * bands that would work — not to silently apportion 15-24 and report a rate.
+ *
+ * The terminal band is the one exception: reference bands above the study's
+ * final lower bound are always collapsible, because the study's last band is
+ * open-ended and so is the reference's.
+ */
+export interface CollapsedReference {
+  ok: boolean;
+  /** study band lower bound -> summed reference weight */
+  weights: Array<{ lower: number; label: string; weight: number }>;
+  /** share of the reference population the study bands cover */
+  coveredWeightPct: number;
+  /** why the collapse is impossible, when ok is false */
+  problem?: string;
+}
+
+export function collapseReferenceToStudyBands(
+  p: StandardPopulation,
+  studyBandLowers: number[],
+): CollapsedReference {
+  const study = [...studyBandLowers].sort((a, b) => a - b);
+  const refLowers = p.bands.map((b) => b.lower);
+
+  /* Every study boundary except the first must coincide with a reference
+   * boundary, or it splits a reference band. */
+  const misaligned = study.filter((lo, i) => i > 0 && !refLowers.includes(lo));
+  if (misaligned.length > 0) {
+    return {
+      ok: false,
+      weights: [],
+      coveredWeightPct: 0,
+      problem:
+        `study age bands cannot be standardized to ${p.label}: boundary/boundaries at ` +
+        `${misaligned.join(", ")} fall INSIDE reference bands, so their weights would have to be ` +
+        `split with an assumed within-band age distribution. Re-band the study on the reference's ` +
+        `own boundaries (${refLowers.join(", ")}) — the terminal band may be open-ended — or choose ` +
+        `a reference whose bands match`,
+    };
+  }
+
+  const weights = study.map((lo, i) => {
+    const hi = i === study.length - 1 ? Infinity : study[i + 1];
+    const weight = p.bands
+      .filter((b) => b.lower >= lo && b.lower < hi)
+      .reduce((a, b) => a + b.weight, 0);
+    return {
+      lower: lo,
+      label: i === study.length - 1 ? `${lo}+` : `${lo}-${study[i + 1] - 1}`,
+      weight,
+    };
+  });
+
+  const covered = weights.reduce((a, w) => a + w.weight, 0);
+  return {
+    ok: true,
+    weights,
+    coveredWeightPct: Number(((covered / p.publishedTotal) * 100).toFixed(2)),
+  };
+}
+
+/** Directly standardized rate: the weighted average of stratum rates.
+ *  Returned alongside the weights so the caller can show the derivation —
+ *  a DSR without its weights is not checkable by a reviewer. */
+export function directlyStandardizedRate(
+  strata: Array<{ lower: number; rate: number }>,
+  weights: Array<{ lower: number; weight: number }>,
+): { dsr: number; totalWeight: number } {
+  let num = 0;
+  let den = 0;
+  for (const w of weights) {
+    const s = strata.find((x) => x.lower === w.lower);
+    if (!s) continue;
+    num += w.weight * s.rate;
+    den += w.weight;
+  }
+  return { dsr: den > 0 ? num / den : 0, totalWeight: den };
+}
