@@ -1,11 +1,12 @@
 /* Verification entry — run: npm run verify -w @heor-studio/core */
-import { verifyGoldA, verifyDaysPerYearChoice, verifySettingFilterControl, verifySuppression } from "./run";
+import { verifyGoldA, verifyDaysPerYearChoice, verifySettingFilterControl, verifySuppression, verifyWashoutToggle } from "./run";
 import { verifySilenceGuards } from "./guards";
 
 async function main() {
   const r = await verifyGoldA();
   const dpy = await verifyDaysPerYearChoice();
   const sfc = await verifySettingFilterControl();
+  const wt = await verifyWashoutToggle();
   const sup = await verifySuppression();
   const sg = verifySilenceGuards();
 
@@ -27,6 +28,9 @@ async function main() {
   console.log("\n=== outcome care-setting filter (negative control) ===");
   for (const c of sfc) console.log(`  ${c.status === "pass" ? "PASS" : "FAIL"}  ${c.name} — ${c.detail}`);
 
+  console.log("\n=== prevalent-case washout (incidence <-> prevalence toggle) ===");
+  for (const c of wt) console.log(`  ${c.status === "pass" ? "PASS" : "FAIL"}  ${c.name} — ${c.detail}`);
+
   console.log("\n=== small-cell suppression (BR-DEL-004, derivation-aware) ===");
   for (const c of sup) console.log(`  ${c.status === "pass" ? "PASS" : "FAIL"}  ${c.name} — ${c.detail}`);
 
@@ -35,10 +39,11 @@ async function main() {
 
   const dpyOk = dpy.every((c) => c.status === "pass");
   const sfcOk = sfc.every((c) => c.status === "pass");
+  const wtOk = wt.every((c) => c.status === "pass");
   const supOk = sup.every((c) => c.status === "pass");
   const sgOk = sg.every((c) => c.status === "pass");
-  console.log(`\nGold Case A: ${r.status.toUpperCase()}${dpyOk ? "" : "  (daysPerYear regression FAILED)"}${sfcOk ? "" : "  (setting-filter control FAILED)"}${supOk ? "" : "  (suppression FAILED)"}${sgOk ? "" : "  (silence guards FAILED)"}`);
-  process.exit(r.status === "passed" && dpyOk && sfcOk && supOk && sgOk ? 0 : 1);
+  console.log(`\nGold Case A: ${r.status.toUpperCase()}${dpyOk ? "" : "  (daysPerYear regression FAILED)"}${sfcOk ? "" : "  (setting-filter control FAILED)"}${wtOk ? "" : "  (washout toggle FAILED)"}${supOk ? "" : "  (suppression FAILED)"}${sgOk ? "" : "  (silence guards FAILED)"}`);
+  process.exit(r.status === "passed" && dpyOk && sfcOk && wtOk && supOk && sgOk ? 0 : 1);
 }
 
 main().catch((e) => { console.error("crashed:", e); process.exit(1); });

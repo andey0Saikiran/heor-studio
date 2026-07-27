@@ -189,6 +189,65 @@ export async function verifySuppression(): Promise<Check[]> {
   return out;
 }
 
+/** Prevalent-case washout: the incidence<->prevalence TOGGLE test.
+ *
+ *  The coverage matrix asks for exactly this and it had never been built: run
+ *  the SAME outcome definition as an INCIDENCE measure (washout applied, at-risk
+ *  denominator) and as a PERIOD-PREVALENCE measure (no washout, enrolled-anytime
+ *  denominator), and assert the only thing that moves is the denominator — by
+ *  precisely the number of prevalent cases the washout removed.
+ *
+ *  On the gold fixture: cohort 10, prevalent-in-baseline 2 (P01, P06), at-risk 8.
+ *  So prevalence denominator (10) - incidence denominator (8) = 2 = prevalent.
+ *  If the washout silently stopped applying, the two denominators would collapse
+ *  to the same number and this check fails — which no other check would catch,
+ *  because the incidence gold numbers would still be internally consistent. */
+export async function verifyWashoutToggle(): Promise<Check[]> {
+  const out: Check[] = [];
+  const push = (name: string, cond: boolean, detail: string) =>
+    out.push({ name, status: cond ? "pass" : "fail", detail });
+
+  const { db, ok } = await seedAndRun(GOLD_A_SPEC, GOLD_A_OPTS);
+  if (!ok) return [{ name: "washout toggle executes", status: "fail", detail: "execution failed" }];
+
+  const incDenom = await scalar<number>(db, "SELECT denominator FROM tz_study_incidence WHERE stratum = 'Overall'");
+  const prevDenom = await scalar<number>(db, "SELECT denominator FROM tz_study_periodprev_a_perp_2019 WHERE stratum = 'Overall'");
+  const cohortN = await scalar<number>(db, "SELECT count(*)::int FROM tz_study_cohort");
+
+  push("washout toggle: prevalence denominator = whole cohort (no washout)",
+    Number(prevDenom) === Number(cohortN), `prevalence ${prevDenom} vs cohort ${cohortN}`);
+  push("washout toggle: incidence denominator = cohort MINUS prevalent cases",
+    Number(incDenom) === Number(cohortN) - EXPECTED.prevalentM,
+    `incidence ${incDenom}, cohort ${cohortN}, prevalent ${EXPECTED.prevalentM}`);
+  push(`washout toggle: the ONLY difference is the ${EXPECTED.prevalentM} washed-out prevalent cases`,
+    Number(prevDenom) - Number(incDenom) === EXPECTED.prevalentM,
+    `difference ${Number(prevDenom) - Number(incDenom)}, expected ${EXPECTED.prevalentM}`);
+
+  /* Zero-check invariant the matrix names: no subject may be counted BOTH as
+   * washed-out-prevalent and as an incident case. The at-risk set is built by
+   * anti-join, so this is structural — but asserting it is what turns "we think
+   * the anti-join is right" into "the executed result says so". */
+  const overlap = await scalar<number>(
+    db,
+    `WITH prevalent AS (
+       SELECT DISTINCT c.enrolid
+       FROM tz_study_cohort c
+       JOIN tz_study_events e ON e.enrolid = c.enrolid AND e.code_list_id = 'ae_dx' AND e.setting = 'outpatient'
+       WHERE e.event_date >= (c.index_date - 365) AND e.event_date <= c.index_date
+     ),
+     incident AS (
+       SELECT DISTINCT c.enrolid
+       FROM tz_study_cohort c
+       JOIN tz_study_events e ON e.enrolid = c.enrolid AND e.code_list_id = 'ae_dx' AND e.setting = 'outpatient'
+       WHERE e.event_date > c.index_date
+     )
+     SELECT count(*)::int FROM prevalent p JOIN incident i ON i.enrolid = p.enrolid`,
+  );
+  push("washout toggle: (washed-out prevalent AND counted incident) = 0",
+    Number(overlap) === 0, `${overlap} subjects in both sets`);
+  return out;
+}
+
 /** Full Gold Case A verification: execute + assert the hand-computed spine
  *  ground truth + invariants. (Descriptive-epi value checks activate once the
  *  incidence module lands in Step 4.) */
