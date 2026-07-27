@@ -188,6 +188,17 @@ function sqlFingerprint(kind: string, raw: string): Fingerprint {
       put(fp, "enrol_covers_date", grab(sql, [/DATE\s*'(\d{4}-\d{2}-\d{2})'\s+BETWEEN\s+ep\.episode_start/i]));
       break;
     }
+    case "smd_balance": {
+      // SMD must use SAMPLE variance and the pooled (halved-sum) denominator;
+      // a switch to population variance changes every balance number quietly.
+      put(fp, "sample_variance", /VAR_SAMP\(/i.test(sql) ? "yes" : "no");
+      put(fp, "pooled_halved_denominator", /\/\s*2\.0\s*\)/.test(sql) ? "yes" : "no");
+      // anchored on "> <thr> THEN 1": the ABS() argument contains nested parens,
+      // so matching inside it needs balancing (same trap as POWER above)
+      put(fp, "imbalance_threshold", grab(sql, [/>\s*([\d.]+)\s*THEN 1/i]));
+      put(fp, "reference_arm", grab(sql, [/IN \('([^']+)',/i]));
+      break;
+    }
     case "period_prevalence": {
       const between = /event_date\s+BETWEEN\s+DATE\s*'(\d{4}-\d{2}-\d{2})'\s+AND\s+DATE\s*'(\d{4}-\d{2}-\d{2})'/i.exec(sql);
       put(fp, "period_start", between?.[1]);
@@ -244,6 +255,14 @@ function sasFingerprint(kind: string, rawSas: string, setup: string): Fingerprin
       put(fp, "anchor_is_index", /index_date\s+as anchor_date/i.test(sas) ? "yes" : "no");
       put(fp, "case_on_or_before_anchor", /svcdate\s*<=\s*a\.anchor_date/i.test(sas) ? "yes" : "no");
       put(fp, "enrol_covers_date", sasDateToIso(grab(sas, [/('\d{2}[A-Z]{3}\d{4}'d)\s+between\s+ep\.dtstart/i, /ep\.dtstart\s*<=\s*('\d{2}[A-Z]{3}\d{4}'d)/i])));
+      break;
+    }
+    case "smd_balance": {
+      // SAS var() is the SAMPLE variance, matching SQL's VAR_SAMP
+      put(fp, "sample_variance", /\bvar\s*\(/i.test(sas) ? "yes" : "no");
+      put(fp, "pooled_halved_denominator", /\/\s*2\s*\)/.test(sas) ? "yes" : "no");
+      put(fp, "imbalance_threshold", grab(sas, [/abs\(smd\)\s*>\s*([\d.]+)/i]));
+      put(fp, "reference_arm", grab(sas, [/in \('([^']+)',/i]));
       break;
     }
     case "period_prevalence": {
@@ -476,6 +495,12 @@ const EXPECTED_CONSTANTS: Record<string, Record<"sql" | "sas", Record<string, nu
   cumulative_incidence: {
     sql: { z: 2, z2_half: 2, z2: 2, z2_quarter: 2 },
     sas: { z: 1, z2_half: 2, z2: 2, z2_quarter: 1 },
+  },
+  // SMD is a descriptive diagnostic with NO confidence interval, so none of the
+  // z constants may appear — a stray one would mean a CI crept in unannounced.
+  smd_balance: {
+    sql: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
+    sas: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
   },
 };
 

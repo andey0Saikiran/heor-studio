@@ -12,6 +12,7 @@ import { mutationChecks } from "./mutation";
 import { sasStructureChecks } from "./sas-lint";
 import { emitSas } from "../emitters/sas";
 import { GOLD_A_SPEC, GOLD_A_OPTS, EXPECTED } from "./fixture";
+import { EMITTABLE_ANALYSIS_KINDS } from "../spec/types";
 import type { StudySpec, EmitOptions } from "../index";
 
 export interface Check {
@@ -168,7 +169,10 @@ export async function verifySuppression(): Promise<Check[]> {
     db,
     "SELECT table_id, count(*)::int AS c FROM tz_study_results GROUP BY table_id",
   );
-  const expectedTables = 1 /* table1 */ + 8 /* module analyses in the gold spec */;
+  // derived, not hard-coded: adding a module must not require editing this
+  const expectedTables =
+    (spec.analyses.some((a) => a.enabled && a.kind === "table1") ? 1 : 0) +
+    spec.analyses.filter((a) => a.enabled && EMITTABLE_ANALYSIS_KINDS.has(a.kind) && a.kind !== "table1" && a.kind !== "attrition").length;
   push("results contract: every result table is represented", tables.length === expectedTables,
     `expected ${expectedTables} tables, got ${tables.length}`);
 
@@ -378,6 +382,32 @@ export async function verifyGoldA(): Promise<VerificationResult> {
     }
     // shorter horizon: only P02's day-100 event is within 180d → 1/8
     checkCi("ci180 Overall", await ciRow("tz_study_cuminc_a_ci_180", "Overall", "Overall"), ci.ci180);
+
+    /* ---- covariate balance (SMD), executed vs hand-computed ground truth ----
+     * The gold arms are DELIBERATELY imbalanced on age and balanced on sex, so
+     * the imbalance flag is exercised in both directions. smdAge has been
+     * pinned in the fixture since long before the module existed. */
+    const bal = EXPECTED.balance;
+    const balRows = await rows<{ characteristic: string; measure: string; n_ref: number; n_oth: number; value_ref: number; value_oth: number; smd: number; imbalanced: number }>(
+      db,
+      `SELECT characteristic, measure, n_ref, n_oth, value_ref::float8, value_oth::float8, smd::float8, imbalanced
+       FROM tz_study_balance ORDER BY characteristic`,
+    );
+    eq(`balance rows = ${bal.rowCount}`, balRows.length, bal.rowCount);
+    const checkBal = (tag: string, r: (typeof balRows)[number] | undefined, w: { nRef: number; nOth: number; valueRef: number; valueOth: number; smd: number; imbalanced: number }) => {
+      if (!r) { checks.push({ name: `balance ${tag}`, status: "fail", detail: "row missing" }); return; }
+      eq(`balance ${tag}: n reference arm = ${w.nRef}`, Number(r.n_ref), w.nRef);
+      eq(`balance ${tag}: n comparator arm = ${w.nOth}`, Number(r.n_oth), w.nOth);
+      approx(`balance ${tag}: reference value = ${w.valueRef}`, Number(r.value_ref), w.valueRef, 0.0001);
+      approx(`balance ${tag}: comparator value = ${w.valueOth}`, Number(r.value_oth), w.valueOth, 0.0001);
+      approx(`balance ${tag}: SMD = ${w.smd}`, Number(r.smd), w.smd, 0.00001);
+      eq(`balance ${tag}: imbalance flag = ${w.imbalanced}`, Number(r.imbalanced), w.imbalanced);
+    };
+    checkBal("age (imbalanced by construction)", balRows.find((r) => r.measure === "continuous"), bal.age);
+    checkBal("sex (balanced by construction)", balRows.find((r) => r.measure === "binary"), bal.sex);
+    // the pinned fixture constant and the executed module must agree
+    approx("balance: executed SMD reproduces the frozen EXPECTED.smdAge",
+      Number(balRows.find((r) => r.measure === "continuous")?.smd ?? NaN), EXPECTED.smdAge, 0.00001);
 
     invariants.push(...(await runInvariants(db, "tz_study")));
   }

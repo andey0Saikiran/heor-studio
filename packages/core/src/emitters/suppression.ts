@@ -92,6 +92,18 @@ export const SUPPRESSION_SHAPES: Record<string, SuppressionShape> = {
     ...ANALYSIS_COMMON,
     maskCols: ["patients", "denominator", "risk", "risk_pct", "ci_low", "ci_high"],
   },
+  smd_balance: {
+    // Rows are covariates, NOT a partition of a total, so complementary
+    // suppression does not apply — each row is its own group (n_cells = 1).
+    // Arm sizes are the disclosive quantity: a small arm masks the whole row.
+    labelCols: ["characteristic", "measure"],
+    groupCols: ["characteristic"],
+    countCol: "n_ref",
+    denomCol: "n_oth",
+    maskCols: ["n_ref", "n_oth", "value_ref", "value_oth", "smd"],
+    keepCols: ["imbalanced"],
+    tieBreakCol: "characteristic",
+  },
   table1: {
     labelCols: ["ord", "characteristic", "category"],
     groupCols: ["characteristic"],

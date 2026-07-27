@@ -114,6 +114,28 @@ const MUTATIONS: Mutation[] = [
     kind: "period_prevalence", lang: "sas",
     apply: (t) => t.replace(/'01JAN2019'd/i, "'01JAN2018'd"),
   },
+  {
+    // POPULATION variance silently shrinks every SMD; the balance table would
+    // still look plausible and would under-report imbalance.
+    name: "SQL SMD switches to population variance (VAR_SAMP -> VAR_POP)",
+    kind: "smd_balance", lang: "sql",
+    apply: (t) => t.replace(/VAR_SAMP\(/gi, "VAR_POP("),
+  },
+  {
+    name: "SAS SMD loses the pooled halving (denominator no longer /2)",
+    kind: "smd_balance", lang: "sas",
+    apply: (t) => t.replace(/\)\s*\/\s*2\s*\)/g, "))"),
+  },
+  {
+    name: "SQL imbalance threshold loosened (0.1 -> 0.5)",
+    kind: "smd_balance", lang: "sql",
+    apply: (t) => t.replace(/>\s*0\.1\s*THEN 1/gi, "> 0.5 THEN 1"),
+  },
+  {
+    name: "SAS balance reference arm flipped (sign of every SMD inverts)",
+    kind: "smd_balance", lang: "sas",
+    apply: (t) => t.replace(/in \('DRUG_X', 'DRUG_Y'\)/i, "in ('DRUG_Y', 'DRUG_X')"),
+  },
 ];
 
 interface Program {

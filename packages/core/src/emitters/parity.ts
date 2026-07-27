@@ -465,3 +465,81 @@ export function cumulativeIncidenceParity(
 }
 
 export type { RelativeWindow };
+
+/* ------------------------------------------------------------------ *
+ *  Statistical engine — SMD balance
+ * ------------------------------------------------------------------ */
+
+/** A covariate the balance table can actually compute, with how it is measured.
+ *  Continuous covariates compare means; binary ones compare proportions. */
+export interface BalanceCovariate {
+  id: string;
+  label: string;
+  /** "continuous" -> mean/SD SMD; "binary" -> proportion SMD */
+  measure: "continuous" | "binary";
+  /** for binary demographic covariates, the coded value counted as the "1" */
+  positiveValue?: string;
+  /** demographic axis the value is read from */
+  axis: "age" | "sex";
+}
+
+export interface SmdParity {
+  id: string;
+  groupVarId: string;
+  levels: string[];
+  referenceLevel: string;
+  covariates: Array<{ id: string; measure: string }>;
+  /** pooled-SD denominator convention actually computed */
+  smdDenominator: "pooled_sd_sample_variance";
+  imbalanceThreshold: number;
+}
+
+export function smdParity(
+  id: string,
+  consumed: {
+    groupVarId: string;
+    levels: string[];
+    referenceLevel: string;
+    covariates: BalanceCovariate[];
+    imbalanceThreshold: number;
+  }
+): SmdParity {
+  return {
+    id,
+    groupVarId: consumed.groupVarId,
+    levels: [...consumed.levels],
+    referenceLevel: consumed.referenceLevel,
+    covariates: consumed.covariates.map((c) => ({ id: c.id, measure: c.measure })),
+    smdDenominator: "pooled_sd_sample_variance",
+    imbalanceThreshold: consumed.imbalanceThreshold,
+  };
+}
+
+/** Baseline characteristics the balance table can compute from the cohort
+ *  spine today: age (continuous) and sex (binary). Everything else needs the
+ *  baseline covariate tables the P2+ work adds, and is reported as a
+ *  limitation rather than silently dropped. */
+export function balanceCovariates(
+  baseline: Array<{ id: string; label: string; kind: string }>,
+  covariateIds: string[]
+): { supported: BalanceCovariate[]; unsupported: Array<{ id: string; kind: string }> } {
+  const wanted = covariateIds.length > 0 ? baseline.filter((b) => covariateIds.includes(b.id)) : baseline;
+  const supported: BalanceCovariate[] = [];
+  const unsupported: Array<{ id: string; kind: string }> = [];
+  for (const b of wanted) {
+    if (b.kind === "age") supported.push({ id: b.id, label: b.label, measure: "continuous", axis: "age" });
+    else if (b.kind === "sex") supported.push({ id: b.id, label: b.label, measure: "binary", axis: "sex", positiveValue: "1" });
+    else unsupported.push({ id: b.id, kind: b.kind });
+  }
+  return { supported, unsupported };
+}
+
+export const SMD_METHOD_NOTES = [
+  `SMD uses the POOLED standard deviation with SAMPLE variance (n-1) in both arms:`,
+  `  continuous: (mean_ref - mean_other) / sqrt((var_ref + var_other) / 2)`,
+  `  binary:     (p_ref - p_other)       / sqrt((p_ref(1-p_ref) + p_other(1-p_other)) / 2)`,
+  `Sign is reference-arm-minus-comparator, so a negative SMD means the reference`,
+  `arm is LOWER on that covariate. |SMD| above the threshold flags imbalance;`,
+  `SMD is a descriptive balance diagnostic, NOT a hypothesis test - it carries no`,
+  `p-value and is deliberately insensitive to sample size (Austin 2009).`,
+];

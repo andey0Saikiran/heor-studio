@@ -337,6 +337,17 @@ export const EXPECTED = {
     // (P03 day-200, P07 day-300 excluded) → 1/8 = 0.125.
     ci180: { patients: 1, denominator: 8, risk: 0.125, pct: 12.5, ci: [0.02242, 0.47089] as [number, number] },
   },
+  /* SMD balance, DRUG_X (reference) vs DRUG_Y, over the 10-patient cohort.
+   *   ages X = 40,45,50,55,60 -> mean 50, sample variance 62.5
+   *   ages Y = 45,50,55,60,65 -> mean 55, sample variance 62.5
+   *   SMD(age) = (50 - 55) / sqrt((62.5 + 62.5)/2) = -5/7.90569 = -0.632456
+   * Sex: X has sex 1,2,1,2,1 -> 3/5 male = 0.6; Y has 1,2,1,2,1 -> 3/5 male = 0.6
+   *   (P06=1, P07=2, P08=1, P09=2, P10=1), so p_ref = p_oth and SMD(sex) = 0. */
+  balance: {
+    rowCount: 2,
+    age: { nRef: 5, nOth: 5, valueRef: 50, valueOth: 55, smd: -0.63246, imbalanced: 1 },
+    sex: { nRef: 5, nOth: 5, valueRef: 0.6, valueOth: 0.6, smd: 0, imbalanced: 0 },
+  },
 } as const;
 
 /* ---------------- Gold Case A spec (cohort spine; incidence analysis added at Step 4) ---------------- */
@@ -385,7 +396,17 @@ export const GOLD_A_SPEC: StudySpec = {
     { id: "b_year", label: "Index year", kind: "year", dataType: "categorical" },
   ],
   outcomes: [],
-  groupVars: [],
+  /* Exposure arms for the balance table: the index code list holds both drugs,
+   * so the cohort's index_code IS the arm (active-comparator new-user design). */
+  groupVars: [
+    {
+      id: "g_arm",
+      label: "Index drug",
+      source: { kind: "exposure_cohort" },
+      levels: ["DRUG_X", "DRUG_Y"],
+      referenceLevel: "DRUG_X",
+    },
+  ],
   comparisons: [],
   analyses: [
     { id: "a_attrition", label: "Attrition", kind: "attrition", enabled: true },
@@ -490,6 +511,16 @@ export const GOLD_A_SPEC: StudySpec = {
       recurrence: "first_only",
       ciMethod: "wilson",
       stratifyBy: [],
+    },
+    /* Covariate balance between the exposure arms. Age is deliberately
+     * IMBALANCED (SMD -0.63246, |SMD| > 0.1) and sex is deliberately BALANCED
+     * (both arms 3/5 male -> SMD exactly 0), so the table exercises the flag in
+     * both directions rather than only the interesting one. */
+    {
+      id: "a_balance", label: "Baseline balance, X vs Y", kind: "statistical_engine", enabled: true,
+      comparisonIds: [],
+      smdBalance: { groupVarId: "g_arm", covariateIds: ["b_age", "b_sex"], imbalanceThreshold: 0.1, reportWeighted: false },
+      multiplicity: { method: "none", alpha: 0.05, appliesToRoles: ["primary"] },
     },
   ],
 };
