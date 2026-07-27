@@ -126,9 +126,12 @@ export function levelCheck(tableRef: string, note: string, extraCols: string[] =
 export function header(spec: StudySpec, program: string, purpose: string[]): string[] {
   const bar = "=".repeat(77);
   const prov = spec.meta.provenance;
+  // cmt() every interpolated field: model/sourceDocumentName are user/LLM text
+  // and an un-escaped "*/" would close this block comment and turn the rest of
+  // the header into live SAS. (title/version/purpose are already cmt()-wrapped.)
   const provTxt =
     prov.method === "llm_extraction"
-      ? `extracted by ${prov.model ?? "LLM"}${prov.sourceDocumentName ? ` from ${prov.sourceDocumentName}` : ""}`
+      ? `extracted by ${cmt(prov.model ?? "LLM")}${prov.sourceDocumentName ? ` from ${cmt(prov.sourceDocumentName)}` : ""}`
       : "manually specified";
   return [
     `/*${bar}`,

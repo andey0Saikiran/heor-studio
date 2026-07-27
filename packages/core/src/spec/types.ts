@@ -418,6 +418,22 @@ export type Analysis =
 
 export type AnalysisKind = Analysis["kind"];
 
+/** Analysis kinds the emitters can actually generate code for TODAY: the
+ *  cohort-spine pair (attrition, table1) plus every kind registered in
+ *  emitters/modules/registry.ts. Readiness BLOCKS any enabled analysis whose
+ *  kind is not listed here — otherwise it would be silently omitted from the
+ *  bundle while the export banner said "ready (no open problems)".
+ *  registry.ts asserts at load time that it and this list agree, so the gate
+ *  and the emitters cannot drift apart. */
+export const EMITTABLE_ANALYSIS_KINDS: ReadonlySet<AnalysisKind> = new Set<AnalysisKind>([
+  "attrition",
+  "table1",
+  "incidence_rate",
+  "point_prevalence",
+  "period_prevalence",
+  "cumulative_incidence",
+]);
+
 export type DescriptiveAnalysis =
   | PointPrevalenceAnalysis
   | PeriodPrevalenceAnalysis
@@ -615,6 +631,16 @@ export function validateAnalyses(spec: StudySpec): string[] {
     seenIds.add(a.id);
     if (!a.enabled) continue;
     const w = `Analysis "${a.id}" (${a.kind})`;
+    // HARD GATE: an enabled analysis with no registered emitter must BLOCK
+    // readiness — the alternative is a bundle that silently omits it while
+    // reporting "ready (no open problems)". future_stub carries its own
+    // message in the switch below.
+    if (a.kind !== "future_stub" && !EMITTABLE_ANALYSIS_KINDS.has(a.kind)) {
+      problems.push(
+        `${w}: no code generator is registered for "${a.kind}" yet — an export would silently omit it. ` +
+          `Set enabled:false to keep it visible as planned work, or remove it.`
+      );
+    }
     switch (a.kind) {
       case "attrition": break;
       case "table1":

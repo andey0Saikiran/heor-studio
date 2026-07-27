@@ -229,7 +229,7 @@ function sasCumulativeIncidence(ctx: SasCtx, an: CumulativeIncidenceAnalysis, nu
       `Cumulative incidence (risk) at ${an.horizonDays} days for "${an.label}":`,
       `at-risk denominator (event-free at index after washout), numerator =`,
       `first qualifying event within the horizon; naive risk + Wilson 95% CI.`,
-      `Twin of the machine-verified SQL NN_cuminc; keep both in sync.`,
+      `Twin of the SQL cuminc program (SQL twin is execution-verified; this SAS twin is parity-checked, not executed). Keep both in sync.`,
     ]),
     `/* ${parityStamp("cumulative_incidence", cumulativeIncidenceParity(an, { settingFilter: setting.stamped, strata }))} */`,
     ``,

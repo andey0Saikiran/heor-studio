@@ -12,6 +12,7 @@
  * respective entry packages, not here.
  */
 export * from "./spec/types";
+export * from "./spec/shape";
 export * from "./extract/prompt";
 export * from "./extract/anthropic";
 export * from "./emitters/types";

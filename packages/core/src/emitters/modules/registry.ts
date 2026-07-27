@@ -10,6 +10,7 @@
  * + assertions in verify/run.ts, and run `npm run verify`.
  */
 import type { Analysis } from "../../spec/types";
+import { EMITTABLE_ANALYSIS_KINDS } from "../../spec/types";
 import type { AnalysisModule } from "./types";
 import { incidenceModule } from "./incidence";
 import { pointPrevalenceModule } from "./point_prevalence";
@@ -22,6 +23,28 @@ export const ANALYSIS_MODULES: Partial<Record<Analysis["kind"], AnalysisModule<n
   period_prevalence: periodPrevalenceModule as AnalysisModule<never>,
   cumulative_incidence: cumulativeIncidenceModule as AnalysisModule<never>,
 };
+
+/* Readiness (spec/types.ts EMITTABLE_ANALYSIS_KINDS) blocks enabled analyses
+ * whose kind cannot be emitted. Fail LOUDLY at module load if that list and
+ * this registry ever disagree — registering a module means adding its kind
+ * there in the same commit (and vice versa). attrition/table1 are emitted by
+ * the cohort spine, not by modules. */
+const SPINE_EMITTED_KINDS = new Set<Analysis["kind"]>(["attrition", "table1"]);
+{
+  const registered = new Set(Object.keys(ANALYSIS_MODULES) as Array<Analysis["kind"]>);
+  for (const kind of registered) {
+    if (!EMITTABLE_ANALYSIS_KINDS.has(kind))
+      throw new Error(
+        `modules/registry: "${kind}" has a registered module but is missing from EMITTABLE_ANALYSIS_KINDS in spec/types.ts — readiness would block a working analysis.`
+      );
+  }
+  for (const kind of EMITTABLE_ANALYSIS_KINDS) {
+    if (!SPINE_EMITTED_KINDS.has(kind) && !registered.has(kind))
+      throw new Error(
+        `modules/registry: "${kind}" is declared emittable in spec/types.ts but has no registered module — readiness would approve an analysis the emitters silently drop.`
+      );
+  }
+}
 
 /** analysis kind → PARITY stamp kind, for the verification harness. */
 export const STAMP_KIND_BY_ANALYSIS: Record<string, string> = Object.fromEntries(

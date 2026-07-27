@@ -27,6 +27,7 @@ import {
   listModels,
   extractSpec,
   specReadiness,
+  checkSpecShape,
   unverifiedCodeCount,
   planBundle,
   bundleFilename,
@@ -105,6 +106,16 @@ server.registerTool(
     },
   },
   async ({ spec }) => {
+    // Structural gate FIRST: raw JSON is untrusted. Field types are checked
+    // everywhere an emitter dereferences (a spec with minClaims:"2" or a
+    // quote inside a code string must be rejected here, not emitted).
+    const shape = checkSpecShape(spec);
+    if (!shape.ok) {
+      return fail(
+        `Spec failed structural validation (nothing was stored):\n- ${shape.problems.join("\n- ")}\n` +
+          `Fetch heor://schema/study-spec and conform to it.`,
+      );
+    }
     const s = spec as unknown as StudySpec;
     let readiness: { ready: boolean; problems: string[] };
     let unverified: number;
@@ -144,7 +155,14 @@ server.registerTool(
       signoff: z
         .boolean()
         .describe("Must be true. Set only after a human reviewed the spec and verified every code."),
-      tag: z.string().optional().describe("Short uppercase work-table prefix, e.g. PSO_TP"),
+      tag: z
+        .string()
+        .regex(
+          /^[A-Za-z_][A-Za-z0-9_]{0,19}$/,
+          "tag is embedded verbatim in generated SQL/SAS identifiers: letters/digits/underscores only, starting with a letter or underscore, max 20 chars",
+        )
+        .optional()
+        .describe("Short uppercase work-table prefix, e.g. PSO_TP (letters/digits/underscores, max 20 chars)"),
     },
   },
   async ({ spec_id, targets, signoff, tag }) => {
@@ -236,9 +254,10 @@ server.registerTool(
       "using produce exactly the right numbers this release; (2) optional CODE SMOKE — if you pass a " +
       "spec_id, executes YOUR generated Postgres SQL against a synthetic MarketScan-shaped dataset in " +
       "an embedded Postgres and checks structural invariants (attrition monotonic, numerator<=denominator, " +
-      "CI ordering, no negative person-time). The smoke proves your generated code RUNS and is internally " +
-      "consistent; it does not validate your study's numbers (that needs your own licensed data). No data " +
-      "leaves the machine.",
+      "CI ordering, no negative person-time). The smoke proves your generated code RUNS; if your spec matches " +
+      "zero fixture patients (expected for real-world code lists — the fixture only contains the gold study's " +
+      "codes) the verdict is 'inconclusive', NOT 'passed', because nothing numeric was exercised. It never " +
+      "validates your study's numbers (that needs your own licensed data). No data leaves the machine.",
     inputSchema: {
       spec_id: z.string().optional().describe("Optional: also smoke-test this spec's generated SQL"),
     },
@@ -261,12 +280,19 @@ server.registerTool(
         status: smoke.status,
         executed: smoke.execution.map((s) => `${s.ok ? "ok" : "FAIL"} ${s.path}${s.error ? " :: " + s.error : ""}`),
         invariants: smoke.invariants.map((i) => `${i.status} ${i.name} — ${i.detail}`),
-        note: "Structural smoke test on a synthetic dataset — proves the generated SQL runs and is " +
-          "internally consistent. Validate real numbers by running the code on your licensed MarketScan.",
+        note:
+          smoke.note ??
+          "Structural smoke test on a synthetic dataset — proves the generated SQL runs and is " +
+            "internally consistent. Validate real numbers by running the code on your licensed MarketScan.",
       };
     }
-    out.overall = gold.status === "passed" && (!spec_id || (out.code_smoke as { status: string }).status === "passed")
-      ? "passed" : "failed";
+    const smokeStatus = spec_id ? (out.code_smoke as { status: string }).status : "passed";
+    out.overall =
+      gold.status !== "passed" || smokeStatus === "failed"
+        ? "failed"
+        : smokeStatus === "inconclusive"
+          ? "inconclusive"
+          : "passed";
     return json(out);
   },
 );

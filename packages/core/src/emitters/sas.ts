@@ -25,6 +25,7 @@ import type {
   StudySpec,
 } from "../spec/types";
 import type { EmitOptions, GeneratedFile, SasEmitter } from "./types";
+import { assertSafeIdent, assertSafeNaming } from "./types";
 import { renderDaysPerYear } from "./parity";
 import {
   cmt,
@@ -318,6 +319,8 @@ function pxCondLines(cols: string[], mv: string): string[] {
  * ================================================================== */
 
 function buildCtx(spec: StudySpec, opts: EmitOptions): Ctx {
+  assertSafeIdent(opts.tag, "EmitOptions.tag");
+  assertSafeNaming(opts.naming);
   const tag = sasName(opts.tag);
   const memberPool = makeNamePool(32);
   const tbl = (suffix: string): string => {

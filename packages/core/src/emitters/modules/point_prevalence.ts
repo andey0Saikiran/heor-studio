@@ -245,7 +245,7 @@ function sasPointPrevalence(ctx: SasCtx, an: PointPrevalenceAnalysis, num: strin
       `denominator = final-cohort members enrolled (stitched episode) on the`,
       `anchor date; numerator = members with >= 1 qualifying outcome event`,
       `on-or-before the anchor date; Wilson 95% CI (closed form).`,
-      `Twin of the machine-verified SQL 07_pointprev; keep both in sync.`,
+      `Twin of the SQL pointprev program (SQL twin is execution-verified; this SAS twin is parity-checked, not executed). Keep both in sync.`,
     ]),
     `/* ${parityStamp("point_prevalence", pointPrevalenceParity(an, { settingFilter: setting.stamped, strata }))} */`,
     ``,

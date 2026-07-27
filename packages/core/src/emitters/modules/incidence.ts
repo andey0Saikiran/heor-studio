@@ -302,7 +302,7 @@ function sasIncidence(ctx: SasCtx, an: IncidenceRateAnalysis, num: string, suffi
       `prevalent-case washout, at-risk denominator, follow-up censored`,
       `at the earliest of ${censorWords},`,
       `crude rate per ${M} person-years with a Byar exact-Poisson CI.`,
-      `Twin of the machine-verified SQL 07_incidence; keep both in sync.`,
+      `Twin of SQL 07_incidence (SQL twin is execution-verified; this SAS twin is parity-checked, not executed). Keep both in sync.`,
     ]),
     // machine-readable twin contract: the harness compares this stamp against
     // the SQL twin's — built from the values THIS program consumed

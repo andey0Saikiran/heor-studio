@@ -245,7 +245,7 @@ function sasPeriodPrevalence(ctx: SasCtx, an: PeriodPrevalenceAnalysis, num: str
       `denominator = final-cohort members whose stitched episode overlaps the`,
       `period; numerator = members with >= 1 qualifying event dated in the`,
       `period (no carry-in); Wilson 95% CI (closed form).`,
-      `Twin of the machine-verified SQL NN_periodprev; keep both in sync.`,
+      `Twin of the SQL periodprev program (SQL twin is execution-verified; this SAS twin is parity-checked, not executed). Keep both in sync.`,
     ]),
     `/* ${parityStamp("period_prevalence", periodPrevalenceParity(an, { settingFilter: setting.stamped, strata }))} */`,
     ``,

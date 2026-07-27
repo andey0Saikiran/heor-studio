@@ -18,10 +18,14 @@ export interface Check {
 }
 
 export interface VerificationResult {
-  status: "passed" | "failed";
+  /** "inconclusive" = the generated SQL executed cleanly but matched ZERO
+   *  fixture patients, so every invariant was vacuously satisfied. Nothing
+   *  numeric was actually exercised — do not present this as verification. */
+  status: "passed" | "failed" | "inconclusive";
   execution: { path: string; ok: boolean; error?: string }[];
   checks: Check[];
   invariants: InvariantResult[];
+  note?: string;
 }
 
 /** Verify an arbitrary spec against the fixture: execute + invariants only
@@ -31,11 +35,22 @@ export async function verifySpec(spec: StudySpec, opts: EmitOptions): Promise<Ve
   const invariants = ok ? await runInvariants(db, opts.tag.toLowerCase()) : [];
   const checks = sasSqlParityChecks(spec, opts);
   const anyFail = invariants.some((i) => i.status === "fail") || checks.some((c) => c.status === "fail");
+  // Zero-cohort gate: an empty cohort satisfies every count-of-violations
+  // invariant, so "passed" would be a vacuous claim. Real-world specs are
+  // EXPECTED to land here (the synthetic fixture only contains the gold
+  // study's codes) — the honest verdict is inconclusive, not passed.
+  const cohortN = ok
+    ? Number((await scalar<number>(db, `SELECT count(*)::int FROM ${opts.tag.toLowerCase()}_cohort`)) ?? 0)
+    : 0;
+  const vacuous = ok && !anyFail && cohortN === 0;
   return {
-    status: ok && !anyFail ? "passed" : "failed",
+    status: !ok || anyFail ? "failed" : vacuous ? "inconclusive" : "passed",
     execution: steps,
     checks,
     invariants,
+    note: vacuous
+      ? "Generated SQL executed without error, but the spec matched 0 patients in the synthetic fixture, so all invariants were vacuously satisfied. This proves the code RUNS — it does not verify any numbers. (Expected for real-world specs: the fixture only contains the gold study's codes.)"
+      : undefined,
   };
 }
 

@@ -81,7 +81,13 @@ async function main() {
   // ---- 5a. run_verification: engine proof + code smoke on the generated SQL ----
   const ver = parse(await a.callTool({ name: "run_verification", arguments: { spec_id: s2.spec_id } }));
   check("run_verification engine proof passes", ver.engine_proof?.status === "passed", JSON.stringify(ver.engine_proof?.status));
-  check("run_verification code smoke ran", ver.code_smoke?.status === "passed" || ver.code_smoke?.status === "failed", JSON.stringify(ver.code_smoke?.status));
+  // The demo spec's codes match ZERO fixture patients, so the honest verdict
+  // is "inconclusive" (executed cleanly, nothing numerically exercised) — a
+  // "passed" here would be the vacuous-verification bug the zero-cohort gate
+  // exists to prevent. This assertion pins that gate.
+  check("run_verification code smoke is inconclusive on a zero-cohort spec", ver.code_smoke?.status === "inconclusive", JSON.stringify(ver.code_smoke?.status));
+  check("run_verification zero-cohort note is surfaced", typeof ver.code_smoke?.note === "string" && ver.code_smoke.note.includes("0 patients"), JSON.stringify(ver.code_smoke?.note).slice(0, 80));
+  check("run_verification overall reflects the inconclusive smoke", ver.overall === "inconclusive", JSON.stringify(ver.overall));
 
   // ---- 5b. learning protocol: report_correction records with a reason ----
   const corr = parse(await a.callTool({ name: "report_correction", arguments: {

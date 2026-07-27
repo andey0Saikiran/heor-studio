@@ -1,8 +1,17 @@
 # Overnight build report — 2026-07-26
 
+> **CORRECTIONS (added same day, after a 9-agent audit — see `docs/PENDING.md`):**
+> 1. The check count was **206**, not 207 (now 214 with the Wave-0 silence guards).
+> 2. "Both languages, fully verified" overstates: only the **Postgres SQL is
+>    execution-verified**. The SAS twin is parity-checked (stamps + arithmetic
+>    signatures), never executed; the **Snowflake output has no automated check
+>    at all**. "Produce identical numbers" is inferred, not observed.
+> 3. The quartet was, at the time of writing, **unreachable through the product**
+>    (extractor schema + web UI still speak the legacy analysis format) — true of
+>    the emitter, not the product. Wave 1 in PENDING.md closes this.
+
 _What ran while you slept. Everything below is committed and pushed to
-`github.com/andey0Saikiran/heor-studio` (branch `main`), and every number is
-machine-verified unless explicitly flagged otherwise._
+`github.com/andey0Saikiran/heor-studio` (branch `main`)._
 
 ## TL;DR
 
