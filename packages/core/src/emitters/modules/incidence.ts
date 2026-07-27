@@ -209,6 +209,27 @@ function sqlIncidence(ctx: SqlCtx, an: IncidenceRateAnalysis, suffix: string): S
   L.push(`SELECT * FROM ${out}`);
   L.push(`ORDER BY stratifier, stratum;`);
 
+
+  /* Washout attrition addendum (coverage matrix: "N excluded-as-prevalent").
+   * The cohort attrition table is the CONSORT flow for COHORT construction; the
+   * washout happens per-ANALYSIS, after the cohort exists, so it belongs in its
+   * own addendum rather than as a fake extra CONSORT step. */
+  L.push(``);
+  L.push(`-- Washout addendum: how the at-risk denominator was reached.`);
+  L.push(`DROP TABLE IF EXISTS ${out}_washout;`);
+  L.push(`CREATE TABLE ${out}_washout AS`);
+  L.push(`WITH cohort AS (SELECT enrolid, index_date FROM ${wp}_cohort),`);
+  L.push(`ae AS (SELECT enrolid, event_date FROM ${wp}_events WHERE code_list_id = '${q(clid)}'${setting.enforce ? ` AND setting = '${setting.enforce}'` : ""}),`);
+  L.push(`prevalent AS (`);
+  L.push(`  SELECT DISTINCT c.enrolid FROM cohort c JOIN ae a ON a.enrolid = c.enrolid`);
+  L.push(`  WHERE ${washoutPred}`);
+  L.push(`)`);
+  L.push(`SELECT 1 AS step, 'Final cohort' AS description, (SELECT count(*) FROM cohort) AS n`);
+  L.push(`UNION ALL`);
+  L.push(`SELECT 2, 'Excluded: prevalent case in the washout window', (SELECT count(*) FROM prevalent)`);
+  L.push(`UNION ALL`);
+  L.push(`SELECT 3, 'At risk (incidence denominator)', (SELECT count(*) FROM cohort) - (SELECT count(*) FROM prevalent);`);
+
   return {
     slug: `incidence${suffix}`,
     title: `Incidence rate${suffix ? ` (${an.label})` : ""}`,

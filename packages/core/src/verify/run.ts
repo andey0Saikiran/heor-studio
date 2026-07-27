@@ -243,6 +243,19 @@ export async function verifyWashoutToggle(): Promise<Check[]> {
      )
      SELECT count(*)::int FROM prevalent p JOIN incident i ON i.enrolid = p.enrolid`,
   );
+  /* Washout ATTRITION ADDENDUM: the matrix asks for "N excluded-as-prevalent"
+   * to be reported, not merely applied. An analyst cannot defend a denominator
+   * they cannot see the derivation of. */
+  const add = await rows<{ step: number; description: string; n: number }>(
+    db, "SELECT step, description, n FROM tz_study_incidence_washout ORDER BY step");
+  push("washout addendum: reports cohort -> excluded -> at-risk",
+    add.length === 3 && Number(add[0].n) === Number(cohortN) &&
+      Number(add[1].n) === EXPECTED.prevalentM && Number(add[2].n) === EXPECTED.atRiskDenominator,
+    add.map((r) => `${r.description}=${r.n}`).join("; "));
+  push("washout addendum: the three counts reconcile",
+    add.length === 3 && Number(add[0].n) - Number(add[1].n) === Number(add[2].n),
+    add.length === 3 ? `${add[0].n} - ${add[1].n} = ${add[2].n}` : "addendum missing");
+
   push("washout toggle: (washed-out prevalent AND counted incident) = 0",
     Number(overlap) === 0, `${overlap} subjects in both sets`);
   return out;
