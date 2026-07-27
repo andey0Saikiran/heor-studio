@@ -191,6 +191,22 @@ export function outcomeSettingPlan(od: OutcomeDefinition, listSystem: CodeSystem
  * review notes in BOTH languages so a generated program never silently claims
  * behavior it doesn't have; the modules land these one by one.
  */
+/** What is actually true about mortality in MarketScan, per BR-LIM-002.
+ *
+ *  Earlier wording in the emitters said death was "unascertainable", which
+ *  contradicts our own business rule: mortality is severely limited but NOT
+ *  absent — in-hospital death is observable through DSTATUS on the I, S and F
+ *  tables (de-duplicated across them, with the date column differing by table).
+ *  Saying "unascertainable" both misstated the rule and hid the real
+ *  consequence: person-time keeps accruing past an observed in-hospital death. */
+export const DEATH_CENSOR_NOTE =
+  `censorAt includes "death" but death censoring is NOT implemented - person-time ` +
+  `continues past an in-hospital death. MarketScan mortality is limited, not absent ` +
+  `(BR-LIM-002): in-hospital deaths are observable via DSTATUS on I/S/F and must be ` +
+  `de-duplicated across those tables; out-of-hospital deaths are not observable at ` +
+  `all without the separately licensed Mortality Database. Add a death-date term ` +
+  `before reporting any endpoint where death competes with the outcome`;
+
 export function incidenceLimitations(an: IncidenceRateAnalysis, listSystem: CodeSystem): string[] {
   const out: string[] = [];
   const od = an.outcomeDefinition;
@@ -204,6 +220,8 @@ export function incidenceLimitations(an: IncidenceRateAnalysis, listSystem: Code
     out.push(`recurrence="all_events" is NOT implemented - FIRST-event incidence is produced`);
   if (an.ciMethod !== "poisson_byar")
     out.push(`ciMethod "${an.ciMethod}" is NOT implemented - the Byar exact-Poisson approximation is produced and labeled poisson_byar`);
+  if (an.personTimeRule.censorAt.includes("death"))
+    out.push(DEATH_CENSOR_NOTE);
   for (const s of splitStratifiers(an.stratifyBy).unsupported)
     out.push(`stratifier "${s.id}" (${s.source.kind}-sourced) is NOT yet emitted - demographic axes only for now`);
   return out;
@@ -283,7 +301,7 @@ export function pointPrevalenceLimitations(
 /** Method notes ALWAYS emitted (describe what IS computed, so never conditional). */
 export const POINT_PREVALENCE_METHOD_NOTES = [
   `denominator is COHORT-based (final analysis cohort enrolled on the anchor date), not a population denominator - MarketScan carries no general-population denominator and the spine pulls enrollment for indexed members only`,
-  `"alive on the anchor date" is proxied by enrollment on the anchor date; mortality is unascertainable in core MarketScan (BR-LIM-002)`,
+  `"alive on the anchor date" is proxied by enrollment on the anchor date - core MarketScan observes only IN-HOSPITAL death (DSTATUS on I/S/F), so out-of-hospital deaths are indistinguishable from continued enrollment (BR-LIM-002)`,
   `case = >= 1 qualifying event on-or-BEFORE the anchor date within the study period (all-available lookback; the spec has no activeLookbackWindow field)`,
 ];
 

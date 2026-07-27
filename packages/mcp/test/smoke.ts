@@ -7,6 +7,7 @@
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { PSO_DEMO_SPEC } from "../../web/src/fixtures/pso.js";
@@ -104,6 +105,35 @@ async function main() {
   check("8 tools registered with key", toolsB.length === 8, `${toolsB.length}`);
   check("extract_spec present with key", toolsB.includes("extract_spec"));
   await b.close();
+
+  /* ---- 7. the BUILT artifact must actually run ----
+   * Everything above drives the TypeScript source through tsx. The published
+   * package ships dist/, and that is what a user's MCP client executes with
+   * plain node. It was broken: @heor-studio/core is source-only, so leaving it
+   * external made dist/index.js resolve to a .ts file that Node refuses to load
+   * (ERR_UNKNOWN_FILE_EXTENSION). Green source tests said nothing about it, so
+   * the shipped binary is now exercised directly. */
+  console.log("\n# Built artifact (what the published package actually runs)");
+  const distEntry = new URL("../dist/index.js", import.meta.url).pathname;
+  if (!existsSync(distEntry)) {
+    check("dist/index.js exists (run `npm run build -w @heor-studio/mcp`)", false, distEntry);
+  } else {
+    const built = new Client({ name: "smoke-dist", version: "0" });
+    try {
+      await built.connect(
+        new StdioClientTransport({
+          command: process.execPath, // plain node, NOT tsx
+          args: [distEntry],
+          env: { ...(process.env as Record<string, string>), ANTHROPIC_API_KEY: "" },
+        }),
+      );
+      const builtTools = (await built.listTools()).tools.map((t) => t.name).sort();
+      check("built dist runs under plain node and lists 7 tools", builtTools.length === 7, builtTools.join(", "));
+      await built.close();
+    } catch (e) {
+      check("built dist runs under plain node", false, String(e).slice(0, 200));
+    }
+  }
 
   console.log(`\n${failures === 0 ? "ALL PASSED" : `${failures} FAILURE(S)`}`);
   process.exit(failures === 0 ? 0 : 1);

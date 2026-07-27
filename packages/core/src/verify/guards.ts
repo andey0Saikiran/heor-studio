@@ -186,6 +186,42 @@ export function verifySilenceGuards(): Check[] {
     );
   }
 
+  /* 3e. A requested-but-unimplemented death censor must be SURFACED, not
+     silently dropped — and must not be stamped as consumed. The emitters used
+     to claim MarketScan mortality was "unascertainable", contradicting
+     BR-LIM-002 ("severely limited, but not absent": in-hospital death is
+     observable via DSTATUS), while person-time quietly ran past it. */
+  {
+    const spec: StudySpec = JSON.parse(JSON.stringify(GOLD_A_SPEC));
+    const inc = spec.analyses.find((a) => a.kind === "incidence_rate");
+    if (inc && inc.kind === "incidence_rate") {
+      inc.personTimeRule = { ...inc.personTimeRule, censorAt: ["outcome", "disenrollment", "death", "study_end"] };
+    }
+    for (const [lang, files] of [
+      ["sql", emitSql(spec, "postgres", GOLD_A_OPTS)],
+      ["sas", emitSasFn(spec, GOLD_A_OPTS)],
+    ] as const) {
+      const text = files.map((f) => f.content).join("\n");
+      const noted = /death censoring is NOT implemented/.test(text);
+      const stamped = /"censorAt":\[[^\]]*"death"/.test(text);
+      push(
+        `guard: ${lang} surfaces an unimplemented death censor and does not stamp it`,
+        noted && !stamped,
+        noted && !stamped
+          ? "REVIEW note emitted; death excluded from the parity stamp"
+          : `note=${noted} stampedAsConsumed=${stamped}`,
+      );
+    }
+    // and the false "unascertainable" wording must not come back
+    const all = emitSql(spec, "postgres", GOLD_A_OPTS).map((f) => f.content).join("\n") +
+      emitSasFn(spec, GOLD_A_OPTS).map((f) => f.content).join("\n");
+    push(
+      "guard: generated code does not claim MarketScan mortality is unascertainable",
+      !/unascertainable/i.test(all),
+      !/unascertainable/i.test(all) ? "wording matches BR-LIM-002" : "found 'unascertainable' — contradicts BR-LIM-002",
+    );
+  }
+
   /* 4. bundle layout matches the README the client reads */
   {
     const entries = planBundle(GOLD_A_SPEC, GOLD_A_OPTS, "2026-01-01T00:00:00.000Z");

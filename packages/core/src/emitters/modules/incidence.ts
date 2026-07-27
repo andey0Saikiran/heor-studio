@@ -9,7 +9,7 @@
  *   - washout: any qualifying outcome in the pre-index window ⇒ prevalent ⇒
  *     excluded, so only new-onset cases count (Modern Epi 3e ch.3);
  *   - person-time: index → earliest of first outcome / episode end /
- *     study end / index + max follow-up (death unascertainable in
+ *     study end / index + max follow-up (death NOT censored; see
  *     MarketScan — BR-LIM-002);
  *   - crude rate per `rateMultiplier` person-years, daysPerYear configurable
  *     (spec.meta.daysPerYear, default 365.25);
@@ -68,14 +68,18 @@ function sqlIncidence(ctx: SqlCtx, an: IncidenceRateAnalysis, suffix: string): S
   const wc = windowConds(an.washout, "a.event_date", "c.index_date", d);
   const washoutPred = wc.length > 0 ? wc.join("\n      AND ") : "TRUE";
 
-  // administrative-censoring terms from personTimeRule.censorAt (death omitted:
-  // MarketScan mortality is unascertainable — BR-LIM-002)
+  // Administrative-censoring terms from personTimeRule.censorAt. "death" is
+  // NOT applied — see DEATH_CENSOR_NOTE (BR-LIM-002: in-hospital death IS
+  // observable via DSTATUS, so this is a gap, not an impossibility). It is
+  // excluded from the parity stamp below and surfaced as a REVIEW note, so a
+  // requested death censor is never silently swallowed.
   const terms: string[] = [];
   const cens = an.personTimeRule.censorAt;
   if (cens.includes("disenrollment")) terms.push("ep.episode_end");
   if (cens.includes("study_end")) terms.push(`DATE '${studyEnd}'`);
   if (cens.includes("max_followup") && maxFu != null) terms.push(d.offset("c.index_date", maxFu));
   if (terms.length === 0) terms.push(`DATE '${studyEnd}'`); // always bound follow-up
+  const appliedCensor = appliedCensorTerms(cens, maxFu);
   const adminCensor = terms.length === 1 ? terms[0] : `LEAST(${terms.join(", ")})`;
   const censorFinal = cens.includes("outcome")
     ? `LEAST(COALESCE(fu_date, DATE '9999-12-31'), admin_censor)`
@@ -121,7 +125,7 @@ function sqlIncidence(ctx: SqlCtx, an: IncidenceRateAnalysis, suffix: string): S
   const L: string[] = [];
   // machine-readable twin contract: the harness compares this stamp against the
   // SAS twin's — built from the values THIS builder consumed (see parity.ts)
-  L.push(`-- ${parityStamp("incidence", incidenceParity(an, { daysPerYear: Y, censorTerms: cens, settingFilter: setting.stamped, strata }))}`);
+  L.push(`-- ${parityStamp("incidence", incidenceParity(an, { daysPerYear: Y, censorTerms: appliedCensor, settingFilter: setting.stamped, strata }))}`);
   const limits = incidenceLimitations(an, listSystem);
   if (limits.length > 0) {
     L.push(`-- REVIEW - spec options this program does not implement yet:`);
@@ -234,13 +238,14 @@ function sasIncidence(ctx: SasCtx, an: IncidenceRateAnalysis, num: string, suffi
   const cens = an.personTimeRule.censorAt;
   const maxFu = an.personTimeRule.maxFollowupDays;
 
-  // administrative-censoring terms — mirrors the SQL twin exactly (death
-  // omitted: MarketScan mortality is unascertainable — BR-LIM-002)
+  // administrative-censoring terms — mirrors the SQL twin exactly ("death" is
+  // NOT applied; see DEATH_CENSOR_NOTE and BR-LIM-002)
   const terms: string[] = [];
   if (cens.includes("disenrollment")) terms.push("ep.dtend");
   if (cens.includes("study_end")) terms.push("&study_end.");
   if (cens.includes("max_followup") && maxFu != null) terms.push(`a.index_date + ${maxFu}`);
   if (terms.length === 0) terms.push("&study_end."); // always bound follow-up
+  const appliedCensor = appliedCensorTerms(cens, maxFu);
   const adminExpr = terms.length === 1 ? terms[0] : `min(${terms.join(", ")})`;
   const censorsAtOutcome = cens.includes("outcome");
 
@@ -306,7 +311,7 @@ function sasIncidence(ctx: SasCtx, an: IncidenceRateAnalysis, num: string, suffi
     ]),
     // machine-readable twin contract: the harness compares this stamp against
     // the SQL twin's — built from the values THIS program consumed
-    `/* ${parityStamp("incidence", incidenceParity(an, { daysPerYear: ctx.daysPerYearLit, censorTerms: cens, settingFilter: setting.stamped, strata }))} */`,
+    `/* ${parityStamp("incidence", incidenceParity(an, { daysPerYear: ctx.daysPerYearLit, censorTerms: appliedCensor, settingFilter: setting.stamped, strata }))} */`,
     ``,
   ];
 
@@ -517,6 +522,16 @@ function sasIncidence(ctx: SasCtx, an: IncidenceRateAnalysis, num: string, suffi
     title: `${num} Incidence rate${suffix ? ` (${an.label})` : ""}`,
     content: lines.join("\n"),
   };
+}
+
+/** The censor terms the emitter ACTUALLY applies, in spec order.
+ *  "death" is requested-but-unimplemented, so it must not appear in the parity
+ *  stamp — a stamp that claims a dropped parameter was consumed turns the twin
+ *  comparison into a lie about both languages at once. */
+function appliedCensorTerms(censorAt: readonly string[], maxFu: number | null | undefined): string[] {
+  return censorAt.filter((c) =>
+    c === "outcome" || c === "disenrollment" || c === "study_end" || (c === "max_followup" && maxFu != null),
+  );
 }
 
 export const incidenceModule: AnalysisModule<IncidenceRateAnalysis> = {
