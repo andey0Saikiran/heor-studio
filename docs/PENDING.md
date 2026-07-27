@@ -24,13 +24,31 @@ Those documents are accurate about what was *built*; they are wrong about what m
   an add-analysis control; the demo spec ships two real descriptive-epi analyses. Browser-
   verified end to end. Pinned by new "extractor reaches the modules" guards.
 
-**Next up: Wave 2 (make the verifier able to fail) and Wave 3 (the 12 confirmed defects).**
+- **✅ Wave 2 — make the verifier able to fail** (commits `11e58f7`, `ffc7040`).
+  `verify/fingerprint.ts` scrapes operative values from each language's **own**
+  emitted text (nothing shared but the comparison), so parity finally has
+  falsifying power; `verify/mutation.ts` corrupts emitted code **18 ways** and
+  asserts every corruption is caught, each also asserting it actually changed the
+  text so a stale pattern can't pass vacuously. **Snowflake** went from zero
+  coverage (14 of 28 shipped SQL files) to fingerprinted against the
+  execution-verified Postgres twin. `verify/sas-lint.ts` gives the never-executed
+  SAS structural checking. **CI now exists** (`.github/workflows/ci.yml`) and
+  `npm run lint` works again.
+- **✅ Wave 3 — the confirmed defects** (commits `9963c16`, `abbfbbd`, `497813e`,
+  `e377fa2`). All 12 closed; each cohort-affecting fix has a regression case that
+  was **confirmed to fail before the fix**. See the defect table below.
+
+**Next up: Wave 4 (suppression + deliverables), then Wave 5 (more analyses).**
 
 ---
 
-## The three findings that reorder everything
+## The three findings that reordered everything — ALL RESOLVED
 
-### 1. The verified modules are unreachable through the product
+> These were the audit's headline findings and the reason for the wave order.
+> All three are now closed (Waves 0–2); the original text is kept below as the
+> record of what was wrong and why the priorities changed.
+
+### 1. ~~The verified modules are unreachable through the product~~ — FIXED in Wave 1
 The four machine-verified modules (incidence rate, point/period prevalence, cumulative
 incidence) cannot be produced by anything a user touches:
 
@@ -47,14 +65,14 @@ incidence) cannot be produced by anything a user touches:
 Only a hand-authored JSON posted to `validate_spec` can reach them. "Protocol → verified
 SAS/SQL" is true of the emitter, not of the product.
 
-### 2. Unimplemented analyses are dropped silently, and readiness says "ready"
+### 2. ~~Unimplemented analyses are dropped silently, and readiness says "ready"~~ — FIXED in Wave 0
 `standardization`, `calendar_trend` and `statistical_engine` are valid spec kinds with no
 registered emitter. A spec with all three **enabled** returns `specReadiness().ready === true`
 with **zero problems** and emits **zero** files for them — while the AI-disclosure text prints
 "Readiness at export: ready (no open problems)". `future_stub` is hard-blocked
 (`types.ts:663-665`); these three are not. *Proven by execution during the audit.*
 
-### 3. "Machine-verified" is narrower than the docs say
+### 3. ~~"Machine-verified" is narrower than the docs say~~ — FIXED in Wave 2
 - **Only the Postgres twin executes.** SAS is never run or parsed — 16 `.sas` files are
   checked by ~8-11 substring greps. Snowflake is never run, parsed, *or even grepped*
   (`verify/parity.ts:118` collects stamps from the Postgres emission only), so **14 of 28
@@ -73,22 +91,22 @@ with **zero problems** and emits **zero** files for them — while the AI-disclo
 
 ---
 
-## Confirmed defects in shipped code (wrong numbers, not missing features)
+## Confirmed defects in shipped code — ALL FIXED (Wave 3)
 
-| # | Defect | Evidence |
+| # | Defect | Status |
 |---|---|---|
-| D1 | **SAS baseline off-by-one** — SAS implements `index - baseline_days` = baseline_days+1 covered days; the SQL twin and BR-CHT-003 disagree. The twins differ by a day. | `050_enroll_stitch.sas` |
-| D2 | **Inpatient dx double-counted** whenever `admdate ≠ svcdate` (any stay > 1 day): the same diagnosis survives as two event rows with different dates, inflating counts and claim-separation logic. | `02_events.sql` DISTINCT key |
-| D3 | **Enrollment stitching mishandles nested segments** — needs a running `MAX(dtend) OVER (...)`, not a lag comparison. | `04_enrollment.sql` |
-| D4 | **`minClaims` means different things per language** — SAS counts distinct service dates, SQL counts rows. | both spines |
-| D5 | **Age-at-index computed from two different sources** in the spine vs the analysis modules. | SAS 060/070 vs modules |
-| D6 | **NULL/open enrollment dates** filtered in SAS, not in SQL. | SQL `seg` CTE |
-| D7 | **SQL identifier injection** — `EmitOptions.tag` and `naming.prefix` flow unsanitized into emitted SQL; the SAS side has `sasName()`, SQL has no counterpart, and `validate_spec` does no type validation at all. | `generate_code` tag schema |
-| D8 | **Death-censoring rationale contradicts our own BRD** — code cites "MarketScan mortality unavailable"; BR-LIM-002 says "severely limited, but not absent" (in-hospital death via DSTATUS). Person-time accrues past observed death. | `incidence.ts:12,72,238` |
-| D9 | **MCP published artifact cannot execute** — build emits an unrunnable artifact, `"@heor-studio/core": "*"` is an unpublished dep, and nothing ever runs `dist/`. | `packages/mcp` |
-| D10 | **`validate_spec` never calls `normalizeSpec`** — it casts and echoes the raw input, so invalid field types pass with `ready:true` and reach the emitter verbatim. | `mcp/src/index.ts` |
-| D11 | **Bundle README lies about paths** — says `sql_postgres/`, actual is `sql_postgres/postgres/`. | `placePath` |
-| D12 | **`npm run lint` currently fails** (oxlint native binding) — one of the four scripts STATUS calls "green" is red. | local run |
+| D1 | **SAS baseline off-by-one** — SAS implements `index - baseline_days` = baseline_days+1 covered days; the SQL twin and BR-CHT-003 disagree. The twins differ by a day. | **FIXED** (`497813e`) — SAS now uses `index - (N-1)`, matching SQL. Guarded by the spine fingerprint. |
+| D2 | **Inpatient dx double-counted** whenever `admdate ≠ svcdate` (any stay > 1 day): the same diagnosis survives as two event rows with different dates, inflating counts and claim-separation logic. | **FIXED** (`abbfbbd`) — both inpatient sources dated at ADMDATE. Regression: fixture P14 (failed first). |
+| D3 | **Enrollment stitching mishandles nested segments** — needs a running `MAX(dtend) OVER (...)`, not a lag comparison. | **FIXED** (`9963c16`) — running `MAX(dtend)` window. Regression: fixture P13 (failed first). |
+| D4 | **`minClaims` means different things per language** — SAS counts distinct service dates, SQL counts rows. | **FIXED** (`abbfbbd`) — SQL counts DISTINCT service dates, matching SAS. Guarded. |
+| D5 | **Age-at-index computed from two different sources** in the spine vs the analysis modules. | **FIXED** (`497813e`) — SAS derives age from enrollment DOBYR like SQL. Guarded (`age_from_dobyr`). |
+| D6 | **NULL/open enrollment dates** filtered in SAS, not in SQL. | **FIXED** (`497813e`) — SQL excludes null enrolid/dtstart/dtend explicitly (BR-KEY-004). Guarded. |
+| D7 | **SQL identifier injection** — `EmitOptions.tag` and `naming.prefix` flow unsanitized into emitted SQL; the SAS side has `sasName()`, SQL has no counterpart, and `validate_spec` does no type validation at all. | **FIXED** (`919c32d`, Wave 0) — identifiers validated in both emitters and at the MCP boundary. |
+| D8 | **Death-censoring rationale contradicts our own BRD** — code cites "MarketScan mortality unavailable"; BR-LIM-002 says "severely limited, but not absent" (in-hospital death via DSTATUS). Person-time accrues past observed death. | **FIXED** (`e377fa2`) — wording matches BR-LIM-002; a requested death censor emits a REVIEW note and is no longer stamped as consumed. Guarded. |
+| D9 | **MCP published artifact cannot execute** — build emits an unrunnable artifact, `"@heor-studio/core": "*"` is an unpublished dep, and nothing ever runs `dist/`. | **FIXED** (`e377fa2`) — core bundled into dist; smoke drives the BUILT artifact under plain node; CI builds it. |
+| D10 | **`validate_spec` never calls `normalizeSpec`** — it casts and echoes the raw input, so invalid field types pass with `ready:true` and reach the emitter verbatim. | **MOSTLY FIXED** (`919c32d`, Wave 0) — `checkSpecShape` hard-rejects malformed specs and stores nothing. Remaining piece is defaulting/normalization, which is a convenience, not a safety gap. |
+| D11 | **Bundle README lies about paths** — says `sql_postgres/`, actual is `sql_postgres/postgres/`. | **FIXED** (`919c32d`, Wave 0) — bundle paths match the README. |
+| D12 | **`npm run lint` currently fails** (oxlint native binding) — one of the four scripts STATUS calls "green" is red. | **FIXED** (`ffc7040`, Wave 2) — lint runs (0 errors); root cause was a partial local install, lockfile was fine. |
 
 ---
 

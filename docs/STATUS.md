@@ -1,6 +1,6 @@
 # HEOR Studio — Status & Roadmap
 
-_Snapshot of what exists vs what's left. Last updated 2026-07-26 (post-audit; see
+_Snapshot of what exists vs what's left. Last updated 2026-07-27 (after Waves 0-3; see
 `docs/NIGHT-REPORT-2026-07-26.md` for the overnight build and **`docs/PENDING.md`
 for the audited, authoritative roadmap** — a 9-agent audit found 151 pending items
 and corrected several claims previously made here)._
@@ -42,13 +42,20 @@ Everything below is committed and pushed unless noted.
 - **Outcome care-setting filter** applied in both twins (shared `outcomeSettingPlan`), with a planted inpatient negative control.
 - **Honest labeling:** unimplemented options (Clopper-Pearson, Wald, KM, competing risk, minClaims>1, dx-position) → computed-with-closest-method + visible `REVIEW` note in both languages.
 
-### Verification harness (the "machine-verified" engine) — **214 passing checks**
-_(the previously quoted 207 was miscounted — a live run printed 206; Wave 0 added 8 silence guards)_
+### Verification harness (the "machine-verified" engine) — **281 passing checks**
+_(the figure once quoted as 207 was miscounted — a live run printed 206. Waves 0-3 took it to 281.)_
 - PGlite (real Postgres-16 wasm) executes the **actual emitted SQL** against a 12-patient synthetic MarketScan fixture with hand-computed ground truth.
 - **Gold Case A passes:** spine 12→11→10; incidence 3/8/2425/451.86/Byar CI + 6 stratum rows; point prevalence 4/10 + 7 strata; period prevalence 3/10 + 6 strata; cumulative incidence 3/8 = 0.375 Wilson (0.13684, 0.69426) + strata; plus zero-denominator and horizon-bound edge cases.
-- **SAS↔SQL parity harness:** every analysis stamps a `PARITY` record of consumed parameters; the harness compares the two languages' stamps + arithmetic signatures. ⚠️ KNOWN WEAKNESS (audit 2026-07-26): both stamps are built by the same shared builder, so the stamp comparison alone cannot catch a hand-edited SAS formula — only the substring signatures can, and they are narrow. Strengthening this (parse each language's own emitted text; mutation-test the harness) is Wave 2 in `docs/PENDING.md`.
+- **SAS↔SQL parity harness:** every analysis stamps a `PARITY` record of consumed parameters, and — since Wave 2 — the harness ALSO compares values scraped from each language's own emitted text (fingerprints), plus the cohort spine, which previously had no parity coverage at all. The stamp comparison alone could not fail (both stamps came from one shared builder); the fingerprints can, and mutation tests prove it on every run.
 - Invariant catalog (attrition monotonic, numerator≤denominator, CI ordering, no negatives, pct bounds) + `daysPerYear` regression guard + care-setting negative control.
 - `npm run verify -w @heor-studio/core`.
+- **Code fingerprints + 18 mutation tests** (Wave 2): every operative value is scraped from
+  each language's OWN emitted text, and deliberate corruptions of the emitted code are
+  asserted to turn the suite red — the standing proof it can fail. Snowflake is
+  fingerprinted against the execution-verified Postgres twin; the SAS twin gets structural
+  linting (balanced comments/parens, closed procs, defined macros).
+- **CI** (`.github/workflows/ci.yml`): typecheck, lint, verify, MCP smoke (source AND the
+  built dist under plain node), and web build, on every push and PR.
 
 ### MCP server
 - **7 tools:** `search_codes`, `validate_spec` (now shape-validates untrusted JSON before storing), `generate_code` (non-skippable sign-off + all-codes-verified gate + injection-safe tag), `get_artifact` (paged), `run_verification` (wired to the real harness; returns `inconclusive`, never `passed`, on a zero-cohort smoke), `export_bundle`, `report_correction`.
@@ -67,6 +74,7 @@ _(the previously quoted 207 was miscounted — a live run printed 206; Wave 0 ad
 ## 🔨 NEED TO BUILD
 
 ### A. Finish the incidence module — ✅ DONE
+- Snowflake now has fingerprint coverage (Wave 2); it still is not EXECUTED (no account).
 - SAS twin ✅, SAS↔SQL parity ✅, stratified output ✅, `run_verification` wired ✅.
 - _Remaining:_ **Snowflake** verification of any kind (PGlite only runs the Postgres twin; the Snowflake SQL is emitted through the Dialect layer with zero automated checks). Note: there is **no CI pipeline at all yet** — `npm run verify` only runs manually.
 
