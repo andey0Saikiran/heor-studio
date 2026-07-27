@@ -69,32 +69,114 @@ const US_2000: StandardPopulation = {
   ],
 };
 
-/** Registry. `who_world` and `esp_2013` are declared but intentionally EMPTY:
- *  see STANDARD_POPULATIONS_PENDING below. */
-export const STANDARD_POPULATIONS: Partial<Record<StandardPopulationId, StandardPopulation>> = {
-  us_2000: US_2000,
+
+/**
+ * WHO World Standard Population (average world population 2000-2025).
+ *
+ * Per 1,000,000, 21 bands, terminal 100+ (the WHO standard deliberately extends
+ * past the conventional 85+ terminal).
+ *
+ * Transcribed from SEER's published reference table and CROSS-CHECKED against
+ * the percentages printed in the WHO source paper: 0-4 = 8.860%, 5-9 = 8.690%,
+ * 10-14 = 8.600%, which match 88,569 / 86,870 / 85,970 per million exactly.
+ */
+const WHO_WORLD: StandardPopulation = {
+  id: "who_world",
+  label: "WHO World Standard Population (2000-2025)",
+  publishedTotal: 1_000_000,
+  provenance:
+    "Ahmad OB, Boschi-Pinto C, Lopez AD, Murray CJL, Lozano R, Inoue M. Age standardization of " +
+    "rates: a new WHO standard. GPE Discussion Paper Series No. 31, WHO 2001. Values transcribed " +
+    "from the SEER reference table (seer.cancer.gov/stdpopulations/world.who.html) and cross-checked " +
+    "against the percentages printed in the source paper.",
+  bands: [
+    { lower: 0, weight: 88_569 },
+    { lower: 5, weight: 86_870 },
+    { lower: 10, weight: 85_970 },
+    { lower: 15, weight: 84_670 },
+    { lower: 20, weight: 82_171 },
+    { lower: 25, weight: 79_272 },
+    { lower: 30, weight: 76_073 },
+    { lower: 35, weight: 71_475 },
+    { lower: 40, weight: 65_877 },
+    { lower: 45, weight: 60_379 },
+    { lower: 50, weight: 53_681 },
+    { lower: 55, weight: 45_484 },
+    { lower: 60, weight: 37_187 },
+    { lower: 65, weight: 29_590 },
+    { lower: 70, weight: 22_092 },
+    { lower: 75, weight: 15_195 },
+    { lower: 80, weight: 9_097 },
+    { lower: 85, weight: 4_398 },
+    { lower: 90, weight: 1_500 },
+    { lower: 95, weight: 400 },
+    { lower: 100, weight: 50 },
+  ],
 };
 
 /**
- * Populations the spec can name but this file does not yet carry.
+ * European Standard Population 2013 (ESP2013).
  *
- * Transcribing WHO World (2000-2025) and ESP 2013 from memory would be exactly
- * the failure this module exists to prevent: a set of plausible numbers that
- * pass a sum check against a total I also recalled. They are listed here so a
- * spec requesting one is REFUSED with a specific reason rather than silently
- * falling back to a different reference — which would relabel the rate while
- * changing it.
+ * Per 100,000, 21 bands: the published form splits infants (<1) from 1-4 and
+ * runs 5-year bands to a 95+ terminal.
+ *
+ * CROSS-CHECKED against an independent implementation (the R PHEindicatormethods
+ * package), which publishes a 19-band variant collapsing <1 + 1-4 into 0-4
+ * (1,000 + 4,000 = 5,000) and 90-94 + 95+ into 90+ (800 + 200 = 1,000). Both
+ * forms total 100,000, and the collapse algebra below derives the 19-band
+ * variant from these bands, so only the finest published form is stored.
+ *
+ * NOTE for MarketScan: age is derived from DOBYR and is therefore calendar-year
+ * precision (BR-ENR-009), so the <1 / 1-4 split is not resolvable in practice.
+ * A study banding starting at 0 collapses the two automatically.
  */
-export const STANDARD_POPULATIONS_PENDING: Record<string, string> = {
-  who_world:
-    "WHO World Standard Population (2000-2025) is not bundled yet. It must be transcribed from " +
-    "Ahmad OB et al., 'Age standardization of rates: a new WHO standard', GPE Discussion Paper " +
-    "Series No. 31, WHO 2001 (Table 1), and sum-checked before use.",
-  esp_2013:
-    "European Standard Population 2013 is not bundled yet. It must be transcribed from Eurostat, " +
-    "'Revision of the European Standard Population: report of Eurostat's task force' (2013), and " +
-    "sum-checked before use.",
+const ESP_2013: StandardPopulation = {
+  id: "esp_2013",
+  label: "European Standard Population 2013 (ESP2013)",
+  publishedTotal: 100_000,
+  provenance:
+    "Eurostat. Revision of the European Standard Population: report of Eurostat's task force. " +
+    "2013 edition (KS-RA-13-028-EN). Cross-checked against the R PHEindicatormethods esp2013 " +
+    "reference vector, whose 19-band variant collapses <1+1-4 and 90-94+95+ to the same totals.",
+  bands: [
+    { lower: 0, weight: 1_000 },
+    { lower: 1, weight: 4_000 },
+    { lower: 5, weight: 5_500 },
+    { lower: 10, weight: 5_500 },
+    { lower: 15, weight: 5_500 },
+    { lower: 20, weight: 6_000 },
+    { lower: 25, weight: 6_000 },
+    { lower: 30, weight: 6_500 },
+    { lower: 35, weight: 7_000 },
+    { lower: 40, weight: 7_000 },
+    { lower: 45, weight: 7_000 },
+    { lower: 50, weight: 7_000 },
+    { lower: 55, weight: 6_500 },
+    { lower: 60, weight: 6_000 },
+    { lower: 65, weight: 5_500 },
+    { lower: 70, weight: 5_000 },
+    { lower: 75, weight: 4_000 },
+    { lower: 80, weight: 2_500 },
+    { lower: 85, weight: 1_500 },
+    { lower: 90, weight: 800 },
+    { lower: 95, weight: 200 },
+  ],
 };
+
+/** All bundled reference populations. Each is sum-checked by the harness. */
+export const STANDARD_POPULATIONS: Partial<Record<StandardPopulationId, StandardPopulation>> = {
+  us_2000: US_2000,
+  who_world: WHO_WORLD,
+  esp_2013: ESP_2013,
+};
+
+/** Populations the spec can name but this file does not carry.
+ *
+ *  Empty now that all three are bundled and sum-checked. Kept because the
+ *  mechanism matters more than its current contents: a reference we do not have
+ *  must be refused BY NAME, never silently swapped for one we do have — a
+ *  substitution relabels the rate while changing it. */
+export const STANDARD_POPULATIONS_PENDING: Record<string, string> = {};
 
 export interface PopulationValidation {
   ok: boolean;

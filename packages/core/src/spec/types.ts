@@ -178,9 +178,25 @@ export interface StandardizationSpec {
   method: "direct";
   strataIds: string[];
   referencePopulation:
-    | { kind: "named"; name: "us_2000_standard" | "who_world_2000" | "esp_2013" }
+    | { kind: "named"; name: "us_2000" | "who_world" | "esp_2013" }
     | { kind: "custom"; weights: Array<{ cellKey: string; weight: number }> };
   ciMethod: "fay_feuer" | "dobson" | "normal_approx";
+  /** Age bands used for STANDARDIZATION ONLY, independent of the bands the
+   *  study reports elsewhere.
+   *
+   *  Direct standardization is only defined when each band is a union of whole
+   *  reference bands — a boundary falling inside a reference band would need an
+   *  assumed within-band age distribution, which is an invented number. But a
+   *  study's own reporting bands are chosen for clinical meaning and routinely
+   *  do NOT align: the default banding here puts a boundary at 18, which cuts
+   *  US 2000's 15-24 band in half.
+   *
+   *  Rather than force the study to re-band everything it reports, this field
+   *  carries the aligned bands used for the standardized rate alone. The study
+   *  keeps its own bands in every other table; only the DSR is computed on
+   *  these. Omitted = use the analysis's reporting bands, which are then
+   *  checked for alignment and REFUSED if they do not align. */
+  standardizationBands?: number[];
 }
 
 /** Calendar-trend test. Ref: Cochran Biometrics 1954;10:417; Armitage 1955;11:375. */

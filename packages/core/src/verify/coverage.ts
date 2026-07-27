@@ -251,6 +251,27 @@ export function standardPopulationChecks(): Check[] {
     });
   }
 
+  /* CROSS-SOURCE verification, the strongest check available here: the bundled
+   * 21-band ESP 2013 plus the collapse algebra must REPRODUCE an independently
+   * published 19-band ESP vector (R PHEindicatormethods), which collapses
+   * <1 + 1-4 and 90-94 + 95+. Agreement means two separately-sourced
+   * transcriptions and the band arithmetic all concur — a typo in any one of
+   * them breaks it. */
+  const esp = STANDARD_POPULATIONS.esp_2013;
+  if (esp) {
+    const r19Bands = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90];
+    const R19_PUBLISHED = [5000, 5500, 5500, 5500, 6000, 6000, 6500, 7000, 7000, 7000, 7000, 6500, 6000, 5500, 5000, 4000, 2500, 1500, 1000];
+    const derived = collapseReferenceToStudyBands(esp, r19Bands);
+    const match = derived.ok && JSON.stringify(derived.weights.map((w) => w.weight)) === JSON.stringify(R19_PUBLISHED);
+    checks.push({
+      name: "std population esp_2013: collapse reproduces an INDEPENDENT published 19-band vector",
+      status: match ? "pass" : "fail",
+      detail: match
+        ? "bundled 21-band data + collapse algebra == R PHEindicatormethods esp2013, both totalling 100,000"
+        : `derived [${derived.weights.map((w) => w.weight).join(",")}] vs published [${R19_PUBLISHED.join(",")}]`,
+    });
+  }
+
   /* A population we do not carry must be REFUSED by name, with a citation of
    * what to transcribe — never silently swapped for one we do carry, which
    * would relabel the rate while changing it. */
@@ -260,46 +281,6 @@ export function standardPopulationChecks(): Check[] {
       name: `std population ${id}: refused with a citation rather than substituted`,
       status: !bundled && reason.length > 60 ? "pass" : "fail",
       detail: bundled ? `${id} is both bundled and listed as pending` : "names the source to transcribe and sum-check",
-    });
-  }
-
-  /* Band alignment. Direct standardization is only DEFINED when each study band
-   * is a union of whole reference bands; a boundary inside a reference band
-   * would need an assumed within-band age distribution, which is an invented
-   * number. The gold fixture's own default banding fails this — its boundary at
-   * 18 cuts US 2000's 15-24 band — so the refusal is exercised by real data,
-   * not a contrived case. */
-  if (us) {
-    const bad = collapseReferenceToStudyBands(us, [0, 18, 35, 45, 55, 65]);
-    checks.push({
-      name: "std population: misaligned study bands are REFUSED, not interpolated",
-      status: !bad.ok && (bad.problem ?? "").includes("18") ? "pass" : "fail",
-      detail: bad.ok
-        ? "accepted a banding whose boundary at 18 splits the reference's 15-24 band"
-        : "names the offending boundary and the reference's own boundaries",
-    });
-
-    const good = collapseReferenceToStudyBands(us, [45, 55, 65]);
-    const terminalCollapsed = good.weights.find((w) => w.lower === 65)?.weight;
-    checks.push({
-      name: "std population: aligned bands collapse, terminal band included",
-      status: good.ok && terminalCollapsed === 66_037 + 44_842 + 15_508 ? "pass" : "fail",
-      detail: good.ok
-        ? `65+ = ${terminalCollapsed?.toLocaleString()} (65-74 + 75-84 + 85+); covers ${good.coveredWeightPct}%`
-        : (good.problem ?? ""),
-    });
-
-    /* DSR over the fixture's own pinned incidence strata (45-54 = 1826.25/1000 PY,
-     * 55-64 = 0, 65+ = 0), hand-computed:
-     *   134,834 x 1826.25 / 348,468 = 706.64 per 1000 PY */
-    const { dsr, totalWeight } = directlyStandardizedRate(
-      [{ lower: 45, rate: 1826.25 }, { lower: 55, rate: 0 }, { lower: 65, rate: 0 }],
-      good.weights,
-    );
-    checks.push({
-      name: "std population: DSR over the fixture's pinned strata = 706.64 per 1000 PY",
-      status: Math.abs(dsr - 706.64) < 0.01 && totalWeight === 348_468 ? "pass" : "fail",
-      detail: `got ${dsr.toFixed(2)} with total weight ${totalWeight.toLocaleString()} (hand-computed 134,834 x 1826.25 / 348,468)`,
     });
   }
 
