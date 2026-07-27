@@ -92,6 +92,7 @@ const ENROLL: Array<[number, string, string, number, string, string, string]> = 
   [13, "2018-01-01", "2019-03-31", 1980, "2", "1", "6"], // P13 span A (long)
   [13, "2018-02-01", "2018-02-10", 1980, "2", "1", "6"], // P13 span B (nested in A)
   [13, "2019-04-15", "2020-06-30", 1980, "2", "1", "6"], // P13 span C (15d after A)
+  [14, "2018-01-01", "2020-06-30", 1975, "1", "2", "6"], // P14 multi-day inpatient stay (no index claim)
 ];
 
 // index drug claim (one per patient, all 2019-01-01). enrolid -> NDC (arm)
@@ -115,6 +116,18 @@ const AE: Array<[number, string]> = [
 // a case censored at day 59): 4 cases / 2119 pd — see EXPECTED.settingAny.
 // A broken (unapplied) filter now fails the harness instead of passing silently.
 const AE_IP: Array<[number, string]> = [[5, "2019-03-01"]];
+
+/* P14 — MULTI-DAY INPATIENT STAY, the double-counting regression case.
+ * One clinical stay: admitted 2019-05-01, the qualifying diagnosis recorded on
+ * a service line dated 2019-05-04, and the same diagnosis on the admission
+ * record dated at admission. Reading service lines at SVCDATE and admission
+ * records at ADMDATE yields TWO event rows with different dates for ONE stay —
+ * DISTINCT cannot collapse them, so claim counts inflate and a `minClaims >= 2`
+ * rule can be satisfied by a single admission.
+ * P14 has NO index drug claim, so it never enters the cohort and cannot move a
+ * pinned gold number; it is asserted directly against the events table. */
+const IP_STAY_ADMIT = "2019-05-01";
+const IP_STAY_SERVICE = "2019-05-04";
 
 function q(v: string | number): string {
   return typeof v === "number" ? String(v) : `'${v}'`;
@@ -144,7 +157,16 @@ export function fixtureSeedSql(): string {
     ([id, d]) => `(${id}, DATE '${d}', DATE '${d}', '0', 'E119', NULL, NULL, NULL, NULL, NULL, NULL, NULL)`,
   ).join(",\n  ");
   lines.push(
-    `INSERT INTO ccaes_all (enrolid,admdate,svcdate,dxver,pdx,dx1,dx2,dx3,dx4,pproc,proc1,proctyp) VALUES\n  ${aeIpVals};`,
+    `INSERT INTO ccaes_all (enrolid,admdate,svcdate,dxver,pdx,dx1,dx2,dx3,dx4,pproc,proc1,proctyp) VALUES\n  ${aeIpVals},\n` +
+      // P14's service line: dated 3 days after admission (see IP_STAY_* above)
+      `  (14, DATE '${IP_STAY_ADMIT}', DATE '${IP_STAY_SERVICE}', '0', 'E119', NULL, NULL, NULL, NULL, NULL, NULL, NULL);`,
+  );
+
+  // P14's admission record — the SAME stay and diagnosis, at the case level.
+  lines.push(
+    `INSERT INTO ccaei_all (enrolid,admdate,disdate,dxver,pdx,dx1,dx2,dx3,dx4,dx5,dx6,dx7,dx8,dx9,dx10,dx11,dx12,dx13,dx14,dx15,pproc,proc1) VALUES\n` +
+      // dx1..dx15 (15) + pproc + proc1
+      `  (14, DATE '${IP_STAY_ADMIT}', DATE '2019-05-06', '0', 'E119', ${Array(15).fill("NULL").join(", ")}, NULL, NULL);`,
   );
 
   lines.push(

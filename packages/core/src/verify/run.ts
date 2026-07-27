@@ -130,6 +130,21 @@ export async function verifyGoldA(): Promise<VerificationResult> {
       detail: `expected 2018-01-01..2020-06-30, got ${p13[0]?.episode_start ?? "none"}..${p13[0]?.episode_end ?? "none"}`,
     });
 
+    /* One multi-day inpatient stay must yield ONE event, not one per source
+     * table (P14; see fixture). Inpatient diagnoses appear on both the service
+     * lines and the admission record; dating the two differently double-counts
+     * a single stay and can satisfy a minClaims>=2 rule on its own. */
+    const p14 = await rows<{ event_date: string }>(
+      db,
+      "SELECT event_date::text FROM tz_study_events WHERE enrolid = 14 ORDER BY event_date",
+    );
+    eq("one inpatient stay = one event row (P14)", p14.length, 1);
+    checks.push({
+      name: "inpatient event is dated at admission (P14)",
+      status: p14[0]?.event_date === "2019-05-01" ? "pass" : "fail",
+      detail: `expected 2019-05-01 (admission), got ${p14.map((r) => r.event_date).join(", ") || "none"}`,
+    });
+
     eq("indexed cohort = 12", await scalar<number>(db, "SELECT count(*)::int FROM tz_study_index"), EXPECTED.indexed);
     eq("continuously enrolled = 11", await scalar<number>(db, "SELECT count(*)::int FROM tz_study_enrolled"), EXPECTED.continuouslyEnrolled);
     eq("final cohort N = 10", await scalar<number>(db, "SELECT count(*)::int FROM tz_study_cohort"), EXPECTED.finalCohortN);

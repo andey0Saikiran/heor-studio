@@ -303,10 +303,22 @@ function build01(ctx: Ctx): string {
 /* 02 - events                                                         */
 /* ------------------------------------------------------------------ */
 
-/** Diagnosis/procedure source tables, in emission order. */
+/** Diagnosis/procedure source tables, in emission order.
+ *
+ *  Inpatient diagnoses are dated at ADMDATE from BOTH inpatient sources. The
+ *  same clinical diagnosis on one stay is recorded on the service lines (S) and
+ *  on the admission record (I); dating S at SVCDATE gives one stay two event
+ *  rows with different dates whenever the stay lasts more than a day, which
+ *  DISTINCT cannot collapse. That inflates claim counts and lets a
+ *  `minClaims >= 2` rule be satisfied by a single admission.
+ *
+ *  ADMDATE is present on both tables, so this needs no CASEID join — which is
+ *  just as well: BR-KEY-002b warns that CASEID is unique only within a
+ *  (database, year, release) and must never be joined across years.
+ *  Regression: fixture patient P14. */
 const CLAIM_SOURCES = [
   { key: "outpatient_services", setting: "outpatient", dateCol: "svcdate" },
-  { key: "inpatient_services", setting: "inpatient", dateCol: "svcdate" },
+  { key: "inpatient_services", setting: "inpatient", dateCol: "admdate" },
   { key: "inpatient_admissions", setting: "inpatient", dateCol: "admdate" },
 ] as const;
 
@@ -366,8 +378,10 @@ function build02(ctx: Ctx): string {
         `  -- Diagnosis slots unpivoted to one row per (claim line, dx position)`,
         `  -- via UNION ALL. facility_header (F) is omitted by default; add its`,
         `  -- dx1..dx9 here if the study needs facility claims. Inpatient dx are`,
-        `  -- read from both the admission summary (I, dated admdate) and service`,
-        `  -- lines (S); duplicates collapse in the final DISTINCT.`,
+        `  -- read from both the admission summary (I) and the service lines (S),`,
+        `  -- BOTH dated at ADMDATE so one stay yields one dated event per code and`,
+        `  -- the final DISTINCT collapses the duplicate. (Dating S at SVCDATE`,
+        `  -- would give a multi-day stay two dates for the same diagnosis.)`,
         `  dx_long AS (`,
         rows.join("\n    UNION ALL\n"),
         `  )`,
@@ -717,7 +731,15 @@ function eventCriterionParts(
       );
     }
   } else if (test.minClaims > 1) {
-    having.push(`COUNT(*) >= ${test.minClaims}`);
+    /* Distinct service DATES, not rows. The same code in two diagnosis slots of
+     * one claim — or on both inpatient sources for one stay — is a single
+     * clinical encounter, so COUNT(*) would let one encounter satisfy
+     * ">= 2 claims". This also matches the SAS twin, which has always counted
+     * distinct dates here, and the separation branch above. */
+    having.push(`COUNT(DISTINCT ev.event_date) >= ${test.minClaims}`);
+    comments.push(
+      `  --   counted as DISTINCT service dates (one encounter = one claim)`
+    );
   }
   return { comments, joinConds, having };
 }

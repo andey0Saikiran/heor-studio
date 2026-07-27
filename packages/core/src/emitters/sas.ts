@@ -598,8 +598,12 @@ function eventsProgram(ctx: Ctx): GeneratedFile | null {
             key: "inpatient_services",
             letter: "s",
             setting: "IP",
-            dateCol: "svcdate",
-            label: "inpatient services (S)",
+            // ADMDATE, not SVCDATE: the same diagnosis on one stay appears on
+            // both the service lines and the admission record, so dating them
+            // differently double-counts a single stay (see sql.ts CLAIM_SOURCES
+            // and fixture P14). Twin of the SQL fix.
+            dateCol: "admdate",
+            label: "inpatient services (S), dated at admission",
             work: "work._pull_s",
           },
           {
@@ -691,8 +695,12 @@ function eventsProgram(ctx: Ctx): GeneratedFile | null {
             key: "inpatient_services",
             letter: "s",
             setting: "IP",
-            dateCol: "svcdate",
-            label: "inpatient services (S)",
+            // ADMDATE, not SVCDATE: the same diagnosis on one stay appears on
+            // both the service lines and the admission record, so dating them
+            // differently double-counts a single stay (see sql.ts CLAIM_SOURCES
+            // and fixture P14). Twin of the SQL fix.
+            dateCol: "admdate",
+            label: "inpatient services (S), dated at admission",
             work: "work._pull_s",
           },
           {

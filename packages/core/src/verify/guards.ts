@@ -154,6 +154,38 @@ export function verifySilenceGuards(): Check[] {
       reached ? "incidence + pointprev + cuminc emitted" : `emitted: ${files.filter((p) => /\/\d/.test(p)).join(", ")}`);
   }
 
+  /* 3d. minClaims counting semantics must MATCH across languages.
+     SQL counted rows (COUNT(*)) while SAS counted distinct service dates, so a
+     single encounter recorded in two diagnosis slots — or on both inpatient
+     sources for one stay — satisfied ">= 2 claims" in SQL but not SAS. Both
+     must count distinct dates. */
+  {
+    const spec: StudySpec = JSON.parse(JSON.stringify(GOLD_A_SPEC));
+    spec.criteria = [
+      {
+        id: "inc_two_claims",
+        kind: "inclusion",
+        sourceText: "At least 2 claims of the outcome condition",
+        // no claimSeparationDays: exercises the branch that diverged
+        test: { type: "diagnosis", codeListId: "ae_dx", minClaims: 2, setting: "any", window: { start: "anytime_before", end: 0, includesIndex: true } },
+        confidence: "high",
+        reviewed: true,
+      },
+    ];
+    const sql = emitSql(spec, "postgres", GOLD_A_OPTS).map((f) => f.content).join("\n");
+    const sas = emitSasFn(spec, GOLD_A_OPTS).map((f) => f.content).join("\n");
+    const sqlDistinct = /COUNT\(DISTINCT ev\.event_date\)\s*>=\s*2/i.test(sql);
+    const sqlRows = /COUNT\(\*\)\s*>=\s*2/i.test(sql);
+    const sasDistinct = /count\(distinct e\.svcdate\)/i.test(sas);
+    push(
+      "guard: minClaims counts DISTINCT service dates in both languages",
+      sqlDistinct && !sqlRows && sasDistinct,
+      sqlDistinct && !sqlRows && sasDistinct
+        ? "both twins count distinct dates (one encounter = one claim)"
+        : `sql distinct=${sqlDistinct} sql rows=${sqlRows} sas distinct=${sasDistinct}`,
+    );
+  }
+
   /* 4. bundle layout matches the README the client reads */
   {
     const entries = planBundle(GOLD_A_SPEC, GOLD_A_OPTS, "2026-01-01T00:00:00.000Z");
