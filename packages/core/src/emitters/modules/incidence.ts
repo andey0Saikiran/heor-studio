@@ -35,6 +35,7 @@ import {
 } from "../sas-base";
 import { sasPrimarySqlColumns, exactPoissonSasLines, EXACT_POISSON_CI } from "../sas-primary";
 import { dataCutLimit } from "../parity";
+import { rateCoreSqlCtes, byarLowSql, byarHighSql, byarSasLines } from "../rate-core";
 import {
   ageBandLabels,
   incidenceLimitations,
@@ -95,8 +96,8 @@ function sqlIncidence(ctx: SqlCtx, an: IncidenceRateAnalysis, suffix: string): S
     ? `LEAST(COALESCE(fu_date, DATE '9999-12-31'), admin_censor)`
     : `admin_censor`;
 
-  const byarLow = `(CASE WHEN patients = 0 THEN 0 ELSE POWER(1 - 1.0/(9*patients) - 1.96/(3*SQRT(patients)), 3) * patients END)`;
-  const byarHigh = `POWER(1 - 1.0/(9*(patients+1)) + 1.96/(3*SQRT(patients+1)), 3) * (patients+1)`;
+  const byarLow = byarLowSql();
+  const byarHigh = byarHighSql();
   const scale = `* ${M} * ${Y} / NULLIF(person_days, 0)`;
 
   // demographic strata — labels shared with the SAS twin (parity.ts) so both
@@ -142,35 +143,16 @@ function sqlIncidence(ctx: SqlCtx, an: IncidenceRateAnalysis, suffix: string): S
     for (const lim of limits) L.push(`--   * ${lim}`);
   }
   L.push(d.createTableAs(out));
-  L.push(`WITH cohort AS (SELECT enrolid, index_date FROM ${wp}_cohort),`);
   L.push(
-    `ae AS (SELECT enrolid, event_date FROM ${wp}_events WHERE code_list_id = '${q(clid)}'` +
-      (setting.enforce ? ` AND setting = '${setting.enforce}'` : ``) +
-      `),`
+    ...rateCoreSqlCtes(ctx, {
+      wp,
+      codeListId: clid,
+      settingEnforce: setting.enforce,
+      washoutDescription: describeWindow(an.washout),
+      washoutPredicate: washoutPred,
+      needDemo,
+    }),
   );
-  L.push(`prevalent AS (   -- washout: ${describeWindow(an.washout)}`);
-  L.push(`  SELECT DISTINCT c.enrolid`);
-  L.push(`  FROM cohort c JOIN ae a ON a.enrolid = c.enrolid`);
-  L.push(`  WHERE ${washoutPred}`);
-  L.push(`),`);
-  L.push(`atrisk AS (SELECT c.* FROM cohort c WHERE c.enrolid NOT IN (SELECT enrolid FROM prevalent)),`);
-  L.push(`first_fu AS (   -- first qualifying outcome strictly after index`);
-  L.push(`  SELECT c.enrolid, MIN(a.event_date) AS fu_date`);
-  L.push(`  FROM atrisk c JOIN ae a ON a.enrolid = c.enrolid AND a.event_date > c.index_date`);
-  L.push(`  GROUP BY c.enrolid`);
-  L.push(`),`);
-  if (needDemo) {
-    L.push(`demo AS (   -- enrollment segment in force at (or latest before) index; rn=1 wins`);
-    L.push(`  SELECT c.enrolid, en.dobyr, en.sex, en.region, en.plantyp,`);
-    L.push(`         ROW_NUMBER() OVER (PARTITION BY c.enrolid`);
-    L.push(`                            ORDER BY en.dtstart DESC, en.dtend DESC) AS rn`);
-    L.push(`  FROM atrisk c`);
-    L.push(`  JOIN ${ctx.t("enrollment_detail")} en`);
-    L.push(`    ON en.enrolid = c.enrolid`);
-    L.push(`   AND en.dtstart <= c.index_date`);
-    L.push(`),`);
-    L.push(`demo1 AS (SELECT enrolid, dobyr, sex, region, plantyp FROM demo WHERE rn = 1),`);
-  }
   L.push(`pt AS (`);
   L.push(
     `  SELECT c.enrolid, c.index_date, ${adminCensor} AS admin_censor, f.fu_date` +
@@ -534,9 +516,7 @@ function sasIncidence(ctx: SasCtx, an: IncidenceRateAnalysis, num: string, suffi
     `  person_years = round(person_days / &days_per_year., 0.0001);`,
     `  if person_days > 0 then do;`,
     `    rate_per_1000py = round(patients * ${M} * &days_per_year. / person_days, 0.01);`,
-    `    if patients = 0 then _byar_low = 0;`,
-    `    else _byar_low = ((1 - 1/(9*patients) - 1.96/(3*sqrt(patients)))**3) * patients;`,
-    `    _byar_high = ((1 - 1/(9*(patients+1)) + 1.96/(3*sqrt(patients+1)))**3) * (patients+1);`,
+    ...byarSasLines(),
     `    ci_low  = round(_byar_low  * ${M} * &days_per_year. / person_days, 0.01);`,
     `    ci_high = round(_byar_high * ${M} * &days_per_year. / person_days, 0.01);`,
     `  end;`,
