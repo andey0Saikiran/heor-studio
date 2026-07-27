@@ -9,6 +9,8 @@ import { seedAndRun, scalar, rows } from "./engine";
 import { runInvariants, type InvariantResult } from "./invariants";
 import { sasSqlParityChecks } from "./parity";
 import { mutationChecks } from "./mutation";
+import { sasStructureChecks } from "./sas-lint";
+import { emitSas } from "../emitters/sas";
 import { GOLD_A_SPEC, GOLD_A_OPTS, EXPECTED } from "./fixture";
 import type { StudySpec, EmitOptions } from "../index";
 
@@ -277,6 +279,10 @@ export async function verifyGoldA(): Promise<VerificationResult> {
   // sensitivity — which is exactly how the stamp-only checks stayed green while
   // being incapable of failing.
   checks.push(...mutationChecks());
+
+  // The SAS twin is never executed, so at minimum it must be well-formed:
+  // balanced comments/parens, closed procs and data steps, no undefined macros.
+  checks.push(...sasStructureChecks(emitSas(GOLD_A_SPEC, GOLD_A_OPTS)));
 
   const anyFail = !ok || checks.some((c) => c.status === "fail") || invariants.some((i) => i.status === "fail");
   return { status: anyFail ? "failed" : "passed", execution: steps, checks, invariants };

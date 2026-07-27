@@ -1087,7 +1087,7 @@ export default function SpecReview({
     onChange({ ...spec, analyses: spec.analyses.filter((a) => a.id !== id) });
   const addAnalysis = (kind: AnalysisKind) => {
     const used = new Set(spec.analyses.map((a) => a.id));
-    let id = kind;
+    let id: string = kind;
     let n = 2;
     while (used.has(id)) id = `${kind}_${n++}`;
     onChange({ ...spec, analyses: [...spec.analyses, newAnalysis(kind, id)] });

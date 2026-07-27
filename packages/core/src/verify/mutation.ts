@@ -30,6 +30,7 @@ import {
   constantProfile,
   diffConstantProfile,
 } from "./fingerprint";
+import { sasStructureChecks } from "./sas-lint";
 import { GOLD_A_SPEC, GOLD_A_OPTS } from "./fixture";
 import type { Check } from "./run";
 
@@ -192,5 +193,68 @@ export function mutationChecks(): Check[] {
     });
   }
 
+  checks.push(...sasStructureMutationChecks());
+  return checks;
+}
+
+/** Corruptions the SAS STRUCTURAL lint must catch. Same principle as above: a
+ *  structural check that has never gone red is an unproven check. */
+const SAS_STRUCTURE_MUTATIONS: Array<{ name: string; apply: (t: string) => string }> = [
+  {
+    name: "SAS proc sql left unclosed (missing quit;)",
+    apply: (t) => t.replace(/\bquit\s*;/i, ""),
+  },
+  {
+    name: "SAS data step left unclosed (missing run;)",
+    apply: (t) => t.replace(/\brun\s*;/i, ""),
+  },
+  {
+    // Anchored on the _byar_low ASSIGNMENT: the first `sqrt(` in the file is
+    // inside the comment that explains the formula, and corrupting prose
+    // proves nothing (this mutation "passed" that way until it was retargeted).
+    name: "SAS expression left with an unbalanced parenthesis",
+    apply: (t) => t.replace(/(_byar_low\s*=\s*)\(/i, "$1(("),
+  },
+  {
+    name: "SAS block comment left unterminated",
+    apply: (t) => t.replace(/\*\//, " "),
+  },
+  {
+    name: "SAS references an undefined macro variable",
+    apply: (t) => t.replace(/&days_per_year\./i, "&days_per_yr."),
+  },
+  {
+    name: "SAS analysis program loses its %include of 00_setup",
+    apply: (t) => t.replace(/%include\s+["'][^"']*setup[^"']*["']\s*;/i, ""),
+  },
+];
+
+function sasStructureMutationChecks(): Check[] {
+  const checks: Check[] = [];
+  const files = emitSas(GOLD_A_SPEC, GOLD_A_OPTS);
+  const targetIdx = files.findIndex((f) => /incidence/i.test(f.path));
+  if (targetIdx < 0) {
+    return [{ name: "sas structure mutations", status: "fail", detail: "no incidence SAS program emitted" }];
+  }
+
+  for (const m of SAS_STRUCTURE_MUTATIONS) {
+    const mutated = files.map((f, i) => (i === targetIdx ? { ...f, content: m.apply(f.content) } : f));
+    if (mutated[targetIdx].content === files[targetIdx].content) {
+      checks.push({
+        name: `sas structure mutation: ${m.name}`,
+        status: "fail",
+        detail: "mutation pattern did not match — the test is vacuous; update the pattern",
+      });
+      continue;
+    }
+    const failures = sasStructureChecks(mutated).filter((c) => c.status === "fail");
+    checks.push({
+      name: `sas structure mutation caught: ${m.name}`,
+      status: failures.length > 0 ? "pass" : "fail",
+      detail: failures.length > 0
+        ? failures.map((f) => f.detail).join(" | ").slice(0, 180)
+        : "NOT CAUGHT — the SAS structural lint is blind to this",
+    });
+  }
   return checks;
 }

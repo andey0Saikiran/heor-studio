@@ -100,6 +100,8 @@ function needSafeText(p: Problems, o: Record<string, unknown>, key: string, path
   if (!needStr(p, o, key, path, opts)) return false;
   const v = o[key] as string;
   if (v.length > (opts?.maxLen ?? 300)) { p.push(`${path}.${key}`, `too long (> ${opts?.maxLen ?? 300} chars)`); return false; }
+  // oxlint-disable-next-line no-control-regex -- matching control characters IS
+  // the check: a newline here escapes a generated `--` comment into live code.
   if (/[\x00-\x1F\x7F]/.test(v)) { p.push(`${path}.${key}`, "contains control characters (e.g. newlines/tabs) — it is printed into SQL/SAS comment headers where a newline escapes the comment"); return false; }
   if (v.includes("*/")) { p.push(`${path}.${key}`, 'contains "*/" — it is printed into SAS block comments where that sequence closes the comment and turns the rest into live code'); return false; }
   return true;
