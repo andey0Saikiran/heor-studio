@@ -11,6 +11,7 @@ import type { CodeList, StudySpec } from "./spec/types";
 import { specReadiness, unreviewedCriteria, unverifiedCodeCount } from "./spec/types";
 import type { EmitOptions, GeneratedFile } from "./emitters/types";
 import { EMITTER_VERSION, stableHash } from "./provenance";
+import { suppressionPolicy } from "./emitters/suppression";
 import { emitSas } from "./emitters/sas";
 import { emitSql } from "./emitters/sql";
 
@@ -80,6 +81,24 @@ three values in any manuscript, QC pack, or submission that uses these results.
 - \`sql_postgres/\` — PostgreSQL scripts (${generated.postgres.length} files)
 - \`sql_snowflake/\` — Snowflake scripts (${generated.snowflake.length} files)
 - \`codelists/\` — one CSV per code list (code, description, system, source, verified)
+
+## What to release, and what not to
+
+The final script in each SQL folder writes a \`*_released\` table beside every
+result table, with small cells masked (${suppressionPolicy(spec).ruleLabel}) and a
+\`suppression_rule\` footnote on every row. It also builds \`<prefix>_results\` —
+one tidy long-format table over every released result
+(\`table_id, analysis_label, row_group, row_level, stat, value, suppressed,
+suppression_rule\`) for table shells and report writers to read from.
+
+- **Shareable:** the \`*_released\` tables and \`<prefix>_results\`.
+- **NOT shareable:** the unsuppressed result tables and every patient-level work
+  table. They keep exact values for your own QC and must stay inside your
+  environment.
+
+Suppression is on by default. If your data use agreement sets a different
+threshold, set \`suppression.threshold\` in the spec and re-generate — do not
+edit the generated SQL.
 - \`AI_DISCLOSURE.md\` — generative-AI use disclosure and human-review attestation
 
 ## What "machine-verified" covers (scope — read this)

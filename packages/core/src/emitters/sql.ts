@@ -40,7 +40,7 @@ import type {
 } from "./types";
 import { assertSafeIdent, assertSafeNaming } from "./types";
 import { q, oneLine, makeDialect, windowConds, describeWindow } from "./sql-base";
-import { suppressionPolicy, suppressionSqlFor, type SuppressionTarget } from "./suppression";
+import { suppressionPolicy, suppressionSqlFor, resultsContractSql, RESULTS_TABLE_PLACEHOLDER, type SuppressionTarget } from "./suppression";
 import { EMITTER_VERSION, stableHash } from "../provenance";
 import type { Ctx } from "./sql-base";
 import { moduleAnalyses } from "./modules/registry";
@@ -1401,6 +1401,18 @@ export const emitSql: SqlEmitter = (spec, dialect, opts) => {
     const num = String(lastNum + 1).padStart(2, "0");
     const body: string[] = [];
     for (const t of suppressTargets) body.push(...suppressionSqlFor(t, policy));
+    body.push(`-- ${"-".repeat(74)}`);
+    body.push(`-- RESULTS CONTRACT — every released result in one tidy long-format table,`);
+    body.push(`-- so table shells and report writers read ONE shape instead of a different`);
+    body.push(`-- column layout per analysis. Masked cells arrive as NULL with suppressed=1`);
+    body.push(`-- and the rule attached, so a shell can print "<${policy.threshold}" without`);
+    body.push(`-- re-deriving the policy — and cannot print a value that should be masked.`);
+    body.push(`-- ${"-".repeat(74)}`);
+    body.push(
+      ...resultsContractSql(suppressTargets, policy).map((l) =>
+        l.replace(new RegExp(RESULTS_TABLE_PLACEHOLDER, "g"), `${ctx.wp}_results`),
+      ),
+    );
     files.push(
       mk(
         num,

@@ -161,6 +161,27 @@ export async function verifySuppression(): Promise<Check[]> {
     weak.length === 0,
     weak.length === 0 ? "every masked group has >= 2 masked cells" : weak.map((w) => `${w.stratifier}: 1 of ${w.n_cells}`).join(", "));
 
+  /* Results contract — one tidy long-format table over every released result,
+   * so a table shell reads ONE shape. The property that matters: it is built
+   * from the RELEASED tables, so no masked value can reach a deliverable. */
+  const tables = await rows<{ table_id: string; c: number }>(
+    db,
+    "SELECT table_id, count(*)::int AS c FROM tz_study_results GROUP BY table_id",
+  );
+  const expectedTables = 1 /* table1 */ + 8 /* module analyses in the gold spec */;
+  push("results contract: every result table is represented", tables.length === expectedTables,
+    `expected ${expectedTables} tables, got ${tables.length}`);
+
+  const leak = await scalar<number>(db, "SELECT count(*)::int FROM tz_study_results WHERE suppressed = 1 AND value IS NOT NULL");
+  push("results contract: no masked cell leaks a value into the deliverable", leak === 0, `${leak} suppressed rows carry a value`);
+
+  const shape = await scalar<number>(
+    db,
+    `SELECT count(*)::int FROM tz_study_results
+     WHERE table_id IS NULL OR row_group IS NULL OR row_level IS NULL OR stat IS NULL OR suppression_rule IS NULL`,
+  );
+  push("results contract: every row is fully labeled", shape === 0, `${shape} rows missing an identifying column`);
+
   return out;
 }
 

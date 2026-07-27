@@ -240,3 +240,60 @@ export function suppressionSasFor(t: SuppressionTarget, p: SuppressionPolicy, wo
   out.push(``);
   return out;
 }
+
+/* -------------------------------------------------------------- *
+ *  Results contract
+ * -------------------------------------------------------------- */
+
+/**
+ * A single tidy, long-format table containing every released result.
+ *
+ * The product used to stop at CREATE TABLE, but what a client, journal or payer
+ * receives is formatted tables — and every table shell, report writer and
+ * spreadsheet export needs ONE predictable shape to read from rather than a
+ * different column layout per analysis. This is that shape:
+ *
+ *   table_id | analysis_label | row_group | row_level | stat | value
+ *            | suppressed | suppression_rule
+ *
+ * It is built from the *_released tables, so masked cells arrive as NULL with
+ * suppressed = 1 and the rule attached — a shell can then print "<11" or "—"
+ * without needing to re-derive the policy, and cannot accidentally print a
+ * value that was supposed to be masked.
+ */
+export function resultsContractSql(targets: SuppressionTarget[], p: SuppressionPolicy): string[] {
+  const out: string[] = [];
+  out.push(`DROP TABLE IF EXISTS ${RESULTS_TABLE_PLACEHOLDER};`);
+  out.push(`CREATE TABLE ${RESULTS_TABLE_PLACEHOLDER} AS`);
+  const blocks: string[] = [];
+  for (const t of targets) {
+    const s = SUPPRESSION_SHAPES[t.shapeKey];
+    if (!s) continue;
+    // the last two label columns are the row identity in every shape
+    const [rowGroup, rowLevel] = s.labelCols.slice(-2);
+    for (const stat of s.maskCols) {
+      blocks.push(
+        [
+          `SELECT '${t.table}' AS table_id,`,
+          `       '${t.label.replace(/'/g, "''")}' AS analysis_label,`,
+          `       CAST(${rowGroup} AS VARCHAR) AS row_group,`,
+          `       CAST(${rowLevel} AS VARCHAR) AS row_level,`,
+          `       '${stat}' AS stat,`,
+          `       CAST(${stat} AS NUMERIC) AS value,`,
+          `       suppressed,`,
+          `       suppression_rule`,
+          `FROM ${t.table}_released`,
+        ].join("\n"),
+      );
+    }
+  }
+  out.push(blocks.join("\nUNION ALL\n"));
+  out.push(`;`);
+  out.push(``);
+  out.push(`-- Rule in force for every row above: ${p.ruleLabel}`);
+  out.push(``);
+  return out;
+}
+
+/** Placeholder replaced by the emitter with the study's work-table prefix. */
+export const RESULTS_TABLE_PLACEHOLDER = "__RESULTS__";
