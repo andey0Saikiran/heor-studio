@@ -30,6 +30,13 @@ import { SUPPRESSION_SHAPES } from "../emitters/suppression";
 import { fingerprint, expectedFromStamp, hasConstantProfile } from "./fingerprint";
 import { GOLD_A_SPEC, GOLD_A_OPTS } from "./fixture";
 import type { Analysis } from "../spec/types";
+import {
+  STANDARD_POPULATIONS,
+  STANDARD_POPULATIONS_PENDING,
+  validateStandardPopulation,
+  rebaseWeights,
+  standardPopulationLabels,
+} from "../emitters/std-populations";
 import type { Check } from "./run";
 
 /** A fingerprint with only the always-present baseline key is not coverage.
@@ -158,4 +165,61 @@ export function coverageGuardSelfTest(): Check[] {
       detail: "an unregistered kind is absent from both static maps",
     },
   ];
+}
+
+
+/** Standard reference-population constants.
+ *
+ *  Direct standardization is a weighted average, so the weights ARE the result.
+ *  A single mistyped figure shifts every standardized rate a study publishes and
+ *  looks entirely plausible doing it. The sum check is the protection: it turns
+ *  a transcription error into a failure. */
+export function standardPopulationChecks(): Check[] {
+  const checks: Check[] = [];
+
+  for (const p of Object.values(STANDARD_POPULATIONS)) {
+    if (!p) continue;
+    const v = validateStandardPopulation(p);
+    const sum = p.bands.reduce((a, b) => a + b.weight, 0);
+    checks.push({
+      name: `std population ${p.id}: weights sum to the published total`,
+      status: v.ok ? "pass" : "fail",
+      detail: v.ok
+        ? `${p.bands.length} bands summing to exactly ${sum.toLocaleString()}`
+        : v.problems.join(" | "),
+    });
+    checks.push({
+      name: `std population ${p.id}: band labels match the stratum grammar`,
+      status: standardPopulationLabels(p).every((l) => /^\d+(-\d+|\+)$/.test(l)) ? "pass" : "fail",
+      detail: standardPopulationLabels(p).join(", "),
+    });
+  }
+
+  /* Rebasing must REPORT its own incompleteness. A cohort covering half the
+   * reference is standardizable, but the resulting rate is not comparable to a
+   * published one — so the covered share is a required output, not a footnote. */
+  const us = STANDARD_POPULATIONS.us_2000;
+  if (us) {
+    const rb = rebaseWeights(us, [35, 45, 55, 65]);
+    const sharesSumToOne = Math.abs(rb.weights.reduce((a, w) => a + w.share, 0) - 1) < 1e-9;
+    checks.push({
+      name: "std population rebasing: shares renormalize to 1 and report coverage",
+      status: sharesSumToOne && rb.coveredWeightPct > 0 && rb.coveredWeightPct < 100 ? "pass" : "fail",
+      detail: `covers ${rb.coveredWeightPct}% of the reference; rebased shares sum to ${rb.weights.reduce((a, w) => a + w.share, 0).toFixed(6)}`,
+    });
+  }
+
+  /* A population we do not carry must be REFUSED by name, with a citation of
+   * what to transcribe — never silently swapped for one we do carry, which
+   * would relabel the rate while changing it. */
+  for (const [id, reason] of Object.entries(STANDARD_POPULATIONS_PENDING)) {
+    const bundled = (STANDARD_POPULATIONS as Record<string, unknown>)[id] !== undefined;
+    checks.push({
+      name: `std population ${id}: refused with a citation rather than substituted`,
+      status: !bundled && reason.length > 60 ? "pass" : "fail",
+      detail: bundled ? `${id} is both bundled and listed as pending` : "names the source to transcribe and sum-check",
+    });
+  }
+
+  return checks;
 }

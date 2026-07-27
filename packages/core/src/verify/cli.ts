@@ -1,6 +1,6 @@
 /* Verification entry — run: npm run verify -w @heor-studio/core */
 import { verifyGoldA, verifyDaysPerYearChoice, verifySettingFilterControl, verifySuppression, verifyWashoutToggle, verifyAscertainmentWindow } from "./run";
-import { fingerprintCoverageChecks, coverageGuardSelfTest } from "./coverage";
+import { fingerprintCoverageChecks, coverageGuardSelfTest, standardPopulationChecks } from "./coverage";
 import { verifySilenceGuards } from "./guards";
 
 async function main() {
@@ -30,7 +30,7 @@ async function main() {
   console.log("\n=== outcome care-setting filter (negative control) ===");
   for (const c of sfc) console.log(`  ${c.status === "pass" ? "PASS" : "FAIL"}  ${c.name} — ${c.detail}`);
 
-  const cov = [...fingerprintCoverageChecks(), ...coverageGuardSelfTest()];
+  const cov = [...fingerprintCoverageChecks(), ...coverageGuardSelfTest(), ...standardPopulationChecks()];
   console.log("\n=== verification coverage (every module must declare its own coverage) ===");
   for (const c of cov) console.log(`  ${c.status === "pass" ? "PASS" : "FAIL"}  ${c.name} — ${c.detail}`);
 
