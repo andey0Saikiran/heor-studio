@@ -51,7 +51,18 @@ Those documents are accurate about what was *built*; they are wrong about what m
   _Still open in Wave 4:_ Excel table shells / Word report, QC pack, and the
   IRB/DUA attestation surface.
 
-**Next up: finish Wave 4 (table shells + QC pack), then Wave 5 (more analyses).**
+- **✅ Wave 5 (started) — statistical engine** (commit `884194c`). SMD covariate
+  balance between exposure arms, both languages, executed against the frozen
+  `smdAge = -0.63246`. The believed prerequisite (a two-exposure-cohort spine
+  extension) turned out **not to be needed**: in an active-comparator new-user
+  design both drugs sit in one index list and the spine already records
+  `index_code`. The real subtlety was that a drug-NAME list resolves to NDCs, so
+  the arm label comes back through the NDC lookup.
+  _Still open in Wave 5:_ standardization (needs reference-population weight
+  tables), calendar trend (needs a multi-year fixture + p-value policy), and all
+  of P2/P3/P4.
+
+**Next up: standardization + calendar trend, then P2 economics.**
 
 ---
 
