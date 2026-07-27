@@ -18,6 +18,7 @@
 
 import type {
   Analysis,
+  AnalysisKind,
   LegacyAnalysisType,
   LegacyAnalysisRequest,
   BaselineCharacteristic,
@@ -26,10 +27,13 @@ import type {
   Criterion,
   EnrollmentRule,
   IndexEventRule,
+  OutcomeDefinition,
+  AnchorDate,
+  Stratifier,
   RelativeWindow,
   StudySpec,
 } from "../spec/types";
-import { migrateLegacyAnalyses } from "../spec/types";
+import { migrateLegacyAnalyses, EMITTABLE_ANALYSIS_KINDS } from "../spec/types";
 import {
   ANALYSIS_TYPES,
   BASELINE_KINDS,
@@ -39,6 +43,9 @@ import {
   CRITERION_KINDS,
   DATABASE_IDS,
   INDEX_EVENT_TYPES,
+  OUTCOME_DX_POSITIONS,
+  STRATIFIER_AXES,
+  FUTURE_ANALYSIS_KINDS,
   SPEC_JSON_SCHEMA,
   SYSTEM_PROMPT,
 } from "./prompt";
@@ -321,24 +328,40 @@ export function normalizeSpec(raw: unknown, ctx: NormalizeContext): StudySpec {
     .filter(isObject)
     .map((b, i) => normalizeBaseline(b, i, listIds, usedBaselineIds));
 
-  /* --- analyses: LLM emits the legacy 7 names; migrate to the analysis layer.
-   *  Only the two emittable kinds (attrition, table1) stay enabled; richer
-   *  requests are recorded as disabled shells/stubs so they are visible in
-   *  review but do not block readiness until their emitter lands. Outcome/group/
-   *  comparison catalogs start empty (the analyst builds them during review). --- */
-  const seenAnalyses = new Set<string>();
+  /* --- analyses: the extractor now emits per-KIND objects. Each is normalized
+   *  into a valid Analysis with methodological defaults filled in; the four
+   *  descriptive-epi kinds reach their real emitters. A dangling outcome code
+   *  list is replaced with an empty placeholder the analyst fills (same policy
+   *  as the index event). For backward-compatibility we still accept the legacy
+   *  {type,enabled,notes} shape and migrate it. Outcome/group/comparison
+   *  catalogs start empty (the analyst builds them during review). --- */
+  const usedAnalysisIds = new Set<string>();
+  const analyses: Analysis[] = [];
   const legacy: LegacyAnalysisRequest[] = [];
   for (const a of arr(root.analyses)) {
     if (!isObject(a)) continue;
-    const type = pick(a.type, ANALYSIS_TYPES) as LegacyAnalysisType | undefined;
-    if (type === undefined || seenAnalyses.has(type)) continue;
-    seenAnalyses.add(type);
-    const notes = optStr(a.notes);
-    legacy.push({ type, enabled: bool(a.enabled, true), ...(notes !== undefined ? { notes } : {}) });
+    if (typeof a.kind === "string") {
+      const an = normalizeAnalysis(a, codeLists, listIds, usedListIds, usedAnalysisIds);
+      if (an) analyses.push(an);
+    } else if (typeof a.type === "string") {
+      // legacy shape from an older extractor / hand-authored input
+      const type = pick(a.type, ANALYSIS_TYPES) as LegacyAnalysisType | undefined;
+      if (type === undefined) continue;
+      const notes = optStr(a.notes);
+      legacy.push({ type, enabled: bool(a.enabled, true), ...(notes !== undefined ? { notes } : {}) });
+    }
   }
-  const analyses: Analysis[] = migrateLegacyAnalyses(legacy).map((a): Analysis =>
-    a.kind === "attrition" || a.kind === "table1" ? a : { ...a, enabled: false },
-  );
+  if (legacy.length > 0) {
+    for (const a of migrateLegacyAnalyses(legacy)) {
+      const id = uniqueSlug(a.id, a.kind, usedAnalysisIds);
+      // migrated non-spine kinds are shells → keep visible but disabled
+      const enabled = EMITTABLE_ANALYSIS_KINDS.has(a.kind);
+      analyses.push({ ...a, id, enabled: a.kind === "future_stub" ? false : enabled });
+    }
+  }
+  // Guarantee the two spine analyses always exist so the bundle always has an
+  // attrition table + Table 1, even if the extractor omitted them.
+  ensureSpineAnalyses(analyses, usedAnalysisIds);
 
   /* --- meta --- */
   const meta = normalizeMeta(root.meta, ctx);
@@ -594,6 +617,191 @@ function normalizeBaseline(
     ...(codeListId !== undefined ? { codeListId } : {}),
     ...(window !== undefined ? { window } : {}),
   };
+}
+
+/* ---------- analysis-layer normalizers ---------- */
+
+/** Prevalent-case washout default: any outcome ever on/before index removes
+ *  the subject (the safe new-user default; analyst narrows it in review). */
+const WASHOUT_DEFAULT: RelativeWindow = { start: "anytime_before", end: 0, includesIndex: true };
+
+/** Normalize one per-kind analysis object into a valid Analysis, filling
+ *  methodological defaults. Returns undefined if the kind is unrecognized. */
+function normalizeAnalysis(
+  v: Record<string, unknown>,
+  codeLists: CodeList[],
+  listIds: Set<string>,
+  usedListIds: Set<string>,
+  usedIds: Set<string>
+): Analysis | undefined {
+  const kind = pick(v.kind, ALL_ANALYSIS_KINDS);
+  if (kind === undefined) return undefined;
+  const label = str(v.label).trim();
+  const id = uniqueSlug(str(v.id) || label || kind, kind, usedIds);
+  const notes = optStr(v.notes);
+  const common = { id, label: label || id, enabled: bool(v.enabled, true), ...(notes !== undefined ? { notes } : {}) };
+
+  switch (kind) {
+    case "attrition":
+      return { ...common, kind: "attrition" };
+    case "table1": {
+      const ids = arr(v.includeBaselineIds).map((x) => str(x).trim()).filter(Boolean);
+      return { ...common, kind: "table1", ...(ids.length > 0 ? { includeBaselineIds: ids } : {}) };
+    }
+    case "future_stub": {
+      const plannedKind = pick(v.plannedKind, FUTURE_ANALYSIS_KINDS) ?? "cost";
+      // Non-emittable: force disabled so it stays visible without blocking readiness.
+      return { ...common, enabled: false, kind: "future_stub", plannedKind };
+    }
+    case "incidence_rate": {
+      const outcomeDefinition = normalizeOutcomeDefinition(v.outcomeDefinition, codeLists, listIds, usedListIds, id);
+      return {
+        ...common, kind: "incidence_rate", outcomeDefinition, caseStatus: "incident",
+        washout: isObject(v.washout) ? normalizeWindow(v.washout, WASHOUT_DEFAULT) : { ...WASHOUT_DEFAULT },
+        denominatorRule: "person_time",
+        personTimeRule: { start: "index", censorAt: ["outcome", "disenrollment", "study_end"] },
+        recurrence: v.recurrence === "all_events" ? "all_events" : "first_only",
+        rateMultiplier: positiveNum(v.rateMultiplier, 1000),
+        ciMethod: "poisson_byar",
+        stratifyBy: normalizeStratifiers(v.stratifyBy),
+      };
+    }
+    case "point_prevalence": {
+      const outcomeDefinition = normalizeOutcomeDefinition(v.outcomeDefinition, codeLists, listIds, usedListIds, id);
+      return {
+        ...common, kind: "point_prevalence", outcomeDefinition, caseStatus: "prevalent",
+        anchorDate: normalizeAnchorDate(v.anchorDate),
+        denominatorRule: "enrolled_midperiod",
+        ciMethod: "wilson",
+        stratifyBy: normalizeStratifiers(v.stratifyBy),
+      };
+    }
+    case "period_prevalence": {
+      const outcomeDefinition = normalizeOutcomeDefinition(v.outcomeDefinition, codeLists, listIds, usedListIds, id);
+      const period = isObject(v.prevalencePeriod) ? v.prevalencePeriod : {};
+      return {
+        ...common, kind: "period_prevalence", outcomeDefinition, caseStatus: "prevalent",
+        prevalencePeriod: { start: isoDate(period.start, "2000-01-01"), end: isoDate(period.end, todayIso()) },
+        denominatorRule: "enrolled_anytime",
+        ciMethod: "wilson",
+        stratifyBy: normalizeStratifiers(v.stratifyBy),
+      };
+    }
+    case "cumulative_incidence": {
+      const outcomeDefinition = normalizeOutcomeDefinition(v.outcomeDefinition, codeLists, listIds, usedListIds, id);
+      const horizonDays = clampInt(Math.round(num(v.horizonDays, 365)), 1);
+      return {
+        ...common, kind: "cumulative_incidence", outcomeDefinition, caseStatus: "incident",
+        washout: isObject(v.washout) ? normalizeWindow(v.washout, WASHOUT_DEFAULT) : { ...WASHOUT_DEFAULT },
+        incidentWithRespectTo: "cohort_entry",
+        denominatorRule: "at_risk_start",
+        horizonDays,
+        personTimeRule: { start: "index", censorAt: ["outcome", "disenrollment", "study_end", "max_followup"], maxFollowupDays: horizonDays },
+        competingRiskDeath: "ignore",
+        recurrence: "first_only",
+        ciMethod: "wilson",
+        stratifyBy: normalizeStratifiers(v.stratifyBy),
+      };
+    }
+    // standardization / calendar_trend / statistical_engine: valid spec kinds
+    // but no emitter yet, so the extractor never produces them; if one appears,
+    // fall through to undefined (dropped) rather than emit a broken shell.
+    default:
+      return undefined;
+  }
+}
+
+/** All analysis kinds the extractor/normalizer accepts. */
+const ALL_ANALYSIS_KINDS = [
+  "attrition", "table1", "incidence_rate", "point_prevalence",
+  "period_prevalence", "cumulative_incidence", "future_stub",
+] as const;
+
+function normalizeOutcomeDefinition(
+  v: unknown,
+  codeLists: CodeList[],
+  listIds: Set<string>,
+  usedListIds: Set<string>,
+  analysisId: string
+): OutcomeDefinition {
+  const o = isObject(v) ? v : {};
+  let codeListId = str(o.codeListId).trim();
+  if (!codeListId || !listIds.has(codeListId)) {
+    // Create an empty placeholder outcome list (same policy as the index event):
+    // keeps the reference valid; the analyst looks up + verifies the codes.
+    const placeholderId = uniqueSlug(codeListId || `${analysisId}_outcome`, `${analysisId}_outcome`, usedListIds);
+    codeLists.push({
+      id: placeholderId,
+      label: "Outcome codes (needs lookup)",
+      system: "icd10cm",
+      codes: [],
+      notes:
+        "Created automatically: an analysis referenced this outcome code list " +
+        "but it was not defined. Look up and enter the codes that define the " +
+        "outcome, then verify them.",
+    });
+    listIds.add(placeholderId);
+    codeListId = placeholderId;
+  }
+  const minClaims = clampInt(Math.round(num(o.minClaims, 1)), 1);
+  const claimSeparationDays = optNonNegInt(o.claimSeparationDays);
+  return {
+    codeListId,
+    minClaims,
+    ...(minClaims >= 2 && claimSeparationDays !== undefined ? { claimSeparationDays } : {}),
+    setting: pick(o.setting, CARE_SETTINGS) ?? "any",
+    diagnosisPosition: pick(o.diagnosisPosition, OUTCOME_DX_POSITIONS) ?? "any",
+  };
+}
+
+function normalizeAnchorDate(v: unknown): AnchorDate {
+  const a = isObject(v) ? v : {};
+  if (a.kind === "fixed") return { kind: "fixed", date: isoDate(a.date, todayIso()) };
+  if (a.kind === "index") return { kind: "index" };
+  // default to a fixed date only when one is provided; else the subject index
+  return typeof a.date === "string" && ISO_DATE_RE.test(a.date) ? { kind: "fixed", date: a.date } : { kind: "index" };
+}
+
+function normalizeStratifiers(v: unknown): Stratifier[] {
+  const used = new Set<string>();
+  const out: Stratifier[] = [];
+  for (const [i, s] of arr(v).entries()) {
+    if (!isObject(s)) continue;
+    const src = isObject(s.source) ? s.source : {};
+    const label = str(s.label).trim();
+    const id = uniqueSlug(str(s.id) || label || `stratum_${i + 1}`, `stratum_${i + 1}`, used);
+    let source: Stratifier["source"];
+    if (src.kind === "baseline" && str(src.baselineId).trim()) {
+      source = { kind: "baseline", baselineId: str(src.baselineId).trim() };
+    } else {
+      const axis = pick(src.axis, STRATIFIER_AXES) ?? "sex";
+      source = { kind: "demographic", axis };
+    }
+    const bounds = arr(s.ageBandLowerBounds).map((n) => Math.round(num(n, NaN))).filter((n) => Number.isFinite(n));
+    out.push({
+      id,
+      label: label || id,
+      source,
+      ...(source.kind === "demographic" && source.axis === "age_band" && bounds.length > 0 ? { ageBandLowerBounds: bounds } : {}),
+    });
+  }
+  return out;
+}
+
+/** Guarantee attrition + table1 analyses exist (the bundle always ships them). */
+function ensureSpineAnalyses(analyses: Analysis[], usedIds: Set<string>): void {
+  const has = (k: AnalysisKind) => analyses.some((a) => a.kind === k);
+  if (!has("attrition")) {
+    analyses.unshift({ id: uniqueSlug("attrition", "attrition", usedIds), label: "Attrition (CONSORT)", enabled: true, kind: "attrition" });
+  }
+  if (!has("table1")) {
+    analyses.push({ id: uniqueSlug("table1", "table1", usedIds), label: "Baseline characteristics (Table 1)", enabled: true, kind: "table1" });
+  }
+}
+
+function positiveNum(v: unknown, fallback: number): number {
+  const n = num(v, fallback);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
 /** Default window: any time on or before index (baseline includes index). */

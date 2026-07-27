@@ -19,6 +19,8 @@ import { checkSpecShape } from "../spec/shape";
 import { emitSql } from "../emitters/sql";
 import { emitSas as emitSasFn } from "../emitters/sas";
 import { planBundle } from "../bundle";
+import { normalizeSpec } from "../extract/anthropic";
+import { DEFAULT_EMIT_OPTIONS } from "../emitters/types";
 import { GOLD_A_SPEC, GOLD_A_OPTS } from "./fixture";
 import type { Check } from "./run";
 
@@ -111,6 +113,45 @@ export function verifySilenceGuards(): Check[] {
     // the payload's raw "*/" must be neutralized to "* /" wherever model text appears
     const sasEscaped = sasFiles.every((f) => !f.content.includes("m */; %put PWNED"));
     push("guard: SAS emitter neutralizes */ in provenance.model", sasEscaped, sasEscaped ? "*/ escaped to * / in headers" : "raw */ survived into a SAS block comment");
+  }
+
+  /* 3c. Wave-1 connect-the-ends: a representative extractor tool output must
+     normalize into ENABLED descriptive-epi analyses that actually reach the
+     emitters (this was the whole point of Wave 1 — the four verified modules
+     were previously unreachable through extraction). */
+  {
+    const raw = {
+      meta: { title: "Guard study", version: "0.1.0", database: "marketscan_ccae",
+        studyPeriod: { start: "2016-01-01", end: "2021-12-31" }, provenance: { method: "llm_extraction" } },
+      codeLists: [
+        { id: "idx", label: "Index drug", system: "drug_name", codes: [{ code: "ADALIMUMAB", source: "ai_suggested", verified: false }] },
+        { id: "oc", label: "Outcome", system: "icd10cm", codes: [{ code: "L40.0", source: "ai_suggested", verified: false }] },
+      ],
+      indexEvent: { type: "first_drug_claim", codeListId: "idx", indexPeriod: { start: "2016-01-01", end: "2021-12-31" } },
+      enrollment: { baselineDays: 365, followupDays: 365, gapAllowanceDays: 31, requiresRxCoverage: true },
+      criteria: [],
+      baseline: [{ id: "b_sex", label: "Sex", kind: "sex" }],
+      analyses: [
+        { kind: "incidence_rate", id: "ir", label: "IR", enabled: true, outcomeDefinition: { codeListId: "oc", minClaims: 1, setting: "any", diagnosisPosition: "any" } },
+        { kind: "point_prevalence", id: "pp", label: "PP", enabled: true, outcomeDefinition: { codeListId: "oc", minClaims: 1, setting: "any", diagnosisPosition: "any" }, anchorDate: { kind: "fixed", date: "2020-07-01" } },
+        { kind: "cumulative_incidence", id: "ci", label: "CI", enabled: true, outcomeDefinition: { codeListId: "oc", minClaims: 1, setting: "any", diagnosisPosition: "any" }, horizonDays: 365 },
+        { kind: "future_stub", id: "cost", label: "Cost", enabled: true, plannedKind: "cost" },
+      ],
+    };
+    const spec = normalizeSpec(raw, { model: "guard", sourceDocumentName: "guard" });
+    const enabledKinds = new Set(spec.analyses.filter((a) => a.enabled).map((a) => a.kind));
+    push("guard: extractor output enables the descriptive-epi modules",
+      ["incidence_rate", "point_prevalence", "cumulative_incidence"].every((k) => enabledKinds.has(k as never)),
+      `enabled kinds: ${[...enabledKinds].join(", ")}`);
+    push("guard: extractor future_stub stays disabled (does not block readiness)",
+      !spec.analyses.some((a) => a.kind === "future_stub" && a.enabled),
+      "cost stub disabled");
+    const shape = checkSpecShape(spec);
+    push("guard: normalized extractor spec is shape-valid", shape.ok, shape.ok ? "valid" : shape.problems.slice(0, 3).join("; "));
+    const files = emitSql(spec, "postgres", DEFAULT_EMIT_OPTIONS).map((f) => f.path);
+    const reached = ["incidence", "pointprev", "cuminc"].every((slug) => files.some((p) => p.includes(slug)));
+    push("guard: emitter produces a file for each enabled descriptive-epi analysis", reached,
+      reached ? "incidence + pointprev + cuminc emitted" : `emitted: ${files.filter((p) => /\/\d/.test(p)).join(", ")}`);
   }
 
   /* 4. bundle layout matches the README the client reads */

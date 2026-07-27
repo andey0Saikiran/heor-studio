@@ -18,6 +18,12 @@ import type {
   Criterion,
   DatabaseId,
   IndexEventRule,
+  OutcomeDefinition,
+  ProportionCiMethod,
+  RateCiMethod,
+  Recurrence,
+  PersonTimeRule,
+  FutureAnalysisKind,
 } from "../spec/types";
 
 /**
@@ -104,6 +110,67 @@ export const ANALYSIS_TYPES = enumValues<LegacyAnalysisType>({
   hcru_cost: true,
   km_survival: true,
   cox_model: true,
+});
+
+/* ---------- analysis-layer enums (P1 descriptive-epi, emittable today) ---------- */
+
+export const OUTCOME_DX_POSITIONS = enumValues<OutcomeDefinition["diagnosisPosition"]>({
+  any: true,
+  primary: true,
+});
+
+export const PROPORTION_CI_METHODS = enumValues<ProportionCiMethod>({
+  wilson: true,
+  clopper_pearson: true,
+  wald: true,
+});
+
+export const RATE_CI_METHODS = enumValues<RateCiMethod>({
+  poisson_byar: true,
+  poisson_exact: true,
+  wald_log: true,
+});
+
+export const RECURRENCE_KINDS = enumValues<Recurrence>({
+  first_only: true,
+  all_events: true,
+});
+
+export const PERSON_TIME_STARTS = enumValues<PersonTimeRule["start"]>({
+  index: true,
+  enrollment_start: true,
+  washout_end: true,
+});
+
+export const PERSON_TIME_CENSORS = enumValues<PersonTimeRule["censorAt"][number]>({
+  outcome: true,
+  disenrollment: true,
+  death: true,
+  study_end: true,
+  max_followup: true,
+});
+
+export const STRATIFIER_AXES = ["age_band", "sex", "region", "plan_type", "year"] as const;
+
+/** The four descriptive-epi kinds the emitters can generate code for today. */
+export const EMITTABLE_ANALYSIS_KINDS_EXTRACT = [
+  "incidence_rate",
+  "point_prevalence",
+  "period_prevalence",
+  "cumulative_incidence",
+] as const;
+
+export const FUTURE_ANALYSIS_KINDS = enumValues<FutureAnalysisKind>({
+  hcru: true,
+  cost: true,
+  adherence: true,
+  line_of_therapy: true,
+  treatment_switching: true,
+  ps_matching: true,
+  iptw: true,
+  km_survival: true,
+  cox_model: true,
+  competing_risks: true,
 });
 
 /* ---------- reusable sub-schemas ---------- */
@@ -350,6 +417,246 @@ const CRITERION_SCHEMA = {
   additionalProperties: false,
 };
 
+/* ---------- analysis-layer sub-schemas ---------- */
+
+const OUTCOME_DEFINITION_SCHEMA = {
+  type: "object",
+  description:
+    "How the clinical OUTCOME event is ascertained from claims (distinct from " +
+    "the cohort's index event). Reference a code list in codeLists by id; when " +
+    "the protocol names the outcome concept without codes, create an EMPTY list " +
+    "and reference it — never fabricate codes.",
+  properties: {
+    codeListId: { type: "string", description: "id of the code list defining the outcome." },
+    minClaims: {
+      type: "number",
+      description: "Qualifying claims to count as a case (>= 1). Use 1 unless the protocol requires confirmation.",
+    },
+    claimSeparationDays: {
+      type: "number",
+      description: "Required when minClaims >= 2: minimum days between two qualifying claims.",
+    },
+    setting: {
+      type: "string",
+      enum: CARE_SETTINGS,
+      description: 'Care setting the outcome must appear in ("any" unless the protocol restricts it).',
+    },
+    diagnosisPosition: {
+      type: "string",
+      enum: OUTCOME_DX_POSITIONS,
+      description: '"primary"/principal diagnosis only, or "any" position. Use "any" unless the protocol says principal.',
+    },
+  },
+  required: ["codeListId", "minClaims", "setting", "diagnosisPosition"],
+  additionalProperties: false,
+};
+
+const STRATIFIER_SCHEMA = {
+  type: "object",
+  description:
+    "A subgroup axis to report the measure by. Only include stratifiers the " +
+    "protocol explicitly asks for (e.g. by age band, by sex).",
+  properties: {
+    id: { type: "string", description: 'Stable snake_case slug, e.g. "by_sex".' },
+    label: { type: "string" },
+    source: {
+      type: "object",
+      description: "Demographic axis (age_band/sex/region/plan_type/year) or a baseline characteristic.",
+      oneOf: [
+        {
+          type: "object",
+          properties: {
+            kind: { type: "string", enum: ["demographic"] },
+            axis: { type: "string", enum: [...STRATIFIER_AXES] },
+          },
+          required: ["kind", "axis"],
+          additionalProperties: false,
+        },
+        {
+          type: "object",
+          properties: {
+            kind: { type: "string", enum: ["baseline"] },
+            baselineId: { type: "string", description: "id of a baseline characteristic." },
+          },
+          required: ["kind", "baselineId"],
+          additionalProperties: false,
+        },
+      ],
+    },
+    ageBandLowerBounds: {
+      type: "array",
+      items: { type: "number" },
+      description: 'Inclusive lower bounds for an age_band axis, e.g. [0,18,45,65]. Only for axis "age_band".',
+    },
+  },
+  required: ["id", "label", "source"],
+  additionalProperties: false,
+};
+
+const ANCHOR_DATE_SCHEMA = {
+  description: "Point-prevalence anchor: a fixed calendar date, or each subject's own index date.",
+  oneOf: [
+    {
+      type: "object",
+      properties: { kind: { type: "string", enum: ["fixed"] }, date: ISO_DATE },
+      required: ["kind", "date"],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      properties: { kind: { type: "string", enum: ["index"] } },
+      required: ["kind"],
+      additionalProperties: false,
+    },
+  ],
+};
+
+/** Analysis common header fields shared by every kind. */
+const ANALYSIS_COMMON_PROPS = {
+  id: { type: "string", description: "Stable snake_case slug, UNIQUE within analyses[]." },
+  label: { type: "string", description: "Human title shown in the review UI." },
+  enabled: { type: "boolean", description: "Whether to generate code for this analysis." },
+  notes: {
+    type: "string",
+    description: "Verbatim protocol/SAP text for this analysis — never paraphrase.",
+  },
+};
+
+const ANALYSIS_SCHEMA = {
+  description:
+    "One requested analysis. Choose the KIND that matches the protocol. The four " +
+    "descriptive-epi kinds (incidence_rate, point_prevalence, period_prevalence, " +
+    "cumulative_incidence) generate SAS+SQL today; attrition and table1 come from " +
+    "the cohort spine; anything else (HCRU, cost, survival, PS/IPTW, switching) is " +
+    'a future_stub carrying its plannedKind and notes. Leave methodological choices ' +
+    "you cannot read from the protocol OUT — the analyst sets defaults in review.",
+  oneOf: [
+    {
+      type: "object",
+      description: "CONSORT attrition table (from the cohort spine). No parameters.",
+      properties: { ...ANALYSIS_COMMON_PROPS, kind: { type: "string", enum: ["attrition"] } },
+      required: ["id", "label", "enabled", "kind"],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      description: "Baseline Table 1 (from the cohort spine).",
+      properties: {
+        ...ANALYSIS_COMMON_PROPS,
+        kind: { type: "string", enum: ["table1"] },
+        includeBaselineIds: {
+          type: "array",
+          items: { type: "string" },
+          description: "Baseline characteristic ids to include; omit for all.",
+        },
+      },
+      required: ["id", "label", "enabled", "kind"],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      description:
+        "Incidence rate / density: new (incident) cases per person-time at risk. " +
+        "Use for 'incidence rate', 'per 1,000 person-years', 'IR'.",
+      properties: {
+        ...ANALYSIS_COMMON_PROPS,
+        kind: { type: "string", enum: ["incidence_rate"] },
+        outcomeDefinition: OUTCOME_DEFINITION_SCHEMA,
+        washout: {
+          ...RELATIVE_WINDOW_SCHEMA,
+          description:
+            "Prevalent-case washout window BEFORE index: an outcome anywhere in it removes the " +
+            "subject so only new-onset cases count. E.g. 12-month washout = {start:-365,end:0,includesIndex:true}.",
+        },
+        rateMultiplier: {
+          type: "number",
+          description: "Person-years scaling: 1000 for 'per 1,000 PY', 100000 for 'per 100,000 PY'. Default 1000.",
+        },
+        recurrence: {
+          type: "string",
+          enum: RECURRENCE_KINDS,
+          description: '"first_only" = incidence density (first event); "all_events" = recurrent-event rate. Default first_only.',
+        },
+        stratifyBy: { type: "array", items: STRATIFIER_SCHEMA },
+      },
+      required: ["id", "label", "enabled", "kind", "outcomeDefinition"],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      description:
+        "Point prevalence: share of the enrolled population with the condition ON a specific date " +
+        "(the anchor). Use for 'prevalence on <date>', 'point prevalence'.",
+      properties: {
+        ...ANALYSIS_COMMON_PROPS,
+        kind: { type: "string", enum: ["point_prevalence"] },
+        outcomeDefinition: OUTCOME_DEFINITION_SCHEMA,
+        anchorDate: ANCHOR_DATE_SCHEMA,
+        stratifyBy: { type: "array", items: STRATIFIER_SCHEMA },
+      },
+      required: ["id", "label", "enabled", "kind", "outcomeDefinition", "anchorDate"],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      description:
+        "Period prevalence: share of the population with the condition at any time DURING a calendar " +
+        "window. Use for 'annual prevalence', 'prevalence during <period>'.",
+      properties: {
+        ...ANALYSIS_COMMON_PROPS,
+        kind: { type: "string", enum: ["period_prevalence"] },
+        outcomeDefinition: OUTCOME_DEFINITION_SCHEMA,
+        prevalencePeriod: {
+          type: "object",
+          description: "Absolute calendar window (ISO dates) the prevalence is measured over.",
+          properties: { start: ISO_DATE, end: ISO_DATE },
+          required: ["start", "end"],
+          additionalProperties: false,
+        },
+        stratifyBy: { type: "array", items: STRATIFIER_SCHEMA },
+      },
+      required: ["id", "label", "enabled", "kind", "outcomeDefinition", "prevalencePeriod"],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      description:
+        "Cumulative incidence (risk): proportion of at-risk subjects with a first event within a " +
+        "fixed horizon after index. Use for '1-year risk', 'cumulative incidence', 'X% by N months'.",
+      properties: {
+        ...ANALYSIS_COMMON_PROPS,
+        kind: { type: "string", enum: ["cumulative_incidence"] },
+        outcomeDefinition: OUTCOME_DEFINITION_SCHEMA,
+        washout: {
+          ...RELATIVE_WINDOW_SCHEMA,
+          description: "Prevalent-case washout window BEFORE index (see incidence_rate).",
+        },
+        horizonDays: {
+          type: "number",
+          description: "Risk horizon in days after index, e.g. 365 for 1-year risk, 180 for 6-month.",
+        },
+        stratifyBy: { type: "array", items: STRATIFIER_SCHEMA },
+      },
+      required: ["id", "label", "enabled", "kind", "outcomeDefinition", "horizonDays"],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      description:
+        "Any analysis NOT in the descriptive-epi set above: HCRU, cost, adherence, line of therapy, " +
+        "treatment switching, PS matching / IPTW, Kaplan-Meier, Cox, competing risks. Recorded as a " +
+        "planned stub (no code generated yet) so the request stays visible for the analyst.",
+      properties: {
+        ...ANALYSIS_COMMON_PROPS,
+        kind: { type: "string", enum: ["future_stub"] },
+        plannedKind: { type: "string", enum: FUTURE_ANALYSIS_KINDS },
+      },
+      required: ["id", "label", "enabled", "kind", "plannedKind"],
+      additionalProperties: false,
+    },
+  ],
+};
+
 /* ---------- top-level schema ---------- */
 
 /**
@@ -495,22 +802,15 @@ export const SPEC_JSON_SCHEMA: Record<string, unknown> = {
     },
     analyses: {
       type: "array",
-      description: "Which analyses the protocol requests.",
-      items: {
-        type: "object",
-        properties: {
-          type: { type: "string", enum: ANALYSIS_TYPES },
-          enabled: { type: "boolean" },
-          notes: {
-            type: "string",
-            description:
-              "Free-text detail carried from the protocol (e.g. outcome " +
-              "definitions, discontinuation gap, PDC threshold).",
-          },
-        },
-        required: ["type", "enabled"],
-        additionalProperties: false,
-      },
+      description:
+        "Every analysis the protocol requests, as a per-KIND object (see the " +
+        "kinds in the item schema). Always include attrition and table1. Add a " +
+        "descriptive-epi analysis (incidence_rate / point_prevalence / " +
+        "period_prevalence / cumulative_incidence) for each incidence/prevalence/" +
+        "risk endpoint the protocol asks for, with its outcomeDefinition pointing " +
+        "at an outcome code list. Record every other requested analysis as a " +
+        "future_stub with the right plannedKind.",
+      items: ANALYSIS_SCHEMA,
     },
   },
   required: [
@@ -538,7 +838,7 @@ WHAT TO EXTRACT
 4. Inclusion/exclusion criteria — every criterion, IN THE ORDER the protocol applies them (this order drives the attrition/CONSORT table).
 5. Code lists — every diagnosis, procedure, drug, or NDC list the criteria and index event reference.
 6. Baseline (Table 1) characteristics — demographics, plan/region/year, comorbidities, medications, utilization.
-7. Requested analyses — attrition, Table 1, treatment patterns, incidence/prevalence, HCRU & cost, KM survival, Cox models — with protocol notes (e.g. discontinuation gap definition, PDC threshold, outcome definitions).
+7. Requested analyses — one object per analysis, choosing the KIND that matches the endpoint (see ANALYSIS LAYER below). Always include attrition and table1. Emit a descriptive-epi analysis for each incidence / prevalence / risk endpoint; record everything else (HCRU, cost, adherence, line of therapy, switching, KM, Cox, PS/IPTW, competing risks) as a future_stub with the correct plannedKind and the protocol notes.
 
 HARD RULES
 - NEVER invent, infer, or "complete" medical codes. Only include a code if it appears in the document. When the protocol names a clinical concept without listing codes (e.g. "patients with type 2 diabetes" with no ICD codes given), still create the code list — with an EMPTY codes array — and state in its notes exactly what must be looked up (concept, vocabulary, and any qualifiers the protocol gives). An empty list the analyst fills in is correct; a fabricated code is a critical failure.
@@ -558,4 +858,16 @@ CODE SYSTEM NOTES
 - ICD-9-CM vs ICD-10-CM era is handled downstream via DXVER; put ICD-9 and ICD-10 codes for the same concept in ONE list and note the era split in notes.
 - Drug lists given as generic/brand names use system "drug_name" with patterns like "ADALIMUMAB|HUMIRA"; NDC lists use system "ndc"; CPT/HCPCS/ICD procedure codes use "cpt_hcpcs".
 
-If the document is not a study protocol/SAP or contains no extractable study design, still call the tool with your best-effort skeleton: empty code lists with explanatory notes, criteria as unmapped with confidence "low", and the verbatim text you did find.`;
+ANALYSIS LAYER (pick the KIND per endpoint; extract facts, not methodology)
+- attrition and table1 always go in. For table1, list the baseline ids in includeBaselineIds only if the protocol reports a subset; otherwise omit it (all baselines).
+- Map each incidence/prevalence/risk endpoint to a descriptive-epi kind:
+  - incidence_rate  → "incidence rate", "incidence density", "per 1,000 (or 100,000) person-years", "IR". Set rateMultiplier from the stated denominator (1000 / 100000); default 1000.
+  - point_prevalence → "prevalence on <date>", "point prevalence". anchorDate = {kind:"fixed",date} for a calendar date, or {kind:"index"} if measured at each subject's index.
+  - period_prevalence → "annual/period prevalence", "prevalence during <period>". prevalencePeriod = the stated calendar window.
+  - cumulative_incidence → "1-year risk", "cumulative incidence", "X% by N months". horizonDays = the stated horizon in days (1 year = 365).
+- Every descriptive-epi analysis needs an outcomeDefinition pointing at an OUTCOME code list (separate from the index-event list). If the protocol names the outcome concept without codes, create an EMPTY outcome code list and reference it — same no-fabrication rule as everywhere else. Set the outcome's minClaims (default 1), setting ("any" unless restricted), and diagnosisPosition ("any" unless the protocol says principal/primary).
+- For incidence_rate and cumulative_incidence, set the washout window ONLY if the protocol specifies a prevalent-case/new-user washout (e.g. "no diagnosis in the 12 months before index" → {start:-365,end:0,includesIndex:true}). If it does not, OMIT washout — the analyst chooses.
+- Add a stratifyBy entry ONLY for subgroups the protocol explicitly reports (by sex, by age band, etc.). Do NOT invent strata. Omit CI method, person-time rule, and denominator rule entirely — those are methodological defaults the analyst confirms in review, not protocol facts.
+- Anything that is NOT one of the four descriptive-epi kinds — HCRU, cost, adherence/PDC/MPR, line of therapy, treatment switching/persistence, Kaplan-Meier, Cox, PS matching, IPTW, competing risks — is a future_stub. Set plannedKind to the closest value and put the protocol's definition (discontinuation gap, PDC threshold, cost components, etc.) in notes. These are not generated yet but must stay visible.
+
+If the document is not a study protocol/SAP or contains no extractable study design, still call the tool with your best-effort skeleton: empty code lists with explanatory notes, criteria as unmapped with confidence "low", attrition+table1 analyses, and the verbatim text you did find.`;
