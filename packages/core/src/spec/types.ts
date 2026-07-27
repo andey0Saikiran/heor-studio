@@ -448,6 +448,7 @@ export const EMITTABLE_ANALYSIS_KINDS: ReadonlySet<AnalysisKind> = new Set<Analy
   "point_prevalence",
   "period_prevalence",
   "cumulative_incidence",
+  "standardization",
   "statistical_engine",
 ]);
 

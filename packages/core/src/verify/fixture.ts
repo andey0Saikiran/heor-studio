@@ -409,7 +409,34 @@ export const GOLD_A_SPEC: StudySpec = {
   ],
   comparisons: [],
   analyses: [
-    { id: "a_attrition", label: "Attrition", kind: "attrition", enabled: true },
+
+    /* Direct age standardization of the SAME incidence measure.
+     * The at-risk cohort spans exactly three bands (45-54: 3, 55-64: 4, 65+: 1),
+     * so bands [45,55,65] cover it completely and the DSR is hand-computable:
+     *   45-54 rate = 3 x 1000 x 365.25 / 600 = 1826.25 per 1000 PY, w = 134,834
+     *   55-64 rate = 0                        , w =  87,247
+     *   65+   rate = 0                        , w = 126,387 (65-74+75-84+85+)
+     *   DSR = 134,834 x 1826.25 / 348,468 = 706.64 per 1000 PY
+     * Coverage = 348,468 / 1,000,000 = 34.85% of US 2000 — reported, because a
+     * rate standardized to a third of a reference is not comparable to a
+     * published one. */
+    {
+      id: "a_dsr", label: "Age-standardized AE incidence (US 2000)", kind: "standardization",
+      enabled: true, base: "incidence_rate",
+      outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "outpatient", diagnosisPosition: "any" },
+      rateMultiplier: 1000,
+      /* MUST match the incidence analysis this standardizes, max-follow-up
+       * included — otherwise the DSR re-weights a DIFFERENT measure than the
+       * one the incidence table reports, and the two disagree on person-time. */
+      personTimeRule: { start: "index", censorAt: ["outcome", "disenrollment", "study_end", "max_followup"], maxFollowupDays: 365 },
+      standardization: {
+        method: "direct",
+        strataIds: ["s_age"],
+        referencePopulation: { kind: "named", name: "us_2000" },
+        ciMethod: "fay_feuer",
+        standardizationBands: [45, 55, 65],
+      },
+    },    { id: "a_attrition", label: "Attrition", kind: "attrition", enabled: true },
     { id: "a_table1", label: "Baseline characteristics", kind: "table1", enabled: true },
     {
       id: "a_incidence", label: "Incidence rate of AE (E11.9)", kind: "incidence_rate", enabled: true,

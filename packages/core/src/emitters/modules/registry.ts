@@ -17,6 +17,7 @@ import { incidenceModule } from "./incidence";
 import { pointPrevalenceModule } from "./point_prevalence";
 import { periodPrevalenceModule } from "./period_prevalence";
 import { cumulativeIncidenceModule } from "./cumulative_incidence";
+import { standardizationModule } from "./standardization";
 import { statisticalEngineModule } from "./statistical_engine";
 
 export const ANALYSIS_MODULES: Partial<Record<Analysis["kind"], AnalysisModule<never>>> = {
@@ -24,6 +25,7 @@ export const ANALYSIS_MODULES: Partial<Record<Analysis["kind"], AnalysisModule<n
   point_prevalence: pointPrevalenceModule as AnalysisModule<never>,
   period_prevalence: periodPrevalenceModule as AnalysisModule<never>,
   cumulative_incidence: cumulativeIncidenceModule as AnalysisModule<never>,
+  standardization: standardizationModule as AnalysisModule<never>,
   statistical_engine: statisticalEngineModule as AnalysisModule<never>,
 };
 

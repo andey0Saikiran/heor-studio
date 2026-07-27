@@ -197,6 +197,17 @@ function sqlFingerprint(kind: string, raw: string): Fingerprint {
       put(fp, "enrol_covers_date", grab(sql, [/DATE\s*'(\d{4}-\d{2}-\d{2})'\s+BETWEEN\s+ep\.episode_start/i]));
       break;
     }
+    case "standardization": {
+      // The DSR is SUM(w x rate)/SUM(w). Its truth is the WEIGHTS and the bands
+      // they are attached to, so those are what get scraped — a swapped
+      // reference population or a shifted band silently changes every rate.
+      put(fp, "ref_weights", (sql.match(/\(\s*'[\d+-]+'\s*,\s*(\d+)\s*\)/g) ?? []).map((m) => (/(\d+)\s*\)/.exec(m) ?? [])[1]).join(","));
+      put(fp, "ref_bands", (sql.match(/\(\s*'([\d+-]+)'\s*,\s*\d+\s*\)/g) ?? []).map((m) => (/'([\d+-]+)'/.exec(m) ?? [])[1]).join(","));
+      put(fp, "covered_weight_pct", grab(sql, [/([\d.]+)\s+AS covered_weight_pct/i]));
+      put(fp, "dsr_is_weighted_mean", /SUM\(weight \* COALESCE\(band_rate, 0\)\) \/ NULLIF\(SUM\(weight\), 0\)/i.test(sql) ? "yes" : "no");
+      put(fp, "ci_is_sas_primary", /CAST\(NULL AS NUMERIC\) AS ci_low/i.test(sql) ? "yes" : "no");
+      break;
+    }
     case "smd_balance": {
       // SMD must use SAMPLE variance and the pooled (halved-sum) denominator;
       // a switch to population variance changes every balance number quietly.
@@ -269,6 +280,17 @@ function sasFingerprint(kind: string, rawSas: string, setup: string): Fingerprin
       put(fp, "anchor_is_index", /index_date\s+as anchor_date/i.test(sas) ? "yes" : "no");
       put(fp, "case_on_or_before_anchor", /svcdate\s*<=\s*a\.anchor_date/i.test(sas) ? "yes" : "no");
       put(fp, "enrol_covers_date", sasDateToIso(grab(sas, [/('\d{2}[A-Z]{3}\d{4}'d)\s+between\s+ep\.dtstart/i, /ep\.dtstart\s*<=\s*('\d{2}[A-Z]{3}\d{4}'d)/i])));
+      break;
+    }
+    case "standardization": {
+      put(fp, "ref_weights", (sas.match(/weight\s*=\s*(\d+)\s*;/g) ?? []).map((m) => (/(\d+)/.exec(m) ?? [])[1]).join(","));
+      // Scoped to the weights table: `band = "X"; weight = N;` on one line.
+      // An unscoped match also picks up the banding logic further down and
+      // reports every band twice over.
+      put(fp, "ref_bands", (sas.match(/band\s*=\s*"([\d+-]+)"\s*;\s*weight\s*=\s*\d+/g) ?? []).map((m) => (/"([\d+-]+)"/.exec(m) ?? [])[1]).join(","));
+      put(fp, "covered_weight_pct", grab(sas, [/([\d.]+)\s+as covered_weight_pct/i]));
+      put(fp, "dsr_is_weighted_mean", /sum\(weight \* coalesce\(band_rate, 0\)\) \/ sum\(weight\)/i.test(sas) ? "yes" : "no");
+      put(fp, "ci_is_sas_primary", /ci_method\s*=\s*"sas_/i.test(sas) ? "yes" : "no");
       break;
     }
     case "smd_balance": {
@@ -451,6 +473,15 @@ export function expectedFromStamp(kind: string, stamp: Record<string, unknown>):
       exp.case_on_or_before_anchor = "yes";
       break;
     }
+    case "standardization": {
+      // the stamp records the weights and coverage; the code must use exactly those
+      if (Array.isArray(stamp.weights)) exp.ref_weights = (stamp.weights as number[]).join(",");
+      const cov = num(stamp.coveredWeightPct);
+      if (cov) exp.covered_weight_pct = cov;
+      exp.dsr_is_weighted_mean = "yes";
+      exp.ci_is_sas_primary = "yes";
+      break;
+    }
     case "smd_balance": {
       // The stamp claims a threshold, a reference arm and a variance
       // convention; the code must actually implement those three.
@@ -524,6 +555,13 @@ const EXPECTED_CONSTANTS: Record<string, Record<"sql" | "sas", Record<string, nu
   },
   // SMD is a descriptive diagnostic with NO confidence interval, so none of the
   // z constants may appear — a stray one would mean a CI crept in unannounced.
+  standardization: {
+    // No CI is computed in either twin here — the interval is SAS-primary, so
+    // a z or z^2 appearing in this program would mean someone added an
+    // approximation and labelled it as the exact method.
+    sql: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
+    sas: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
+  },
   smd_balance: {
     sql: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
     sas: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },

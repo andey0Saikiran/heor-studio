@@ -104,6 +104,19 @@ export const SUPPRESSION_SHAPES: Record<string, SuppressionShape> = {
     keepCols: ["imbalanced"],
     tieBreakCol: "characteristic",
   },
+  standardization: {
+    // Rows are age bands, which DO partition the cohort, so complementary
+    // suppression applies: a lone masked band is recoverable from the Overall
+    // row. The weights themselves are public reference data and stay visible —
+    // masking them would hide the method without protecting anyone.
+    labelCols: ["measure", "stratum"],
+    groupCols: ["measure"],
+    countCol: "patients",
+    denomCol: "denominator",
+    maskCols: ["patients", "denominator", "person_days", "person_years", "band_rate", "weighted_contribution", "dsr", "ci_low", "ci_high"],
+    keepCols: ["weight", "ci_method", "covered_weight_pct"],
+    tieBreakCol: "stratum",
+  },
   table1: {
     labelCols: ["ord", "characteristic", "category"],
     groupCols: ["characteristic"],

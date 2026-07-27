@@ -521,6 +521,30 @@ export async function verifyGoldA(): Promise<VerificationResult> {
     approx("balance: executed SMD reproduces the frozen EXPECTED.smdAge",
       Number(balRows.find((r) => r.measure === "continuous")?.smd ?? NaN), EXPECTED.smdAge, 0.00001);
 
+    /* ---- direct age standardization (executed vs hand-computed) ----
+     * Bands [45,55,65] cover the whole at-risk cohort, so the DSR is exact:
+     *   45-54: rate 3 x 1000 x 365.25 / 600 = 1826.25, w = 134,834
+     *   55-64: rate 0,                                 w =  87,247
+     *   65+  : rate 0,                                 w = 126,387
+     *   DSR = 134,834 x 1826.25 / 348,468 = 706.64 per 1000 PY
+     * The band person-days must ALSO reproduce the incidence module's strata
+     * (600 + 1460 + 365 = 2425) — an independent path to the same person-time,
+     * which is what proves the DSR re-weights the SAME measure rather than a
+     * differently-censored one. */
+    const dsrRow = async (stratum: string) =>
+      (await rows<{ patients: number; person_days: number; weight: number; dsr: number; covered_weight_pct: number }>(
+        db,
+        `SELECT patients, person_days, weight, dsr::float8, covered_weight_pct::float8 FROM tz_study_dsr WHERE stratum = '${stratum}'`,
+      ))[0];
+    const dsrOverall = await dsrRow("Overall");
+    eq("DSR: total weight = 348,468 (US 2000 collapsed onto 45/55/65)", Number(dsrOverall?.weight), 348_468);
+    eq("DSR: person-days reproduce the incidence module's 2425", Number(dsrOverall?.person_days), EXPECTED.personDays);
+    approx("DSR = 706.64 per 1000 PY (hand-computed)", Number(dsrOverall?.dsr), 706.64, 0.01);
+    approx("DSR: covered weight = 34.85% of US 2000", Number(dsrOverall?.covered_weight_pct), 34.85, 0.01);
+    const dsr4554 = await dsrRow("45-54");
+    eq("DSR band 45-54: weight = 134,834", Number(dsr4554?.weight), 134_834);
+    eq("DSR band 45-54: person-days = 600 (matches the incidence stratum)", Number(dsr4554?.person_days), 600);
+
     invariants.push(...(await runInvariants(db, "tz_study")));
   }
 

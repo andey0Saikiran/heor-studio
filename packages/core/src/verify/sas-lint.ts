@@ -132,6 +132,30 @@ export function sasStructureChecks(files: SasFile[]): Check[] {
     }
     if (undef.size > 0) problems.push(`${name}: undefined macro variable(s) &${[...undef].join(", &")}`);
 
+    /* 5b. Every WORK dataset a program READS must also be CREATED in that same
+     *     program. SAS work datasets do not survive between programs, so a
+     *     reference to one that is never built is a guaranteed runtime failure —
+     *     and a purely syntactic lint sails straight past it. This was found the
+     *     hard way: a new module's SAS twin referenced work._NNN_pt2, which
+     *     nothing created, while balanced-parens/closed-procs checks stayed green. */
+    const created = new Set<string>();
+    for (const m of code.matchAll(/create\s+table\s+(work\.\w+)/gi)) created.add(m[1].toLowerCase());
+    for (const m of code.matchAll(/^\s*data\s+(work\.\w+)/gim)) created.add(m[1].toLowerCase());
+    for (const m of code.matchAll(/out\s*=\s*(work\.\w+)/gi)) created.add(m[1].toLowerCase());
+    // PROC APPEND creates its BASE dataset when it does not already exist, so
+    // an append target counts as created (checked against 030_index, which
+    // legitimately accumulates into work._030_dob0 that way).
+    for (const m of code.matchAll(/proc\s+append[^;]*base\s*=\s*(work\.\w+)/gi)) created.add(m[1].toLowerCase());
+    const referenced = new Set<string>();
+    for (const m of code.matchAll(/\bfrom\s+(work\.\w+)/gi)) referenced.add(m[1].toLowerCase());
+    for (const m of code.matchAll(/\bjoin\s+(work\.\w+)/gi)) referenced.add(m[1].toLowerCase());
+    for (const m of code.matchAll(/^\s*set\s+(work\.\w+)/gim)) referenced.add(m[1].toLowerCase());
+    for (const m of code.matchAll(/data\s*=\s*(work\.\w+)/gi)) referenced.add(m[1].toLowerCase());
+    const dangling = [...referenced].filter((r) => !created.has(r));
+    if (dangling.length > 0) {
+      problems.push(`${name}: reads work dataset(s) it never creates: ${dangling.join(", ")} — the program would fail at runtime`);
+    }
+
     // 6. Analysis programs must %include the setup that defines the macros.
     if (!/setup/i.test(f.path) && !/%include\s+["'][^"']*setup/i.test(f.content)) {
       problems.push(`${name}: does not %include 00_setup.sas (its &macros. would be undefined)`);

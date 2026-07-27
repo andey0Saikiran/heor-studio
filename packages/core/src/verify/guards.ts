@@ -36,15 +36,14 @@ export function verifySilenceGuards(): Check[] {
   {
     const spec: StudySpec = JSON.parse(JSON.stringify(GOLD_A_SPEC));
     spec.analyses.push({
-      id: "guard_std", label: "guard", enabled: true, kind: "standardization",
+      id: "guard_trend", label: "guard", enabled: true, kind: "calendar_trend",
       base: "incidence_rate",
       outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "any", diagnosisPosition: "any" },
       personTimeRule: { start: "index", censorAt: ["outcome", "disenrollment", "study_end"] },
-      standardization: {
-        method: "direct", strataIds: ["s1"],
-        referencePopulation: { kind: "named", name: "us_2000_standard" },
-        ciMethod: "normal_approx",
-      },
+      denominatorRule: "person_time",
+      trend: { bucket: "calendar_year", method: "linear_slope", reportPerBucket: true },
+      ciMethod: "poisson_byar",
+      stratifyBy: [],
     } as never);
     const r = specReadiness(spec);
     push(
