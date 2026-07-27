@@ -616,9 +616,16 @@ function build04(ctx: Ctx): string {
   out.push(d.createTableAs(`${wp}_enroll_episodes`));
   out.push(`WITH seg AS (`);
   out.push(`  ${rx.comment}`);
+  out.push(`  -- Rows with a null member id or null coverage dates cannot define an`);
+  out.push(`  -- episode. They are excluded EXPLICITLY (BR-KEY-004) rather than left`);
+  out.push(`  -- to drop out silently in a later join, and the SAS twin filters the`);
+  out.push(`  -- same three columns at its enrollment pull.`);
   out.push(`  SELECT enrolid, dtstart, dtend`);
   out.push(`  FROM ${ctx.t("enrollment_detail")}`);
-  if (rx.where) out.push(rx.where);
+  out.push(`  WHERE enrolid IS NOT NULL`);
+  out.push(`    AND dtstart IS NOT NULL`);
+  out.push(`    AND dtend   IS NOT NULL`);
+  if (rx.where) out.push(`    ${rx.where.trim().replace(/^WHERE\s+/i, "AND ")}`);
   out.push(`),`);
   out.push(``);
   out.push(`flagged AS (`);

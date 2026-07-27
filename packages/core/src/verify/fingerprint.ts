@@ -309,6 +309,16 @@ export function spineFingerprint(
       /episode_end\s*>=\s*\(\s*i\.index_date\s*\+\s*(\d+)\s*\)/i,
     ]));
     put(fp, "gap_allowance", grab(all, [/>\s*(\d+)\s*THEN 1/i]));
+    /* Age at index must come from enrollment DOBYR, not a claim's AGE column.
+     * Matches both dialects: Postgres CAST(EXTRACT(YEAR FROM x) AS INT) - dobyr
+     * and Snowflake YEAR(x) - dobyr. */
+    put(
+      fp,
+      "age_from_dobyr",
+      /(?:YEAR\(|EXTRACT\(YEAR FROM)[^\n]*?index_date[^\n]*?-\s*(?:\w+\.)?dobyr/i.test(all) ? "yes" : "no",
+    );
+    // null member ids / coverage dates excluded explicitly, not by silent join loss
+    put(fp, "excludes_null_enrol_dates", /dtstart\s+IS NOT NULL/i.test(all) && /dtend\s+IS NOT NULL/i.test(all) ? "yes" : "no");
     /* Stitching form. Requires the running-MAX window AND the absence of any
      * LAG(dtend) — a PARTIAL revert (one of the two uses switched back) leaves
      * a MAX present and would otherwise still read as correct. */
@@ -327,6 +337,8 @@ export function spineFingerprint(
     ])));
     put(fp, "ce_followup_offset", grab(all, [/b\.dtend\s*>=\s*a\.index_date\s*\+\s*(\d+)/i]));
     put(fp, "gap_allowance", grab(all, [/\(\s*dtstart\s*-\s*prev_dtend\s*\)\s*(?:gt|>)\s*(\d+)/i]));
+    put(fp, "age_from_dobyr", /year\(\s*a?\.?index_date\s*\)\s*-\s*t?\.?dobyr/i.test(all) ? "yes" : "no");
+    put(fp, "excludes_null_enrol_dates", /dtstart\s+is not null/i.test(all) && /dtend\s+is not null/i.test(all) ? "yes" : "no");
     /* SAS expresses the running maximum through BRANCHES rather than a max()
      * call: the "segment ends inside the running episode" arm keeps prev_dtend
      * unchanged, so the running end never moves backward. Detecting that arm is
