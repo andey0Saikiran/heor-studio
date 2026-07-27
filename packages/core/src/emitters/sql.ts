@@ -41,6 +41,7 @@ import type {
 import { assertSafeIdent, assertSafeNaming } from "./types";
 import { q, oneLine, makeDialect, windowConds, describeWindow } from "./sql-base";
 import { suppressionPolicy, suppressionSqlFor, type SuppressionTarget } from "./suppression";
+import { EMITTER_VERSION, stableHash } from "../provenance";
 import type { Ctx } from "./sql-base";
 import { moduleAnalyses } from "./modules/registry";
 
@@ -156,7 +157,10 @@ function header(
   L.push(`-- Study    : ${oneLine(spec.meta.title)}`);
   // oneLine() strips newlines: a raw newline would end this `--` comment and
   // turn the rest of the line into live SQL (parity with the title above).
-  L.push(`-- Spec     : v${oneLine(spec.meta.version)}`);
+  L.push(`-- Spec     : v${oneLine(spec.meta.version)}  (spec hash ${stableHash(spec)})`);
+  // Determinism is only auditable relative to a generator version: the same
+  // spec through a later emitter may legitimately differ.
+  L.push(`-- Emitter  : HEOR Studio ${EMITTER_VERSION}`);
   L.push(
     `-- Database : ${spec.meta.database} (MarketScan family prefix "${DB_PREFIX[spec.meta.database] ?? "?"}")`
   );

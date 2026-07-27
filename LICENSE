@@ -1,0 +1,53 @@
+HEOR Studio — licensing
+=======================
+
+This repository is split-licensed. Which license applies depends on which
+package the code lives in.
+
+  packages/core   AGPL-3.0-only   (see packages/core/LICENSE)
+  packages/web    AGPL-3.0-only   (see packages/web/LICENSE)
+  packages/mcp    Apache-2.0      (see packages/mcp/LICENSE)
+
+
+Why the split
+-------------
+
+`core` holds the study-spec schema, the deterministic SAS/SQL emitters, and the
+verification harness — the substance of the project. It is AGPL-3.0-only so that
+improvements to the emitters stay available to the analysts who depend on them,
+including when the software is offered over a network.
+
+`mcp` is a thin protocol shim that exposes `core` to MCP hosts. It is Apache-2.0
+so that hosts and clients can integrate without taking on copyleft obligations
+for their own code.
+
+
+IMPORTANT — what Apache-2.0 on `mcp` does and does not mean
+-----------------------------------------------------------
+
+The MCP server's own source is Apache-2.0. However, the published
+`@heor-studio/mcp` artifact BUNDLES `@heor-studio/core` (see
+packages/mcp/tsup.config.ts), and `core` is AGPL-3.0-only. The distributed
+binary is therefore a combined work and is governed by the AGPL-3.0 terms.
+
+In practice:
+
+  * Reading, modifying, and re-licensing `packages/mcp` SOURCE — Apache-2.0.
+  * Distributing or network-serving the BUILT MCP server — AGPL-3.0-only
+    applies, because `core` is compiled into it.
+  * Using either to generate study code — the OUTPUT is yours. Code generated
+    from your own study specification is not a derivative work of this project,
+    and nothing here places any license condition on your study, your results,
+    or your data.
+
+If that combination does not suit your deployment, run the MCP server against
+`core` as a separate dependency rather than as a bundled build, or contact the
+maintainer to discuss alternative terms.
+
+
+Trademark
+---------
+
+"HEOR Studio" is a project name, not a granted trademark license; see the notice
+in generated bundles. MarketScan is a trademark of Merative L.P. This project is
+independent and is not affiliated with, endorsed by, or sponsored by Merative.

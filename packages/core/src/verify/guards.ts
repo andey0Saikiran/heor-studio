@@ -20,6 +20,7 @@ import { emitSql } from "../emitters/sql";
 import { emitSas as emitSasFn } from "../emitters/sas";
 import { planBundle } from "../bundle";
 import { DEFAULT_SUPPRESSION_THRESHOLD } from "../emitters/suppression";
+import { EMITTER_VERSION, stableHash } from "../provenance";
 import { moduleAnalyses } from "../emitters/modules/registry";
 import { normalizeSpec } from "../extract/anthropic";
 import { DEFAULT_EMIT_OPTIONS } from "../emitters/types";
@@ -261,6 +262,40 @@ export function verifySilenceGuards(): Check[] {
     off.suppression = { enabled: false };
     const noSup = emitSql(off, "postgres", GOLD_A_OPTS).some((f) => /suppression/i.test(f.path));
     push("guard: suppression can be explicitly disabled", !noSup, noSup ? "still emitted" : "omitted when enabled:false");
+  }
+
+  /* 3g. Reproducibility provenance. "Identical spec in, identical code out" is
+     only auditable against a generator VERSION and a spec identity — otherwise
+     a reviewer re-running a study a year later cannot tell a legitimate emitter
+     change from a bug. */
+  {
+    const gold = stableHash(GOLD_A_SPEC);
+    const edited: StudySpec = JSON.parse(JSON.stringify(GOLD_A_SPEC));
+    edited.enrollment.baselineDays = 180;
+    push("guard: spec hash changes when the spec changes", stableHash(edited) !== gold, `${gold} vs ${stableHash(edited)}`);
+
+    // logically identical specs must hash identically regardless of key order
+    const shuffled: Record<string, unknown> = {};
+    for (const k of Object.keys(GOLD_A_SPEC as unknown as Record<string, unknown>).reverse()) {
+      shuffled[k] = (GOLD_A_SPEC as unknown as Record<string, unknown>)[k];
+    }
+    const reordered = JSON.parse(JSON.stringify(shuffled)) as StudySpec;
+    push("guard: spec hash is stable under key reordering", stableHash(reordered) === gold, `${stableHash(reordered)} vs ${gold}`);
+
+    const sqlHead = emitSql(GOLD_A_SPEC, "postgres", GOLD_A_OPTS)[0].content;
+    const sasHead = emitSasFn(GOLD_A_SPEC, GOLD_A_OPTS)[0].content;
+    push(
+      "guard: emitted code stamps the emitter version and spec hash",
+      sqlHead.includes(EMITTER_VERSION) && sqlHead.includes(gold) && sasHead.includes(EMITTER_VERSION) && sasHead.includes(gold),
+      `sql=${sqlHead.includes(gold)} sas=${sasHead.includes(gold)} v${EMITTER_VERSION}`,
+    );
+
+    const readme = planBundle(GOLD_A_SPEC, GOLD_A_OPTS, "2026-01-01T00:00:00Z").find((f) => /readme\.md$/i.test(f.path));
+    push(
+      "guard: bundle README carries the reproducibility block",
+      !!readme && readme.content.includes("## Reproducibility") && readme.content.includes(gold) && readme.content.includes(EMITTER_VERSION),
+      readme ? "emitter version + spec hash present" : "no README in bundle",
+    );
   }
 
   /* 4. bundle layout matches the README the client reads */
