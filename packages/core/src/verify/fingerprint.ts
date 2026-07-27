@@ -437,6 +437,18 @@ export function expectedFromStamp(kind: string, stamp: Record<string, unknown>):
       exp.case_on_or_before_anchor = "yes";
       break;
     }
+    case "smd_balance": {
+      // The stamp claims a threshold, a reference arm and a variance
+      // convention; the code must actually implement those three.
+      const thr = num(stamp.imbalanceThreshold);
+      if (thr) exp.imbalance_threshold = thr;
+      if (typeof stamp.referenceLevel === "string") exp.reference_arm = stamp.referenceLevel;
+      if (stamp.smdDenominator === "pooled_sd_sample_variance") {
+        exp.sample_variance = "yes";
+        exp.pooled_halved_denominator = "yes";
+      }
+      break;
+    }
     case "period_prevalence": {
       const p = stamp.period as { start?: unknown; end?: unknown } | undefined;
       if (typeof p?.start === "string") {

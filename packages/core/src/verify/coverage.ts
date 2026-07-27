@@ -1,0 +1,161 @@
+/**
+ * Verification-coverage guard — makes a BLIND SPOT impossible, the same way
+ * modules/registry.ts makes a silently-dropped analysis impossible.
+ *
+ * The problem this closes: `fingerprint.ts`'s per-kind switch has no `default`.
+ * A module whose stamp kind is not listed there still passes every parity check
+ * — because there is almost nothing to compare. It reads as green while being
+ * unverified. This is not hypothetical: `smd_balance` scraped exactly ONE
+ * fingerprint value (`setting_filter`) until keys were added by hand, and it had
+ * no `expectedFromStamp` entry at all, so its stamp was never cross-checked
+ * against its own code.
+ *
+ * So every registered module must DECLARE its coverage in four places, and this
+ * guard fails the suite if any is missing:
+ *
+ *   1. a real SQL fingerprint    (values scraped from the SQL twin's own text)
+ *   2. a real SAS fingerprint    (values scraped from the SAS twin's own text)
+ *   3. an EXPECTED_CONSTANTS profile (the CI constants, pinned per language)
+ *   4. a suppression shape       (so results cannot skip disclosure control)
+ *
+ * It lives in verify/ rather than as a load-time throw in emitters/registry.ts
+ * because emitters must not depend on the verification layer — CI runs this on
+ * every push, which is the same practical gate without the circular import.
+ */
+import { emitSql } from "../emitters/sql";
+import { emitSas } from "../emitters/sas";
+import { parseParityStamps } from "../emitters/parity";
+import { ANALYSIS_MODULES, STAMP_KIND_BY_ANALYSIS } from "../emitters/modules/registry";
+import { SUPPRESSION_SHAPES } from "../emitters/suppression";
+import { fingerprint, expectedFromStamp, hasConstantProfile } from "./fingerprint";
+import { GOLD_A_SPEC, GOLD_A_OPTS } from "./fixture";
+import type { Analysis } from "../spec/types";
+import type { Check } from "./run";
+
+/** A fingerprint with only the always-present baseline key is not coverage.
+ *  Anything at or below this count means the kind fell through the switch. */
+const MIN_FINGERPRINT_KEYS = 3;
+
+export function fingerprintCoverageChecks(): Check[] {
+  const checks: Check[] = [];
+  const kinds = Object.keys(ANALYSIS_MODULES) as Array<Analysis["kind"]>;
+
+  const sqlFiles = emitSql(GOLD_A_SPEC, "postgres", GOLD_A_OPTS);
+  const sasFiles = emitSas(GOLD_A_SPEC, GOLD_A_OPTS);
+  const setup = sasFiles.find((f) => /setup/i.test(f.path))?.content ?? "";
+
+  /** first emitted program of a stamp kind, per language */
+  const firstOf = (files: Array<{ content: string }>, stampKind: string) => {
+    for (const f of files) {
+      for (const s of parseParityStamps(f.content)) {
+        if (s.kind === stampKind) return { content: f.content, stamp: s.values };
+      }
+    }
+    return undefined;
+  };
+
+  for (const kind of kinds) {
+    const stampKind = STAMP_KIND_BY_ANALYSIS[kind];
+    const label = `${kind} (stamp "${stampKind}")`;
+
+    // 4. suppression shape — declared statically, checkable without emission
+    checks.push({
+      name: `coverage ${label}: has a suppression shape`,
+      status: SUPPRESSION_SHAPES[stampKind] ? "pass" : "fail",
+      detail: SUPPRESSION_SHAPES[stampKind]
+        ? "results cannot skip disclosure control"
+        : `no SUPPRESSION_SHAPES["${stampKind}"] — this module's results would ship UNSUPPRESSED`,
+    });
+
+    // 3. pinned CI-constant profile
+    checks.push({
+      name: `coverage ${label}: has a pinned CI-constant profile`,
+      status: hasConstantProfile(stampKind) ? "pass" : "fail",
+      detail: hasConstantProfile(stampKind)
+        ? "a mistyped statistical constant is detectable"
+        : `no EXPECTED_CONSTANTS["${stampKind}"] — a mistyped z or z^2 would ship silently`,
+    });
+
+    const sq = firstOf(sqlFiles, stampKind);
+    const sa = firstOf(sasFiles, stampKind);
+    if (!sq || !sa) {
+      // The gold spec does not exercise this kind, so its fingerprints cannot be
+      // measured here. Say so rather than passing by omission.
+      checks.push({
+        name: `coverage ${label}: exercised by the gold spec`,
+        status: "fail",
+        detail: `no ${stampKind} program emitted in ${!sq ? "SQL" : "SAS"} from GOLD_A_SPEC — add an analysis of this kind to the fixture so its coverage is measurable`,
+      });
+      continue;
+    }
+
+    // 1 + 2. real fingerprints in BOTH languages
+    for (const [lang, prog] of [["sql", sq], ["sas", sa]] as const) {
+      const fp = fingerprint(stampKind, lang, prog.content, lang === "sas" ? setup : "");
+      const n = Object.keys(fp).length;
+      checks.push({
+        name: `coverage ${label}: ${lang} fingerprint is non-trivial`,
+        status: n >= MIN_FINGERPRINT_KEYS ? "pass" : "fail",
+        detail:
+          n >= MIN_FINGERPRINT_KEYS
+            ? `${n} values scraped from the ${lang} twin's own code`
+            : `only ${n} value(s) scraped (${Object.keys(fp).join(", ") || "none"}) — this kind falls through the ${lang} fingerprint switch and is effectively UNVERIFIED`,
+      });
+    }
+
+    // the stamp must be cross-checkable against the code
+    const exp = expectedFromStamp(stampKind, sq.stamp);
+    const expKeys = Object.keys(exp).length;
+    checks.push({
+      name: `coverage ${label}: stamp is cross-checked against the code`,
+      status: expKeys >= 1 ? "pass" : "fail",
+      detail:
+        expKeys >= 1
+          ? `${expKeys} stamp value(s) asserted against the emitted code`
+          : `expectedFromStamp("${stampKind}") returns nothing — the PARITY stamp is never compared to what the code actually does`,
+    });
+  }
+
+  return checks;
+}
+
+/** Prove the coverage guard can FAIL.
+ *
+ *  A guard that has only ever been green is an unproven guard — the same
+ *  argument that produced the mutation suite. Here the "mutation" is a stamp
+ *  kind that no fingerprint case handles, which is exactly the state
+ *  `smd_balance` was in: it must come back with almost nothing and be reported
+ *  as unverified rather than passing by silence. */
+export function coverageGuardSelfTest(): Check[] {
+  const UNKNOWN = "kind_that_no_fingerprint_case_handles";
+  const sqlFiles = emitSql(GOLD_A_SPEC, "postgres", GOLD_A_OPTS);
+  const sample = sqlFiles.find((f) => /incidence/.test(f.path))?.content ?? "";
+
+  const fp = fingerprint(UNKNOWN, "sql", sample);
+  const n = Object.keys(fp).length;
+  const exp = expectedFromStamp(UNKNOWN, { rateMultiplier: 1000, imbalanceThreshold: 0.1 });
+
+  return [
+    {
+      name: "coverage self-test: an unhandled kind yields a trivial fingerprint",
+      status: n < MIN_FINGERPRINT_KEYS ? "pass" : "fail",
+      detail:
+        n < MIN_FINGERPRINT_KEYS
+          ? `${n} key(s) — below the ${MIN_FINGERPRINT_KEYS}-key floor, so the guard would flag it`
+          : `${n} keys scraped for a kind nothing handles — the floor no longer detects a blind spot`,
+    },
+    {
+      name: "coverage self-test: an unhandled kind has no stamp cross-check",
+      status: Object.keys(exp).length === 0 ? "pass" : "fail",
+      detail:
+        Object.keys(exp).length === 0
+          ? "expectedFromStamp returns nothing, as the guard expects"
+          : `returned ${Object.keys(exp).join(", ")} for an unknown kind`,
+    },
+    {
+      name: "coverage self-test: suppression + constants lookups miss an unknown kind",
+      status: !SUPPRESSION_SHAPES[UNKNOWN] && !hasConstantProfile(UNKNOWN) ? "pass" : "fail",
+      detail: "an unregistered kind is absent from both static maps",
+    },
+  ];
+}
