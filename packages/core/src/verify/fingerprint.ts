@@ -272,6 +272,96 @@ export function fingerprint(
   return language === "sql" ? sqlFingerprint(kind, content) : sasFingerprint(kind, content, sasSetup);
 }
 
+/* ------------------------------------------------------------------ *
+ *  Cohort-spine fingerprint
+ * ------------------------------------------------------------------ */
+
+/** The spine (events -> index -> enrollment -> attrition -> Table 1) builds the
+ *  cohort every analysis module consumes, yet it carries NO parity stamp — so
+ *  nothing compared the languages there. Two real defects hid in that gap: the
+ *  SAS continuous-enrollment predicate was one day stricter than SQL's (so the
+ *  twins built different cohorts), and SQL's episode stitching mishandled
+ *  nested segments while SAS's did not. These values are scraped from each
+ *  language's own spine code and must agree. */
+export function spineFingerprint(
+  language: "sql" | "sas",
+  files: Array<{ path: string; content: string }>,
+  sasSetup = ""
+): Fingerprint {
+  const all = files
+    .map((f) =>
+      language === "sas"
+        ? resolveSasMacros(stripComments("sas", f.content), stripComments("sas", sasSetup))
+        : stripComments("sql", f.content),
+    )
+    .join("\n");
+  const fp: Fingerprint = {};
+
+  if (language === "sql") {
+    // CE predicate: episode_start <= index_date - N  /  episode_end >= index_date + M
+    put(fp, "ce_baseline_offset", evalOffset(grab(all, [
+      /episode_start\s*<=\s*DATEADD\(\s*day\s*,\s*-([\d\s()-]+?)\s*,\s*i\.index_date/i,
+      /episode_start\s*<=\s*\(\s*i\.index_date\s*-\s*([\d\s()-]+?)\s*\)/i,
+      /episode_start\s*<=\s*i\.index_date\b(?!\s*-)/i,
+    ])));
+    put(fp, "ce_followup_offset", grab(all, [
+      /episode_end\s*>=\s*DATEADD\(\s*day\s*,\s*(\d+)\s*,\s*i\.index_date/i,
+      /episode_end\s*>=\s*\(\s*i\.index_date\s*\+\s*(\d+)\s*\)/i,
+    ]));
+    put(fp, "gap_allowance", grab(all, [/>\s*(\d+)\s*THEN 1/i]));
+    /* Stitching form. Requires the running-MAX window AND the absence of any
+     * LAG(dtend) — a PARTIAL revert (one of the two uses switched back) leaves
+     * a MAX present and would otherwise still read as correct. */
+    put(
+      fp,
+      "stitch_uses_running_max",
+      /MAX\(dtend\)\s*OVER[^)]*ROWS BETWEEN UNBOUNDED PRECEDING/i.test(all) && !/LAG\(\s*dtend\s*\)/i.test(all)
+        ? "yes"
+        : "no",
+    );
+  } else {
+    put(fp, "ce_baseline_offset", evalOffset(grab(all, [
+      /b\.dtstart\s*<=\s*a\.index_date\s*-\s*([\d\s()-]+?)\s*$/im,
+      /b\.dtstart\s*<=\s*a\.index_date\s*-\s*([\d\s()-]+)/i,
+      /b\.dtstart\s*<=\s*a\.index_date\b(?!\s*-)/i,
+    ])));
+    put(fp, "ce_followup_offset", grab(all, [/b\.dtend\s*>=\s*a\.index_date\s*\+\s*(\d+)/i]));
+    put(fp, "gap_allowance", grab(all, [/\(\s*dtstart\s*-\s*prev_dtend\s*\)\s*(?:gt|>)\s*(\d+)/i]));
+    /* SAS expresses the running maximum through BRANCHES rather than a max()
+     * call: the "segment ends inside the running episode" arm keeps prev_dtend
+     * unchanged, so the running end never moves backward. Detecting that arm is
+     * how we confirm nested segments are handled. */
+    put(
+      fp,
+      "stitch_uses_running_max",
+      /dtend\s+(?:lt|<)\s+prev_dtend/i.test(all) && /prev_dtend\s*=\s*prev_dtend\s*;/i.test(all) ? "yes" : "no",
+    );
+  }
+  return fp;
+}
+
+/** Reduce a day-offset expression to a single integer.
+ *
+ *  SQL bakes the literal (`index_date - 364`) while SAS keeps the macro form
+ *  (`index_date - (365 - 1)`, resolved to `(365 - 1)`), so the two must be
+ *  EVALUATED to be compared. Doing this by pattern instead — "treat 365 as if
+ *  it meant 364" — silently rewrites a wrong value into the right one and
+ *  hides the very off-by-one it is supposed to detect. (An earlier draft did
+ *  exactly that, and the mutation reproducing the D1 defect went uncaught.)
+ *
+ *  Only `+`/`-` over integers and parens appear here; anything else is
+ *  returned verbatim so an unexpected form shows up as a mismatch. */
+function evalOffset(expr: string | undefined): string {
+  if (expr === undefined) return "0";
+  const cleaned = expr.replace(/[()\s]/g, "");
+  if (/^\d+$/.test(cleaned)) return cleaned;
+  const m = /^(\d+)([+-])(\d+)$/.exec(cleaned);
+  if (!m) return expr.trim();
+  const a = Number(m[1]);
+  const b = Number(m[3]);
+  return String(m[2] === "-" ? a - b : a + b);
+}
+
 /** Values the fingerprint must agree with, derived from the parity stamp.
  *  Only keys present here are cross-checked against the stamp; a fingerprint
  *  key with no stamp counterpart is still compared ACROSS languages. */

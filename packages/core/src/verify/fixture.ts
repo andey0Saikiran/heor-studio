@@ -76,6 +76,22 @@ const ENROLL: Array<[number, string, string, number, string, string, string]> = 
   [11, "2018-01-01", "2019-05-01", 1970, "2", "2", "6"], // P11 X age49 span1
   [11, "2019-07-01", "2020-06-30", 1970, "2", "2", "6"], // P11 span2 (gap 61d >31 -> FAILS CE)
   [12, "2018-01-01", "2020-06-30", 2009, "1", "3", "7"], // P12 Y age10 (fails age>=18)
+  /* P13 — NESTED-SEGMENT stitching case (regression test for the LAG defect).
+   * Deliberately has NO index drug claim, so it never enters the cohort and
+   * cannot disturb any pinned gold number; it exercises the stitching step
+   * alone, asserted directly against tz_study_enroll_episodes.
+   *
+   * Ordered by dtstart: A(2018-01-01..2019-03-31), B(2018-02-01..2018-02-10,
+   * nested inside A), C(2019-04-15..2020-06-30).
+   *   C starts 15 days after A ends  -> within the 31-day allowance
+   *   C starts 429 days after B ends -> outside it
+   * Comparing against only the PREVIOUS row's end (LAG) sees B and wrongly
+   * opens a second episode; comparing against the running MAX of all prior
+   * ends sees A and correctly continues one episode. The SAS twin already
+   * used the running-max form, so this was also a silent SAS/SQL divergence. */
+  [13, "2018-01-01", "2019-03-31", 1980, "2", "1", "6"], // P13 span A (long)
+  [13, "2018-02-01", "2018-02-10", 1980, "2", "1", "6"], // P13 span B (nested in A)
+  [13, "2019-04-15", "2020-06-30", 1980, "2", "1", "6"], // P13 span C (15d after A)
 ];
 
 // index drug claim (one per patient, all 2019-01-01). enrolid -> NDC (arm)

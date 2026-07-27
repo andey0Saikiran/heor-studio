@@ -115,6 +115,21 @@ export async function verifyGoldA(): Promise<VerificationResult> {
     const eq = (name: string, got: number | undefined, want: number) =>
       checks.push({ name, status: got === want ? "pass" : "fail", detail: `expected ${want}, got ${got}` });
 
+    /* Enrollment stitching with NESTED segments (P13; see fixture).
+     * Comparing a segment's start against only the PREVIOUS row's end splits
+     * an episode that a running MAX of all prior ends correctly continues.
+     * P13 has no index claim, so this asserts the stitching step directly. */
+    const p13 = await rows<{ episode_start: string; episode_end: string }>(
+      db,
+      "SELECT episode_start::text, episode_end::text FROM tz_study_enroll_episodes WHERE enrolid = 13 ORDER BY episode_start",
+    );
+    eq("nested segments stitch into ONE episode (P13)", p13.length, 1);
+    checks.push({
+      name: "nested-segment episode spans the full coverage (P13)",
+      status: p13[0]?.episode_start === "2018-01-01" && p13[0]?.episode_end === "2020-06-30" ? "pass" : "fail",
+      detail: `expected 2018-01-01..2020-06-30, got ${p13[0]?.episode_start ?? "none"}..${p13[0]?.episode_end ?? "none"}`,
+    });
+
     eq("indexed cohort = 12", await scalar<number>(db, "SELECT count(*)::int FROM tz_study_index"), EXPECTED.indexed);
     eq("continuously enrolled = 11", await scalar<number>(db, "SELECT count(*)::int FROM tz_study_enrolled"), EXPECTED.continuouslyEnrolled);
     eq("final cohort N = 10", await scalar<number>(db, "SELECT count(*)::int FROM tz_study_cohort"), EXPECTED.finalCohortN);

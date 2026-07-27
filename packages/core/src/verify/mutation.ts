@@ -29,6 +29,7 @@ import {
   diffAgainstExpected,
   constantProfile,
   diffConstantProfile,
+  spineFingerprint,
 } from "./fingerprint";
 import { sasStructureChecks } from "./sas-lint";
 import { GOLD_A_SPEC, GOLD_A_OPTS } from "./fixture";
@@ -194,6 +195,73 @@ export function mutationChecks(): Check[] {
   }
 
   checks.push(...sasStructureMutationChecks());
+  checks.push(...spineMutationChecks());
+  return checks;
+}
+
+/** Corruptions of the COHORT SPINE — the step every analysis depends on, and
+ *  the one that had no parity coverage at all until two real defects (D1/D3)
+ *  were found there by audit rather than by the harness. */
+function spineMutationChecks(): Check[] {
+  const checks: Check[] = [];
+  const sqlFiles = emitSql(GOLD_A_SPEC, "postgres", GOLD_A_OPTS);
+  const sasFiles = emitSas(GOLD_A_SPEC, GOLD_A_OPTS);
+  const setup = sasFiles.find((f) => /setup/i.test(f.path))?.content ?? "";
+
+  const base = () => spineFingerprint("sql", sqlFiles);
+
+  const cases: Array<{ name: string; lang: "sql" | "sas"; apply: (t: string) => string }> = [
+    {
+      // exactly the D1 defect: SAS one day stricter than SQL
+      name: "SAS continuous-enrollment window off by one day (the D1 defect)",
+      lang: "sas",
+      apply: (t) => t.replace(/(b\.dtstart\s*<=\s*a\.index_date\s*-\s*)\(\s*&baseline_days\.\s*-\s*1\s*\)/i, "$1&baseline_days."),
+    },
+    {
+      // exactly the D3 defect: SQL compares against the previous row only
+      name: "SQL episode stitching reverts to LAG (the D3 nested-segment defect)",
+      lang: "sql",
+      apply: (t) => t.replace(/MAX\(dtend\)\s*OVER\s*\(([^)]*)ROWS BETWEEN UNBOUNDED PRECEDING\s*AND 1 PRECEDING\)/gi, "LAG(dtend) OVER ($1)"),
+    },
+    {
+      name: "SQL follow-up requirement shortened (365 -> 180)",
+      lang: "sql",
+      apply: (t) => t.replace(/(episode_end\s*>=\s*\(\s*i\.index_date\s*\+\s*)365/i, "$1180"),
+    },
+    {
+      name: "SAS gap allowance widened (31 -> 90)",
+      lang: "sas",
+      apply: (t) => t.replace(/(%let\s+gap_allowance\s*=\s*)31/i, "$190"),
+    },
+  ];
+
+  for (const c of cases) {
+    const mutSql = c.lang === "sql" ? sqlFiles.map((f) => ({ ...f, content: c.apply(f.content) })) : sqlFiles;
+    const mutSas = c.lang === "sas" ? sasFiles.map((f) => ({ ...f, content: c.apply(f.content) })) : sasFiles;
+    const mutSetup = c.lang === "sas" ? c.apply(setup) : setup;
+
+    const changed =
+      c.lang === "sql"
+        ? mutSql.some((f, i) => f.content !== sqlFiles[i].content)
+        : mutSas.some((f, i) => f.content !== sasFiles[i].content) || mutSetup !== setup;
+    if (!changed) {
+      checks.push({ name: `spine mutation: ${c.name}`, status: "fail", detail: "mutation pattern did not match — vacuous test; update the pattern" });
+      continue;
+    }
+
+    const fpSql = spineFingerprint("sql", mutSql);
+    const fpSas = spineFingerprint("sas", mutSas, mutSetup);
+    const drift = diffFingerprints(fpSql, fpSas);
+    const stitchBroken = fpSql.stitch_uses_running_max !== "yes" || fpSas.stitch_uses_running_max !== "yes";
+    const caught = drift.length > 0 || stitchBroken;
+    checks.push({
+      name: `spine mutation caught: ${c.name}`,
+      status: caught ? "pass" : "fail",
+      detail: caught
+        ? [drift.join(" | "), stitchBroken ? "running-max stitch lost" : ""].filter(Boolean).join("; ")
+        : `NOT CAUGHT — spine fingerprint is blind (${JSON.stringify(base())})`,
+    });
+  }
   return checks;
 }
 

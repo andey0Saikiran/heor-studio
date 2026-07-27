@@ -979,6 +979,17 @@ function enrollStitchProgram(ctx: Ctx): GeneratedFile {
   const outT = ctx.tbl("050_cont_enroll");
   const idxT = ctx.tbl("030_index");
 
+  /* Baseline INCLUDES the index date (BR-CHT-003), so N baseline days span
+   * index-(N-1) .. index — NOT index-N, which would require N+1 covered days.
+   * This expression previously read `index_date - &baseline_days.`, one day
+   * stricter than the SQL twin's `index_date - (N-1)`, so the two languages
+   * built DIFFERENT cohorts from the same spec. The same file already used the
+   * correct form for criteria windows. */
+  const blStart =
+    spec.enrollment.baselineDays > 0
+      ? `a.index_date - (&baseline_days. - 1)`
+      : `a.index_date`;
+
   const lines: string[] = [
     ...header(spec, "050_enroll_stitch.sas", [
       "Stitch enrollment segments into continuous episodes (classic sorted",
@@ -1058,8 +1069,9 @@ function enrollStitchProgram(ctx: Ctx): GeneratedFile {
     ...levelCheck(epiT, "stitched episodes"),
     ``,
     `/*----------------------------------------------------------------------------`,
-    `  Continuous-enrollment requirement around index: the episode must start on`,
-    `  or before index - &baseline_days. and end on or after index + &followup_days.`,
+    `  Continuous-enrollment requirement around index. Baseline INCLUDES the index`,
+    `  date, so &baseline_days. days span index - (&baseline_days. - 1) .. index;`,
+    `  follow-up EXCLUDES it, so it runs index + 1 .. index + &followup_days.`,
     `----------------------------------------------------------------------------*/`,
     `proc sql;`,
     `  create table ${outT} as`,
@@ -1072,7 +1084,7 @@ function enrollStitchProgram(ctx: Ctx): GeneratedFile {
     `  from ${idxT} as a`,
     `  inner join ${epiT} as b`,
     `    on a.enrolid = b.enrolid`,
-    `  where b.dtstart <= a.index_date - &baseline_days.`,
+    `  where b.dtstart <= ${blStart}`,
     `    and b.dtend   >= a.index_date + &followup_days.;`,
     `quit;`,
     ``,

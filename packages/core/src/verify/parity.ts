@@ -28,6 +28,7 @@ import {
   constantProfile,
   diffConstantProfile,
   hasConstantProfile,
+  spineFingerprint,
 } from "./fingerprint";
 import type { StudySpec, EmitOptions } from "../index";
 import type { Check } from "./run";
@@ -127,8 +128,37 @@ export function sasSqlParityChecks(spec: StudySpec, opts: EmitOptions): Check[] 
   const sqlStamps = collect(emitSql(spec, "postgres", opts));
   const sasStamps = collect(emitSas(spec, opts));
   const snowStamps = collect(emitSql(spec, "snowflake", opts));
-  const sasSetup = emitSas(spec, opts).find((f) => /setup/i.test(f.path))?.content ?? "";
+  const sasFiles = emitSas(spec, opts);
+  const sasSetup = sasFiles.find((f) => /setup/i.test(f.path))?.content ?? "";
   const snowByKey = new Map(snowStamps.map((s) => [stampKey(s), s]));
+
+  /* SPINE parity. The cohort spine carries no PARITY stamp, so nothing compared
+   * the languages there — and two real defects hid in that gap (a one-day
+   * stricter SAS continuous-enrollment predicate, and SQL episode stitching
+   * that mishandled nested segments). Fingerprint it directly. */
+  {
+    const fpSql = spineFingerprint("sql", emitSql(spec, "postgres", opts));
+    const fpSas = spineFingerprint("sas", sasFiles, sasSetup);
+    const drift = diffFingerprints(fpSql, fpSas);
+    checks.push({
+      name: "parity spine: cohort construction agrees across twins",
+      status: drift.length === 0 ? "pass" : "fail",
+      detail: drift.length === 0
+        ? `continuous-enrollment window, gap allowance and stitching form all match (${JSON.stringify(fpSql)})`
+        : drift.join(" | "),
+    });
+    // Both languages must use the running-max stitch; LAG-style stitching
+    // silently truncates coverage when segments nest (fixture P13).
+    for (const [lang, fp] of [["sql", fpSql], ["sas", fpSas]] as const) {
+      checks.push({
+        name: `parity spine: ${lang} stitches with a running maximum`,
+        status: fp.stitch_uses_running_max === "yes" ? "pass" : "fail",
+        detail: fp.stitch_uses_running_max === "yes"
+          ? "nested/overlapping segments stitch correctly"
+          : "compares against the previous segment only — nested segments will split an episode",
+      });
+    }
+  }
 
   const expected = spec.analyses.filter((a) => a.enabled && STAMP_KIND_BY_ANALYSIS[a.kind]).length;
   checks.push({

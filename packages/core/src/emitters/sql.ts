@@ -580,7 +580,18 @@ function build04(ctx: Ctx): string {
   const gap = enr.gapAllowanceDays;
   const bdOff = enr.baselineDays > 0 ? -(enr.baselineDays - 1) : 0;
   const rx = rxCoverageFilter(spec);
-  const lagEnd = `LAG(dtend) OVER (PARTITION BY enrolid ORDER BY dtstart, dtend)`;
+  /* Running MAX of every PRIOR segment end — not LAG(dtend).
+   *
+   * Real deliveries contain nested and overlapping segments (a short plan-change
+   * row inside a long span). Comparing against only the immediately preceding
+   * row's end then measures the gap from the SHORT segment and wrongly opens a
+   * new episode, truncating coverage and dropping members from the cohort. The
+   * running maximum is the correct gaps-and-islands form and matches the SAS
+   * twin, whose retain algorithm already only ever moved its running end
+   * forward. Regression: fixture patient P13. */
+  const lagEnd =
+    `MAX(dtend) OVER (PARTITION BY enrolid ORDER BY dtstart, dtend ` +
+    `ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)`;
   const out: string[] = [];
 
   out.push(`-- Members appear in enrollment detail as one row per contiguous coverage`);
@@ -597,9 +608,12 @@ function build04(ctx: Ctx): string {
   out.push(`),`);
   out.push(``);
   out.push(`flagged AS (`);
-  out.push(`  -- A segment starts a NEW episode when the day count from the previous`);
-  out.push(`  -- segment's end to this segment's start exceeds the gap allowance`);
-  out.push(`  -- (dtstart - LAG(dtend) > ${gap}), or when there is no previous segment.`);
+  out.push(`  -- A segment starts a NEW episode when the day count from the FURTHEST`);
+  out.push(`  -- coverage end seen so far to this segment's start exceeds the gap`);
+  out.push(`  -- allowance (${gap} days), or when there is no previous segment.`);
+  out.push(`  -- The running MAX (not the previous row's end) is what makes nested and`);
+  out.push(`  -- overlapping segments stitch correctly: a short plan-change row inside`);
+  out.push(`  -- a long span must not be mistaken for the end of coverage.`);
   out.push(`  SELECT enrolid, dtstart, dtend,`);
   out.push(`         CASE`);
   out.push(`           WHEN ${lagEnd} IS NULL THEN 1`);
