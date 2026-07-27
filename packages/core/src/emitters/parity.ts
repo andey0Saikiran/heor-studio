@@ -543,3 +543,92 @@ export const SMD_METHOD_NOTES = [
   `SMD is a descriptive balance diagnostic, NOT a hypothesis test - it carries no`,
   `p-value and is deliberately insensitive to sample size (Austin 2009).`,
 ];
+
+/* ------------------------------------------------------------------ *
+ *  Ascertainment window
+ * ------------------------------------------------------------------ */
+
+/**
+ * The date span the EVENT PULL must cover — which is not the study period.
+ *
+ * The event table used to be hard-bounded to meta.studyPeriod, but baseline
+ * lookbacks, prevalent-case washouts and follow-up horizons all reach OUTSIDE
+ * it. A protocol whose "study period" means the identification window (a very
+ * common reading) then truncated its own washout: on the gold fixture, setting
+ * studyPeriod to 2019 alone dropped the excluded-as-prevalent count from 2 to 0
+ * and inflated the at-risk denominator from 8 to 10 — while the code ran
+ * cleanly and reported success. Silent and plausible is the worst combination.
+ *
+ * So the pull window is derived from what the spec actually ASKS FOR: the
+ * deepest lookback before the earliest possible index date, and the longest
+ * follow-up after the latest one, unioned with the stated study period.
+ */
+export interface AscertainmentWindow {
+  /** ISO date, or null when some window is unbounded ("anytime_before") */
+  start: string | null;
+  end: string;
+  /** why the window is wider than meta.studyPeriod (for the REVIEW note) */
+  reasons: string[];
+}
+
+function shiftIso(iso: string, days: number): string {
+  const d = new Date(`${iso}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+export function ascertainmentWindow(spec: StudySpec): AscertainmentWindow {
+  const reasons: string[] = [];
+  const idxStart = spec.indexEvent.indexPeriod.start;
+  const idxEnd = spec.indexEvent.indexPeriod.end;
+  let unbounded = false;
+  let backDays = 0;
+
+  const consider = (days: number, why: string) => {
+    if (days > backDays) { backDays = days; reasons.push(why); }
+  };
+  if (spec.enrollment.baselineDays > 0)
+    consider(spec.enrollment.baselineDays, `baseline lookback ${spec.enrollment.baselineDays}d`);
+  for (const c of spec.criteria) {
+    const w = "window" in c.test ? c.test.window : undefined;
+    if (!w) continue;
+    if (w.start === "anytime_before") { unbounded = true; reasons.push(`criterion "${c.id}" looks back with no bound`); }
+    else if (w.start < 0) consider(-w.start, `criterion "${c.id}" lookback ${-w.start}d`);
+  }
+  let fwdDays = spec.enrollment.followupDays;
+  if (fwdDays > 0) reasons.push(`follow-up ${fwdDays}d`);
+  let latestFixed: string | null = null;
+
+  for (const a of spec.analyses) {
+    if (!a.enabled) continue;
+    if ("washout" in a && a.washout) {
+      if (a.washout.start === "anytime_before") { unbounded = true; reasons.push(`analysis "${a.id}" washout has no lower bound`); }
+      else if (a.washout.start < 0) consider(-a.washout.start, `analysis "${a.id}" washout ${-a.washout.start}d`);
+    }
+    if (a.kind === "cumulative_incidence" && a.horizonDays > fwdDays) {
+      fwdDays = a.horizonDays; reasons.push(`analysis "${a.id}" risk horizon ${a.horizonDays}d`);
+    }
+    if (a.kind === "incidence_rate" && a.personTimeRule.maxFollowupDays && a.personTimeRule.maxFollowupDays > fwdDays) {
+      fwdDays = a.personTimeRule.maxFollowupDays; reasons.push(`analysis "${a.id}" max follow-up ${a.personTimeRule.maxFollowupDays}d`);
+    }
+    if (a.kind === "period_prevalence") {
+      if (!latestFixed || a.prevalencePeriod.end > latestFixed) latestFixed = a.prevalencePeriod.end;
+      reasons.push(`analysis "${a.id}" prevalence period ends ${a.prevalencePeriod.end}`);
+    }
+    if (a.kind === "point_prevalence" && a.anchorDate.kind === "fixed") {
+      if (!latestFixed || a.anchorDate.date > latestFixed) latestFixed = a.anchorDate.date;
+      reasons.push(`analysis "${a.id}" anchor date ${a.anchorDate.date}`);
+    }
+  }
+
+  let start: string | null = null;
+  if (!unbounded) {
+    const derivedStart = shiftIso(idxStart, -backDays);
+    // widen to whichever reaches further back — never narrow the pull
+    start = derivedStart < spec.meta.studyPeriod.start ? derivedStart : spec.meta.studyPeriod.start;
+  }
+  const candidates = [spec.meta.studyPeriod.end, shiftIso(idxEnd, fwdDays)];
+  if (latestFixed) candidates.push(latestFixed);
+  const end = candidates.reduce((a, b) => (a > b ? a : b));
+  return { start, end, reasons: [...new Set(reasons)] };
+}

@@ -41,6 +41,7 @@ import type {
 import { assertSafeIdent, assertSafeNaming } from "./types";
 import { q, oneLine, makeDialect, windowConds, describeWindow } from "./sql-base";
 import { suppressionPolicy, suppressionSqlFor, resultsContractSql, RESULTS_TABLE_PLACEHOLDER, type SuppressionTarget } from "./suppression";
+import { ascertainmentWindow } from "./parity";
 import { EMITTER_VERSION, stableHash } from "../provenance";
 import type { Ctx } from "./sql-base";
 import { moduleAnalyses } from "./modules/registry";
@@ -502,12 +503,28 @@ function build02(ctx: Ctx): string {
   out.push(d.createTableAs(`${wp}_events`));
   out.push(`WITH`);
   out.push(ctes.join(",\n\n"));
+  /* ASCERTAINMENT window, not the study period. Baseline lookbacks, washouts
+   * and follow-up horizons reach outside meta.studyPeriod; bounding the pull to
+   * the study period silently truncated them (a spec whose "study period" is
+   * the identification window lost its entire washout and reported success). */
+  const aw = ascertainmentWindow(spec);
   out.push(`-- DISTINCT collapses the same code repeated across dx slots or service`);
-  out.push(`-- lines of one claim; the date bound is the observable study window.`);
+  out.push(`-- lines of one claim.`);
+  out.push(`--`);
+  out.push(`-- DATE BOUND = the ASCERTAINMENT window, which is WIDER than the study`);
+  out.push(`-- period (${spec.meta.studyPeriod.start} .. ${spec.meta.studyPeriod.end}) whenever the spec looks`);
+  out.push(`-- outside it. Bounding this pull to the study period would silently`);
+  out.push(`-- truncate baseline lookbacks and prevalent-case washouts.`);
+  for (const r of aw.reasons) out.push(`--   driven by: ${r}`);
   out.push(`SELECT DISTINCT enrolid, event_date, event_type, setting, code_list_id, code`);
   out.push(`FROM all_events`);
-  out.push(`WHERE event_date >= DATE '${spec.meta.studyPeriod.start}'`);
-  out.push(`  AND event_date <= DATE '${spec.meta.studyPeriod.end}';`);
+  if (aw.start === null) {
+    out.push(`-- (a window in this spec is unbounded before index, so no lower bound)`);
+    out.push(`WHERE event_date <= DATE '${aw.end}';`);
+  } else {
+    out.push(`WHERE event_date >= DATE '${aw.start}'`);
+    out.push(`  AND event_date <= DATE '${aw.end}';`);
+  }
   out.push(``);
   out.push(`-- REVIEW: event volume per list - a zero row here means an upstream`);
   out.push(`-- code-list or lookup problem.`);

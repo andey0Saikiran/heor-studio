@@ -40,6 +40,7 @@ import {
 import type { Ctx, ListKind, PulledList, SiteNaming } from "./sas-base";
 import { moduleAnalyses } from "./modules/registry";
 import { suppressionPolicy, suppressionSasFor, type SuppressionTarget } from "./suppression";
+import { ascertainmentWindow } from "./parity";
 
 /* ================================================================== *
  *  small utilities
@@ -398,6 +399,18 @@ function setupProgram(ctx: Ctx): GeneratedFile {
     `/*-------------------- study window ------------------------------------------*/`,
     `%let study_start = ${sasDate(spec.meta.studyPeriod.start)};`,
     `%let study_end   = ${sasDate(spec.meta.studyPeriod.end)};`,
+    `/* ASCERTAINMENT window = the span the EVENT PULLS must cover. It is WIDER`,
+    `   than the study period whenever the spec looks outside it (baseline`,
+    `   lookback, prevalent-case washout, follow-up horizon). Pulling events over`,
+    `   the study period alone silently truncates those windows. Twin of the SQL`,
+    `   bound in 02_events. */`,
+    ...(() => { const aw = ascertainmentWindow(spec); return [
+      aw.start === null
+        ? `%let ascertain_start = .;   /* a window in this spec is unbounded before index */`
+        : `%let ascertain_start = ${sasDate(aw.start)};`,
+      `%let ascertain_end   = ${sasDate(aw.end)};`,
+      ...aw.reasons.map((r) => `/*   driven by: ${cmt(r)} */`),
+    ]; })(),
     `%let start_year  = ${yearOf(spec.meta.studyPeriod.start)};`,
     `%let end_year    = ${yearOf(spec.meta.studyPeriod.end)};`,
     ``,
@@ -658,7 +671,7 @@ function eventsProgram(ctx: Ctx): GeneratedFile | null {
           `         a.age, a.sex`,
           `  from ${site.tab(src.letter)} as a`,
           `  where a.enrolid is not null`,
-          `    and a.${src.dateCol} between &study_start. and &study_end.`,
+          `    and a.${src.dateCol} between &ascertain_start. and &ascertain_end.`,
           ...dxCondLines(cols, mv10, mv9).map((l, i, arr) =>
             `    ${l}${i === arr.length - 1 ? ";" : ""}`
           ),
@@ -741,7 +754,7 @@ function eventsProgram(ctx: Ctx): GeneratedFile | null {
           `         a.age, a.sex`,
           `  from ${site.tab(src.letter)} as a`,
           `  where a.enrolid is not null`,
-          `    and a.${src.dateCol} between &study_start. and &study_end.`,
+          `    and a.${src.dateCol} between &ascertain_start. and &ascertain_end.`,
           ...pxCondLines(cols, mv).map((l, i, arr) => `    ${l}${i === arr.length - 1 ? ";" : ""}`),
           `quit;`,
           ``,
@@ -790,7 +803,7 @@ function eventsProgram(ctx: Ctx): GeneratedFile | null {
           `  inner join ${ctx.ndcOf(list.id)} as b`,
           `    on a.ndcnum = b.ndcnum`,
           `  where a.enrolid is not null`,
-          `    and a.svcdate between &study_start. and &study_end.;`
+          `    and a.svcdate between &ascertain_start. and &ascertain_end.;`
         );
       } else {
         body.push(
@@ -799,7 +812,7 @@ function eventsProgram(ctx: Ctx): GeneratedFile | null {
           `  from ${site.tab("d")} as a`,
           `  where a.enrolid is not null`,
           `    and a.ndcnum in (&${mvNdc}.)`,
-          `    and a.svcdate between &study_start. and &study_end.;`
+          `    and a.svcdate between &ascertain_start. and &ascertain_end.;`
         );
       }
       body.push(`quit;`, ``, `proc append base=${evT} data=work._pull_d force;`, `run;`, ``);

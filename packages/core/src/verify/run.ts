@@ -261,6 +261,46 @@ export async function verifyWashoutToggle(): Promise<Check[]> {
   return out;
 }
 
+/** studyPeriod must NOT truncate the washout lookback.
+ *
+ *  The event pull was bounded to meta.studyPeriod, but baseline lookbacks and
+ *  prevalent-case washouts reach outside it. A protocol whose "study period"
+ *  means the IDENTIFICATION window — a very common reading — therefore lost its
+ *  entire washout: excluded-as-prevalent fell from 2 to 0 and the at-risk
+ *  denominator rose from 8 to 10, while the code ran cleanly and reported
+ *  success. Silent and plausible, so nothing else would have caught it.
+ *
+ *  Both readings of studyPeriod must now give the SAME cohort numbers. */
+export async function verifyAscertainmentWindow(): Promise<Check[]> {
+  const out: Check[] = [];
+  const push = (name: string, cond: boolean, detail: string) =>
+    out.push({ name, status: cond ? "pass" : "fail", detail });
+
+  const measure = async (start: string, end: string) => {
+    const spec: StudySpec = JSON.parse(JSON.stringify(GOLD_A_SPEC));
+    spec.meta.studyPeriod = { start, end };
+    const { db, ok } = await seedAndRun(spec, GOLD_A_OPTS);
+    if (!ok) return null;
+    return {
+      denom: Number(await scalar<number>(db, "SELECT denominator FROM tz_study_incidence WHERE stratum='Overall'")),
+      excluded: Number(await scalar<number>(db, "SELECT n FROM tz_study_incidence_washout WHERE step = 2")),
+    };
+  };
+
+  const wide = await measure("2018-01-01", "2020-12-31");
+  const narrow = await measure("2019-01-01", "2019-12-31"); // identification-window reading
+  if (!wide || !narrow) return [{ name: "ascertainment window executes", status: "fail", detail: "execution failed" }];
+
+  push("ascertainment: narrow studyPeriod still finds the prevalent cases",
+    narrow.excluded === EXPECTED.prevalentM, `excluded ${narrow.excluded}, expected ${EXPECTED.prevalentM}`);
+  push("ascertainment: narrow studyPeriod gives the same at-risk denominator",
+    narrow.denom === EXPECTED.atRiskDenominator, `at-risk ${narrow.denom}, expected ${EXPECTED.atRiskDenominator}`);
+  push("ascertainment: the two studyPeriod readings agree",
+    wide.denom === narrow.denom && wide.excluded === narrow.excluded,
+    `wide ${wide.denom}/${wide.excluded} vs narrow ${narrow.denom}/${narrow.excluded}`);
+  return out;
+}
+
 /** Full Gold Case A verification: execute + assert the hand-computed spine
  *  ground truth + invariants. (Descriptive-epi value checks activate once the
  *  incidence module lands in Step 4.) */
