@@ -300,6 +300,73 @@ textarea.control {
   font-size: 0.85rem;
 }
 
+/* ---------- analysis-layer editor ---------- */
+
+.analysis-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: var(--space-4) 0;
+}
+
+.analysis-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: var(--space-4);
+  background: var(--surface);
+}
+
+.analysis-card-off {
+  opacity: 0.62;
+}
+
+.analysis-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.analysis-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  cursor: pointer;
+}
+
+.analysis-toggle input {
+  accent-color: var(--accent);
+  width: 1rem;
+  height: 1rem;
+}
+
+.analysis-kind {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.analysis-outcome {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: var(--space-3);
+  margin: var(--space-3) 0;
+}
+
+.analysis-outcome legend {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--ink-soft);
+  padding: 0 var(--space-2);
+}
+
+.add-analysis {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
 /* ---------- badges + banners ---------- */
 
 .badge {

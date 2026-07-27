@@ -61,6 +61,18 @@ export const PSO_DEMO_SPEC: StudySpec = {
         { code: "APREMILAST|OTEZLA", description: "PDE4 inhibitor", source: "user_entered", verified: true },
       ],
     },
+    {
+      id: "serious_infection_dx",
+      label: "Serious infection (hospitalized) — outcome",
+      system: "icd10cm",
+      codes: [
+        { code: "A41.9", description: "Sepsis, unspecified organism", source: "user_entered", verified: true },
+        { code: "J18.9", description: "Pneumonia, unspecified organism", source: "user_entered", verified: true },
+        { code: "N39.0", description: "Urinary tract infection, site not specified", source: "user_entered", verified: true },
+        { code: "L03.90", description: "Cellulitis, unspecified", source: "user_entered", verified: true },
+      ],
+      notes: "Illustrative serious-infection set for the demo safety endpoint; a real study expands this and confirms the inpatient setting.",
+    },
   ],
   indexEvent: {
     type: "first_drug_claim",
@@ -133,6 +145,39 @@ export const PSO_DEMO_SPEC: StudySpec = {
   analyses: [
     { id: "a_attrition", label: "Attrition", kind: "attrition", enabled: true },
     { id: "a_table1", label: "Baseline characteristics", kind: "table1", enabled: true },
+    // Descriptive-epi safety endpoints — generate SAS + SQL today (machine-verified modules).
+    {
+      id: "a_si_incidence",
+      label: "Serious-infection incidence rate",
+      kind: "incidence_rate",
+      enabled: true,
+      outcomeDefinition: { codeListId: "serious_infection_dx", minClaims: 1, setting: "inpatient", diagnosisPosition: "any" },
+      caseStatus: "incident",
+      washout: { start: "anytime_before", end: 0, includesIndex: true },
+      denominatorRule: "person_time",
+      personTimeRule: { start: "index", censorAt: ["outcome", "disenrollment", "study_end"] },
+      recurrence: "first_only",
+      rateMultiplier: 1000,
+      ciMethod: "poisson_byar",
+      stratifyBy: [{ id: "by_sex", label: "By sex", source: { kind: "demographic", axis: "sex" } }],
+    },
+    {
+      id: "a_si_risk_1yr",
+      label: "1-year serious-infection risk",
+      kind: "cumulative_incidence",
+      enabled: true,
+      outcomeDefinition: { codeListId: "serious_infection_dx", minClaims: 1, setting: "inpatient", diagnosisPosition: "any" },
+      caseStatus: "incident",
+      washout: { start: "anytime_before", end: 0, includesIndex: true },
+      incidentWithRespectTo: "cohort_entry",
+      denominatorRule: "at_risk_start",
+      horizonDays: 365,
+      personTimeRule: { start: "index", censorAt: ["outcome", "disenrollment", "study_end", "max_followup"], maxFollowupDays: 365 },
+      competingRiskDeath: "ignore",
+      recurrence: "first_only",
+      ciMethod: "wilson",
+      stratifyBy: [],
+    },
     // Recorded but disabled until their emitters land (P2+): visible in review, non-blocking.
     {
       id: "a_treatment_patterns", label: "Treatment patterns", kind: "future_stub",

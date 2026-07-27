@@ -1,13 +1,16 @@
 import { useId, useState, type ComponentProps } from "react";
 import type {
+  Analysis,
+  AnalysisKind,
   CareSetting,
   Criterion,
   CriterionKind,
   DatabaseId,
+  OutcomeDefinition,
   RelativeWindow,
   StudySpec,
 } from "@heor-studio/core";
-import { findCodeList, specReadiness } from "@heor-studio/core";
+import { findCodeList, specReadiness, EMITTABLE_ANALYSIS_KINDS } from "@heor-studio/core";
 
 type Test = Criterion["test"];
 type TestType = Test["type"];
@@ -772,6 +775,275 @@ function AddCriterionForm({
 
 /* ---------- main component ---------- */
 
+/* ---------- analysis-layer editor ---------- */
+
+const ANALYSIS_KIND_LABELS: Record<AnalysisKind, string> = {
+  attrition: "Attrition (CONSORT)",
+  table1: "Baseline Table 1",
+  incidence_rate: "Incidence rate",
+  point_prevalence: "Point prevalence",
+  period_prevalence: "Period prevalence",
+  cumulative_incidence: "Cumulative incidence (risk)",
+  standardization: "Age/sex standardization",
+  calendar_trend: "Calendar trend",
+  statistical_engine: "Statistical comparison",
+  future_stub: "Planned (not generated yet)",
+};
+
+/** Analysis kinds an analyst can ADD in the review UI — the four verified
+ *  descriptive-epi modules. Spine kinds (attrition/table1) always exist; the
+ *  non-emittable kinds are hidden until their emitters land. */
+const ADDABLE_ANALYSIS_KINDS: AnalysisKind[] = [
+  "incidence_rate",
+  "point_prevalence",
+  "period_prevalence",
+  "cumulative_incidence",
+];
+
+const BLANK_OUTCOME: OutcomeDefinition = {
+  codeListId: "",
+  minClaims: 1,
+  setting: "any",
+  diagnosisPosition: "any",
+};
+
+const WASHOUT_ALL_BEFORE: RelativeWindow = { start: "anytime_before", end: 0, includesIndex: true };
+
+/** Build a valid, minimally-parameterized analysis of the given kind with the
+ *  same methodological defaults the extractor normalizer uses. */
+function newAnalysis(kind: AnalysisKind, id: string): Analysis {
+  const common = { id, label: ANALYSIS_KIND_LABELS[kind], enabled: true };
+  switch (kind) {
+    case "incidence_rate":
+      return {
+        ...common, kind, outcomeDefinition: { ...BLANK_OUTCOME }, caseStatus: "incident",
+        washout: { ...WASHOUT_ALL_BEFORE }, denominatorRule: "person_time",
+        personTimeRule: { start: "index", censorAt: ["outcome", "disenrollment", "study_end"] },
+        recurrence: "first_only", rateMultiplier: 1000, ciMethod: "poisson_byar", stratifyBy: [],
+      };
+    case "point_prevalence":
+      return {
+        ...common, kind, outcomeDefinition: { ...BLANK_OUTCOME }, caseStatus: "prevalent",
+        anchorDate: { kind: "index" }, denominatorRule: "enrolled_midperiod", ciMethod: "wilson", stratifyBy: [],
+      };
+    case "period_prevalence":
+      return {
+        ...common, kind, outcomeDefinition: { ...BLANK_OUTCOME }, caseStatus: "prevalent",
+        prevalencePeriod: { start: "", end: "" }, denominatorRule: "enrolled_anytime", ciMethod: "wilson", stratifyBy: [],
+      };
+    case "cumulative_incidence":
+      return {
+        ...common, kind, outcomeDefinition: { ...BLANK_OUTCOME }, caseStatus: "incident",
+        washout: { ...WASHOUT_ALL_BEFORE }, incidentWithRespectTo: "cohort_entry",
+        denominatorRule: "at_risk_start", horizonDays: 365,
+        personTimeRule: { start: "index", censorAt: ["outcome", "disenrollment", "study_end", "max_followup"], maxFollowupDays: 365 },
+        competingRiskDeath: "ignore", recurrence: "first_only", ciMethod: "wilson", stratifyBy: [],
+      };
+    default:
+      // spine + non-addable kinds: a bare header (not offered in the add menu)
+      return { ...common, kind } as Analysis;
+  }
+}
+
+/** Editable card for one descriptive-epi analysis (the four emittable kinds).
+ *  Spine + planned kinds render as a compact read-only row instead. */
+function AnalysisEditor({
+  spec,
+  analysis,
+  onPatch,
+  onDelete,
+}: {
+  spec: StudySpec;
+  analysis: Analysis;
+  onPatch: (patch: Partial<Analysis>) => void;
+  onDelete: () => void;
+}) {
+  const a = analysis;
+  const emittable = EMITTABLE_ANALYSIS_KINDS.has(a.kind);
+  const editable = a.kind === "incidence_rate" || a.kind === "point_prevalence" || a.kind === "period_prevalence" || a.kind === "cumulative_incidence";
+
+  // outcome patch helper (only the 4 editable kinds carry outcomeDefinition)
+  const patchOutcome = (patch: Partial<OutcomeDefinition>) => {
+    if (!editable) return;
+    onPatch({ outcomeDefinition: { ...a.outcomeDefinition, ...patch } } as Partial<Analysis>);
+  };
+
+  return (
+    <div className={`analysis-card${a.enabled ? "" : " analysis-card-off"}`}>
+      <div className="analysis-head">
+        <label className="analysis-toggle">
+          <input
+            type="checkbox"
+            checked={a.enabled}
+            onChange={(e) => onPatch({ enabled: e.target.checked })}
+          />
+          <span className="analysis-kind">{ANALYSIS_KIND_LABELS[a.kind]}</span>
+        </label>
+        <button type="button" className="btn-danger-quiet btn-sm" onClick={onDelete} aria-label={`Remove ${a.label}`}>
+          Remove
+        </button>
+      </div>
+
+      <div className="field">
+        <label className="field-label">Label</label>
+        <CommitInput className="control" value={a.label} onCommit={(v) => onPatch({ label: v })} />
+      </div>
+
+      {a.kind === "future_stub" && (
+        <p className="field-hint">
+          Planned “{a.plannedKind}”. No code is generated for this yet — it stays here so the request is visible.
+        </p>
+      )}
+
+      {!emittable && a.kind !== "future_stub" && (
+        <p className="field-hint">No code generator is registered for this analysis kind yet.</p>
+      )}
+
+      {editable && (
+        <>
+          <fieldset className="analysis-outcome">
+            <legend>Outcome definition</legend>
+            <CodeListSelect
+              spec={spec}
+              value={a.outcomeDefinition.codeListId}
+              onChange={(v) => patchOutcome({ codeListId: v })}
+            />
+            <div className="field-row">
+              <LabeledNumber
+                label="Min. claims"
+                value={a.outcomeDefinition.minClaims}
+                min={1}
+                onCommit={(v) => patchOutcome({ minClaims: v ?? 1 })}
+              />
+              {a.outcomeDefinition.minClaims >= 2 && (
+                <LabeledNumber
+                  label="Days between claims"
+                  value={a.outcomeDefinition.claimSeparationDays}
+                  min={0}
+                  allowEmpty
+                  onCommit={(v) => patchOutcome({ claimSeparationDays: v })}
+                />
+              )}
+            </div>
+            <SettingSelect value={a.outcomeDefinition.setting} onChange={(s) => patchOutcome({ setting: s })} />
+            <div className="field">
+              <label className="field-label">Diagnosis position</label>
+              <select
+                className="control"
+                value={a.outcomeDefinition.diagnosisPosition}
+                onChange={(e) => patchOutcome({ diagnosisPosition: e.target.value as "any" | "primary" })}
+              >
+                <option value="any">Any position</option>
+                <option value="primary">Primary / principal only</option>
+              </select>
+            </div>
+          </fieldset>
+
+          {(a.kind === "incidence_rate" || a.kind === "cumulative_incidence") && (
+            <div className="field">
+              <label className="field-label">Prevalent-case washout (before index)</label>
+              <WindowEditor value={a.washout} onChange={(w) => onPatch({ washout: w } as Partial<Analysis>)} />
+            </div>
+          )}
+
+          {a.kind === "incidence_rate" && (
+            <LabeledNumber
+              label="Rate multiplier (per N person-years)"
+              value={a.rateMultiplier}
+              min={1}
+              hint="1000 = per 1,000 PY"
+              onCommit={(v) => onPatch({ rateMultiplier: v ?? 1000 } as Partial<Analysis>)}
+            />
+          )}
+
+          {a.kind === "cumulative_incidence" && (
+            <LabeledNumber
+              label="Risk horizon (days after index)"
+              value={a.horizonDays}
+              min={1}
+              hint="365 = 1-year risk"
+              onCommit={(v) => onPatch({ horizonDays: v ?? 365 } as Partial<Analysis>)}
+            />
+          )}
+
+          {a.kind === "point_prevalence" && (
+            <div className="field">
+              <label className="field-label">Anchor date</label>
+              {a.anchorDate.kind === "fixed" ? (
+                <div className="field-row">
+                  <CommitInput
+                    className="control"
+                    type="date"
+                    value={a.anchorDate.date}
+                    onCommit={(v) => onPatch({ anchorDate: { kind: "fixed", date: v } } as Partial<Analysis>)}
+                  />
+                  <button type="button" className="btn-quiet btn-sm" onClick={() => onPatch({ anchorDate: { kind: "index" } } as Partial<Analysis>)}>
+                    Use each subject’s index date
+                  </button>
+                </div>
+              ) : (
+                <div className="field-row">
+                  <span className="field-hint">Each subject’s own index date.</span>
+                  <button type="button" className="btn-quiet btn-sm" onClick={() => onPatch({ anchorDate: { kind: "fixed", date: spec.indexEvent.indexPeriod.end } } as Partial<Analysis>)}>
+                    Use a fixed calendar date
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {a.kind === "period_prevalence" && (
+            <div className="field-row">
+              <div className="field">
+                <label className="field-label">Period start</label>
+                <CommitInput
+                  className="control"
+                  type="date"
+                  value={a.prevalencePeriod.start}
+                  onCommit={(v) => onPatch({ prevalencePeriod: { ...a.prevalencePeriod, start: v } } as Partial<Analysis>)}
+                />
+              </div>
+              <div className="field">
+                <label className="field-label">Period end</label>
+                <CommitInput
+                  className="control"
+                  type="date"
+                  value={a.prevalencePeriod.end}
+                  onCommit={(v) => onPatch({ prevalencePeriod: { ...a.prevalencePeriod, end: v } } as Partial<Analysis>)}
+                />
+              </div>
+            </div>
+          )}
+
+          {a.stratifyBy.length > 0 && (
+            <p className="field-hint">
+              Stratified by: {a.stratifyBy.map((s) => s.label).join(", ")}
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function AddAnalysisForm({ onAdd }: { onAdd: (kind: AnalysisKind) => void }) {
+  const [kind, setKind] = useState<AnalysisKind>("incidence_rate");
+  return (
+    <div className="add-analysis">
+      <select className="control" value={kind} onChange={(e) => setKind(e.target.value as AnalysisKind)}>
+        {ADDABLE_ANALYSIS_KINDS.map((k) => (
+          <option key={k} value={k}>
+            {ANALYSIS_KIND_LABELS[k]}
+          </option>
+        ))}
+      </select>
+      <button type="button" className="btn" onClick={() => onAdd(kind)}>
+        Add analysis
+      </button>
+    </div>
+  );
+}
+
 export default function SpecReview({
   spec,
   onChange,
@@ -805,6 +1077,21 @@ export default function SpecReview({
   };
   const deleteCriterion = (id: string) =>
     onChange({ ...spec, criteria: spec.criteria.filter((c) => c.id !== id) });
+
+  const patchAnalysis = (id: string, patch: Partial<Analysis>) =>
+    onChange({
+      ...spec,
+      analyses: spec.analyses.map((a) => (a.id === id ? ({ ...a, ...patch } as Analysis) : a)),
+    });
+  const deleteAnalysis = (id: string) =>
+    onChange({ ...spec, analyses: spec.analyses.filter((a) => a.id !== id) });
+  const addAnalysis = (kind: AnalysisKind) => {
+    const used = new Set(spec.analyses.map((a) => a.id));
+    let id = kind;
+    let n = 2;
+    while (used.has(id)) id = `${kind}_${n++}`;
+    onChange({ ...spec, analyses: [...spec.analyses, newAnalysis(kind, id)] });
+  };
 
   const prov = spec.meta.provenance;
   const indexList = findCodeList(spec, spec.indexEvent.codeListId);
@@ -1032,31 +1319,34 @@ export default function SpecReview({
         />
       </section>
 
-      {(spec.baseline.length > 0 || spec.analyses.length > 0) && (
-        <section className="card" aria-labelledby="plan-title">
-          <h2 className="card-title" id="plan-title">
-            Planned outputs
-          </h2>
+      <section className="card" aria-labelledby="plan-title">
+        <h2 className="card-title" id="plan-title">
+          Analyses
+        </h2>
+        <p className="card-sub">
+          Each enabled analysis generates SAS + SQL. The four descriptive-epi
+          kinds are editable here; verify the outcome code list and parameters
+          before generating.
+        </p>
+        {spec.baseline.length > 0 && (
           <dl className="spec-dl">
-            {spec.baseline.length > 0 && (
-              <>
-                <dt>Baseline characteristics</dt>
-                <dd>{spec.baseline.map((b) => b.label).join(", ")}</dd>
-              </>
-            )}
-            {spec.analyses.length > 0 && (
-              <>
-                <dt>Analyses</dt>
-                <dd>
-                  {spec.analyses
-                    .map((a) => `${a.label}${a.enabled ? "" : " (off)"}`)
-                    .join(", ")}
-                </dd>
-              </>
-            )}
+            <dt>Baseline characteristics (Table 1)</dt>
+            <dd>{spec.baseline.map((b) => b.label).join(", ")}</dd>
           </dl>
-        </section>
-      )}
+        )}
+        <div className="analysis-list">
+          {spec.analyses.map((a) => (
+            <AnalysisEditor
+              key={a.id}
+              spec={spec}
+              analysis={a}
+              onPatch={(patch) => patchAnalysis(a.id, patch)}
+              onDelete={() => deleteAnalysis(a.id)}
+            />
+          ))}
+        </div>
+        <AddAnalysisForm onAdd={addAnalysis} />
+      </section>
     </div>
   );
 }
