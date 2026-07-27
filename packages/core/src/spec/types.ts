@@ -493,6 +493,17 @@ export interface StudySpec {
     version: string;             // spec version, bump on every edit
     database: DatabaseId;
     studyPeriod: { start: string; end: string };  // ISO dates, absolute claim window
+    /** Date the licensed extract was cut. Claims accrue for MONTHS after
+     *  service, so the last stretch of any delivery is incomplete and every
+     *  member's final DTEND is truncated at the cut — without this term the
+     *  entire tail cohort reads as DISENROLLED and person-time is overstated
+     *  for anyone still enrolled at the end. Omitted = not declared, which the
+     *  emitters surface as a REVIEW note rather than assuming a value. */
+    dataCutDate?: string;        // ISO date
+    /** Months of claims run-out assumed complete before the cut. Follow-up is
+     *  censored at (dataCutDate - runout) so the immature tail is excluded
+     *  rather than counted as event-free. */
+    claimsRunoutMonths?: number;
     description?: string;
     /** Days per person-year for rate/person-year/CI arithmetic. The analyst's
      *  methodological choice — default 365.25 (mean Gregorian year, internally

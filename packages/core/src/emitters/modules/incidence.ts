@@ -34,6 +34,7 @@ import {
   INCLUDE_SETUP,
 } from "../sas-base";
 import { sasPrimarySqlColumns, exactPoissonSasLines, EXACT_POISSON_CI } from "../sas-primary";
+import { dataCutLimit } from "../parity";
 import {
   ageBandLabels,
   incidenceLimitations,
@@ -84,6 +85,9 @@ function sqlIncidence(ctx: SqlCtx, an: IncidenceRateAnalysis, suffix: string): S
   if (cens.includes("disenrollment")) terms.push("ep.episode_end");
   if (cens.includes("study_end")) terms.push(`DATE '${studyEnd}'`);
   if (cens.includes("max_followup") && maxFu != null) terms.push(d.offset("c.index_date", maxFu));
+  /* The DELIVERY's observation limit, independent of the protocol's. */
+  const cut = dataCutLimit(ctx.spec);
+  if (cut) terms.push(`DATE '${cut.date}'`);
   if (terms.length === 0) terms.push(`DATE '${studyEnd}'`); // always bound follow-up
   const appliedCensor = appliedCensorTerms(cens, maxFu);
   const adminCensor = terms.length === 1 ? terms[0] : `LEAST(${terms.join(", ")})`;
@@ -132,7 +136,7 @@ function sqlIncidence(ctx: SqlCtx, an: IncidenceRateAnalysis, suffix: string): S
   // machine-readable twin contract: the harness compares this stamp against the
   // SAS twin's — built from the values THIS builder consumed (see parity.ts)
   L.push(`-- ${parityStamp("incidence", incidenceParity(an, { daysPerYear: Y, censorTerms: appliedCensor, settingFilter: setting.stamped, strata }))}`);
-  const limits = incidenceLimitations(an, listSystem);
+  const limits = incidenceLimitations(an, listSystem, ctx.spec);
   if (limits.length > 0) {
     L.push(`-- REVIEW - spec options this program does not implement yet:`);
     for (const lim of limits) L.push(`--   * ${lim}`);
@@ -339,7 +343,7 @@ function sasIncidence(ctx: SasCtx, an: IncidenceRateAnalysis, num: string, suffi
     ...(sasSettingCond ? [sasSettingCond] : []),
     ...sasWindowConds(an.washout, "e"),
   ];
-  const limits = incidenceLimitations(an, listSystem);
+  const limits = incidenceLimitations(an, listSystem, ctx.spec);
   const label = an.label.replace(/"/g, "'");
 
   const lines: string[] = [

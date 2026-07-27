@@ -207,7 +207,7 @@ export const DEATH_CENSOR_NOTE =
   `all without the separately licensed Mortality Database. Add a death-date term ` +
   `before reporting any endpoint where death competes with the outcome`;
 
-export function incidenceLimitations(an: IncidenceRateAnalysis, listSystem: CodeSystem): string[] {
+export function incidenceLimitations(an: IncidenceRateAnalysis, listSystem: CodeSystem, spec?: StudySpec): string[] {
   const out: string[] = [];
   const od = an.outcomeDefinition;
   if (od.minClaims > 1)
@@ -229,6 +229,11 @@ export function incidenceLimitations(an: IncidenceRateAnalysis, listSystem: Code
     out.push(`ciMethod "${an.ciMethod}" is NOT implemented - the Byar exact-Poisson approximation is produced and labeled poisson_byar`);
   if (an.personTimeRule.censorAt.includes("death"))
     out.push(DEATH_CENSOR_NOTE);
+  // the delivery's observation limit, if the analyst declared one
+  if (spec) {
+    const cut = dataCutLimit(spec);
+    out.push(cut ? cut.note : NO_DATA_CUT_NOTE);
+  }
   for (const s of splitStratifiers(an.stratifyBy).unsupported)
     out.push(`stratifier "${s.id}" (${s.source.kind}-sourced) is NOT yet emitted - demographic axes only for now`);
   return out;
@@ -639,3 +644,37 @@ export function ascertainmentWindow(spec: StudySpec): AscertainmentWindow {
   const end = candidates.reduce((a, b) => (a > b ? a : b));
   return { start, end, reasons: [...new Set(reasons)] };
 }
+
+/* ------------------------------------------------------------------ *
+ *  Data cut / claims run-out
+ * ------------------------------------------------------------------ */
+
+/** Effective observation limit imposed by the DELIVERY, not the protocol.
+ *
+ *  Claims accrue for months after service, so the last stretch of any extract is
+ *  incomplete: events that happened are not in the data yet. Two things go wrong
+ *  if the window ignores it — every member still enrolled at the cut reads as
+ *  DISENROLLED (their final DTEND is truncated there), and the immature tail is
+ *  counted as event-free person-time, biasing every rate downward.
+ *
+ *  Returns null when the analyst has not declared a cut. The emitters then say
+ *  so in a REVIEW note rather than inventing a date. */
+export function dataCutLimit(spec: StudySpec): { date: string; note: string } | null {
+  const cut = spec.meta.dataCutDate;
+  if (!cut) return null;
+  const runout = spec.meta.claimsRunoutMonths ?? 0;
+  if (runout <= 0) {
+    return { date: cut, note: `follow-up censored at the data cut ${cut} (no claims run-out declared — the final months of the extract may be incomplete)` };
+  }
+  const d = new Date(`${cut}T00:00:00Z`);
+  d.setUTCMonth(d.getUTCMonth() - runout);
+  const eff = d.toISOString().slice(0, 10);
+  return { date: eff, note: `follow-up censored at ${eff} = data cut ${cut} minus ${runout} months of claims run-out, so the immature tail is excluded rather than counted as event-free` };
+}
+
+/** REVIEW note when no data cut is declared. */
+export const NO_DATA_CUT_NOTE =
+  `meta.dataCutDate is NOT declared, so follow-up is bounded only by the study period. ` +
+  `In a real extract the last months are incomplete: members still enrolled at the cut ` +
+  `look DISENROLLED and the immature tail counts as event-free person-time, biasing rates ` +
+  `downward. Declare dataCutDate (and claimsRunoutMonths) before reporting person-time results`;
