@@ -42,6 +42,11 @@ export interface AnalysisModule<A extends Analysis = Analysis> {
   analysisKind: A["kind"];
   /** PARITY stamp kind, e.g. "incidence" */
   stampKind: string;
+  /** Base name of the result table/file, e.g. "incidence" / "pointprev".
+   *  Declared once so BOTH emitters (and the suppression pass, which must find
+   *  every table carrying patient counts) derive the same name — a module whose
+   *  results the suppression pass cannot locate would ship unmasked cells. */
+  resultSlug: string;
   /** SQL twin. `suffix` disambiguates when a spec has several analyses of the
    *  same kind (applies to slug AND output table names). */
   sql(ctx: SqlCtx, an: A, suffix: string): SqlModuleFile;

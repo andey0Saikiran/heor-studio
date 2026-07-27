@@ -418,6 +418,7 @@ function sasPointPrevalence(ctx: SasCtx, an: PointPrevalenceAnalysis, num: strin
 export const pointPrevalenceModule: AnalysisModule<PointPrevalenceAnalysis> = {
   analysisKind: "point_prevalence",
   stampKind: "point_prevalence",
+  resultSlug: "pointprev",
   sql: sqlPointPrevalence,
   sas: sasPointPrevalence,
 };

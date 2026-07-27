@@ -471,6 +471,21 @@ export function migrateLegacyAnalyses(old: LegacyAnalysisRequest[]): Analysis[] 
   });
 }
 
+/** Small-cell suppression policy (BR-DEL-004).
+ *
+ *  The "suppress below 11" rule is a CMS Data Use Agreement requirement; no
+ *  equivalent published Merative threshold exists for MarketScan, where the
+ *  constraint is contractual and journal-driven. So the threshold is a study
+ *  CHOICE, and every released table states which rule was applied. */
+export interface SuppressionSpec {
+  /** default true — suppression must be opted OUT of, never into */
+  enabled?: boolean;
+  /** cells with 1..threshold-1 patients are masked (default 11) */
+  threshold?: number;
+  /** footnote text; defaults to a description of the threshold actually used */
+  ruleLabel?: string;
+}
+
 export interface StudySpec {
   meta: {
     title: string;
@@ -504,6 +519,10 @@ export interface StudySpec {
   comparisons: Comparison[];
   /** The analysis request list; references the catalogs above by id. */
   analyses: Analysis[];
+  /** Small-cell suppression policy for released tables (BR-DEL-004). Omitted
+   *  means ON at the default threshold — a disclosure control that has to be
+   *  switched on is one that gets forgotten. */
+  suppression?: SuppressionSpec;
 }
 
 /* ---------- helpers ---------- */

@@ -399,6 +399,7 @@ function sasCumulativeIncidence(ctx: SasCtx, an: CumulativeIncidenceAnalysis, nu
 export const cumulativeIncidenceModule: AnalysisModule<CumulativeIncidenceAnalysis> = {
   analysisKind: "cumulative_incidence",
   stampKind: "cumulative_incidence",
+  resultSlug: "cuminc",
   sql: sqlCumulativeIncidence,
   sas: sasCumulativeIncidence,
 };

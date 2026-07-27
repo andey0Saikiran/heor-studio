@@ -12,6 +12,7 @@
 import type { Analysis } from "../../spec/types";
 import { EMITTABLE_ANALYSIS_KINDS } from "../../spec/types";
 import type { AnalysisModule } from "./types";
+import { shapeFor } from "../suppression";
 import { incidenceModule } from "./incidence";
 import { pointPrevalenceModule } from "./point_prevalence";
 import { periodPrevalenceModule } from "./period_prevalence";
@@ -42,6 +43,21 @@ const SPINE_EMITTED_KINDS = new Set<Analysis["kind"]>(["attrition", "table1"]);
     if (!SPINE_EMITTED_KINDS.has(kind) && !registered.has(kind))
       throw new Error(
         `modules/registry: "${kind}" is declared emittable in spec/types.ts but has no registered module — readiness would approve an analysis the emitters silently drop.`
+      );
+  }
+}
+
+/* Every registered module produces a result table with patient counts, so every
+ * module's stamp kind MUST have a suppression shape — otherwise its results
+ * would be emitted with no disclosure control and nothing would say so. Same
+ * fail-loudly-at-load principle as the readiness check above, applied to
+ * compliance instead of correctness. */
+{
+  for (const [kind, mod] of Object.entries(ANALYSIS_MODULES)) {
+    const stamp = (mod as AnalysisModule).stampKind;
+    if (!shapeFor(stamp))
+      throw new Error(
+        `modules/registry: "${kind}" (stamp "${stamp}") has no entry in SUPPRESSION_SHAPES (emitters/suppression.ts) — its results would ship without small-cell suppression (BR-DEL-004).`
       );
   }
 }

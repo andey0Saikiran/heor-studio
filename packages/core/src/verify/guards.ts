@@ -19,6 +19,8 @@ import { checkSpecShape } from "../spec/shape";
 import { emitSql } from "../emitters/sql";
 import { emitSas as emitSasFn } from "../emitters/sas";
 import { planBundle } from "../bundle";
+import { DEFAULT_SUPPRESSION_THRESHOLD } from "../emitters/suppression";
+import { moduleAnalyses } from "../emitters/modules/registry";
 import { normalizeSpec } from "../extract/anthropic";
 import { DEFAULT_EMIT_OPTIONS } from "../emitters/types";
 import { GOLD_A_SPEC, GOLD_A_OPTS } from "./fixture";
@@ -220,6 +222,45 @@ export function verifySilenceGuards(): Check[] {
       !/unascertainable/i.test(all),
       !/unascertainable/i.test(all) ? "wording matches BR-LIM-002" : "found 'unascertainable' — contradicts BR-LIM-002",
     );
+  }
+
+  /* 3f. Suppression is ON BY DEFAULT and reaches every result table.
+     A disclosure control that must be switched on is one that gets forgotten,
+     and a control that silently skips a table is worse than none. */
+  {
+    const spec: StudySpec = JSON.parse(JSON.stringify(GOLD_A_SPEC));
+    delete spec.suppression; // no policy stated at all
+    const sqlFiles = emitSql(spec, "postgres", GOLD_A_OPTS);
+    const supFile = sqlFiles.find((f) => /suppression/i.test(f.path));
+    push(
+      "guard: suppression is emitted by DEFAULT (no spec field needed)",
+      !!supFile,
+      supFile ? `${supFile.path} emitted at threshold ${DEFAULT_SUPPRESSION_THRESHOLD}` : "no suppression program emitted",
+    );
+    if (supFile) {
+      // every module result table AND table1 must get a _released twin
+      const expected = moduleAnalyses(spec.analyses).length + (spec.analyses.some((a) => a.enabled && a.kind === "table1") ? 1 : 0);
+      const releasedCount = (supFile.content.match(/_released AS/g) ?? []).length;
+      push(
+        "guard: every result table gets a _released twin",
+        releasedCount === expected,
+        `expected ${expected}, emitted ${releasedCount}`,
+      );
+      push(
+        "guard: suppression states the rule on the released rows",
+        /AS suppression_rule/.test(supFile.content),
+        "suppression_rule column present",
+      );
+    }
+    // SAS twin must emit one too
+    const sasSup = emitSasFn(spec, GOLD_A_OPTS).find((f) => /suppression/i.test(f.path));
+    push("guard: SAS emits the suppression twin", !!sasSup, sasSup?.path ?? "missing");
+
+    // opting OUT must be explicit and must actually take effect
+    const off: StudySpec = JSON.parse(JSON.stringify(GOLD_A_SPEC));
+    off.suppression = { enabled: false };
+    const noSup = emitSql(off, "postgres", GOLD_A_OPTS).some((f) => /suppression/i.test(f.path));
+    push("guard: suppression can be explicitly disabled", !noSup, noSup ? "still emitted" : "omitted when enabled:false");
   }
 
   /* 4. bundle layout matches the README the client reads */

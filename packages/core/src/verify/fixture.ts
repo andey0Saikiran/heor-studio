@@ -232,6 +232,32 @@ export const EXPECTED = {
     rate: 689.48, // 4 * 1000 * 365.25 / 2119
     ci: [185.49, 1765.21] as [number, number],
   },
+  /* Small-cell suppression (BR-DEL-004), threshold 3, on the gold incidence
+   * table. Hand-derived from the rows above:
+   *   Overall        n=3 d=8 -> both >= 3, VISIBLE
+   *   Index year/2019 n=3 d=8 -> VISIBLE
+   *   Sex/Male        n=1     -> primary (count < 3)
+   *   Sex/Female      n=2     -> primary (count < 3)      [group already has 2 masked]
+   *   Age/65+         n=0 d=1 -> primary (DENOMINATOR < 3; a zero count is not
+   *                              itself disclosive, but "0 of 1" identifies the member)
+   *   Age/55-64       n=0 d=4 -> survives
+   *   Age/45-54       n=3 d=3 -> survives on its own, but its group has exactly ONE
+   *                              masked cell, so it is masked COMPLEMENTARILY — it is
+   *                              the smallest NON-ZERO survivor (masking the zero
+   *                              55-64 instead would leave 65+ recoverable). */
+  suppressionThreshold3: {
+    visible: [
+      ["Overall", "Overall"],
+      ["Index year", "2019"],
+      ["Age band", "55-64"],
+    ] as Array<[string, string]>,
+    masked: [
+      ["Sex", "Male"],
+      ["Sex", "Female"],
+      ["Age band", "65+"],
+      ["Age band", "45-54"],
+    ] as Array<[string, string]>,
+  },
   /* Point prevalence — Wilson score CI (z=1.96), hand-derived on the frozen
    * fixture. setting "outpatient" is APPLIED, so P05's inpatient AE is excluded
    * (the numerator uses only the 5 outpatient E119 events). */

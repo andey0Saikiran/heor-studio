@@ -40,6 +40,7 @@ import type {
 } from "./types";
 import { assertSafeIdent, assertSafeNaming } from "./types";
 import { q, oneLine, makeDialect, windowConds, describeWindow } from "./sql-base";
+import { suppressionPolicy, suppressionSqlFor, type SuppressionTarget } from "./suppression";
 import type { Ctx } from "./sql-base";
 import { moduleAnalyses } from "./modules/registry";
 
@@ -1371,14 +1372,47 @@ export const emitSql: SqlEmitter = (spec, dialect, opts) => {
   // 07+ analysis modules (one file per enabled analysis), dispatched through
   // the module registry in spec order. The suffix (applied to slug AND output
   // table names) disambiguates several analyses of the same kind.
+  // Result tables that carry patient counts, for the suppression pass below.
+  const suppressTargets: SuppressionTarget[] = [];
+  if (spec.analyses.some((a) => a.enabled && a.kind === "table1")) {
+    suppressTargets.push({ table: `${ctx.wp}_table1`, shapeKey: "table1", label: "Baseline characteristics (Table 1)" });
+  }
+
+  let lastNum = 6;
   moduleAnalyses(spec.analyses).forEach(({ an, mod, multi }, i) => {
     const suffix = multi ? `_${an.id.toLowerCase().replace(/[^a-z0-9]+/g, "_")}` : "";
     const num = String(7 + i).padStart(2, "0");
+    lastNum = 7 + i;
     const f = mod.sql(ctx, an as never, suffix);
     // the module returns a bare title; the emitter owns the file number so the
     // displayed title always matches the actual NN_slug filename
     files.push(mk(num, f.slug, `${num} ${f.title}`, f.subtitle, [], f.extra, f.body));
+    suppressTargets.push({ table: `${ctx.wp}_${f.slug}`, shapeKey: mod.stampKind, label: `${an.label} (${an.kind})` });
   });
+
+  /* Small-cell suppression — the last step, because it reads every result table
+   * the study produced (BR-DEL-004). */
+  const policy = suppressionPolicy(spec);
+  if (policy.enabled && suppressTargets.length > 0) {
+    const num = String(lastNum + 1).padStart(2, "0");
+    const body: string[] = [];
+    for (const t of suppressTargets) body.push(...suppressionSqlFor(t, policy));
+    files.push(
+      mk(
+        num,
+        "suppression",
+        `${num} Small-cell suppression (releasable tables)`,
+        `Masks cells below the disclosure threshold and writes <table>_released.`,
+        [],
+        [
+          `-- Rule applied: ${policy.ruleLabel}.`,
+          `-- Reads the result tables built above; writes one *_released table each.`,
+          `-- The unsuppressed originals stay for YOUR QC and must NOT be released.`,
+        ],
+        body.join("\n"),
+      ),
+    );
+  }
 
   return files;
 };

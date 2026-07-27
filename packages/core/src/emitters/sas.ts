@@ -39,6 +39,7 @@ import {
 } from "./sas-base";
 import type { Ctx, ListKind, PulledList, SiteNaming } from "./sas-base";
 import { moduleAnalyses } from "./modules/registry";
+import { suppressionPolicy, suppressionSasFor, type SuppressionTarget } from "./suppression";
 
 /* ================================================================== *
  *  small utilities
@@ -1636,11 +1637,54 @@ export const emitSas: SasEmitter = (spec: StudySpec, opts: EmitOptions): Generat
 
   // 080+ analysis modules (one program per enabled analysis), dispatched
   // through the module registry in spec order.
+  const suppressTargets: SuppressionTarget[] = [];
+  let lastIdx = -1;
   moduleAnalyses(spec.analyses).forEach(({ an, mod, multi }, i) => {
     const num = String((8 + i) * 10).padStart(3, "0"); // 080, 090, 100, ...
     const suffix = multi ? `_${sasName(an.id).toLowerCase()}` : "";
     files.push(mod.sas(ctx, an as never, num, suffix));
+    lastIdx = i;
+    suppressTargets.push({
+      table: ctx.tbl(`${num}_${mod.resultSlug}${suffix}`),
+      shapeKey: mod.stampKind,
+      label: `${an.label} (${an.kind})`,
+    });
   });
+
+  /* Small-cell suppression (BR-DEL-004) — twin of the SQL pass. */
+  const policy = suppressionPolicy(spec);
+  if (policy.enabled && suppressTargets.length > 0) {
+    const num = String((8 + lastIdx + 1) * 10).padStart(3, "0");
+    const lines: string[] = [
+      ...header(spec, `${num}_suppression.sas`, [
+        `Small-cell suppression: mask cells below the disclosure threshold and`,
+        `write a releasable <dataset>_released beside each result table.`,
+        `Rule: ${policy.ruleLabel}.`,
+      ]),
+      ...INCLUDE_SETUP,
+      `/*----------------------------------------------------------------------------`,
+      `  WHICH TABLE MAY LEAVE THIS ENVIRONMENT`,
+      `  The *_released data sets below are the shareable ones. The unsuppressed`,
+      `  originals keep their exact computed values for YOUR OWN QC and must not`,
+      `  be released, pasted into a deck, or sent to a client.`,
+      ``,
+      `  LIMITATION - Table 1 (070_baseline.sas) is produced as a PRINTED report,`,
+      `  not a data set, so it is NOT masked here. Apply the same rule by hand to`,
+      `  its small cells before releasing it. (The SQL twin does mask its Table 1,`,
+      `  because there it is materialized as a table.)`,
+      `----------------------------------------------------------------------------*/`,
+      ``,
+    ];
+    suppressTargets.forEach((t, i) => {
+      lines.push(...suppressionSasFor(t, policy, `work._${num}_s${i + 1}`));
+    });
+    files.push({
+      path: `sas/${num}_suppression.sas`,
+      language: "sas",
+      title: `${num} Small-cell suppression`,
+      content: lines.join("\n"),
+    });
+  }
 
   return files;
 };

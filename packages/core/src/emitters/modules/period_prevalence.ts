@@ -415,6 +415,7 @@ function sasPeriodPrevalence(ctx: SasCtx, an: PeriodPrevalenceAnalysis, num: str
 export const periodPrevalenceModule: AnalysisModule<PeriodPrevalenceAnalysis> = {
   analysisKind: "period_prevalence",
   stampKind: "period_prevalence",
+  resultSlug: "periodprev",
   sql: sqlPeriodPrevalence,
   sas: sasPeriodPrevalence,
 };

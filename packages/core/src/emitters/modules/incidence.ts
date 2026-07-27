@@ -537,6 +537,7 @@ function appliedCensorTerms(censorAt: readonly string[], maxFu: number | null | 
 export const incidenceModule: AnalysisModule<IncidenceRateAnalysis> = {
   analysisKind: "incidence_rate",
   stampKind: "incidence",
+  resultSlug: "incidence",
   sql: sqlIncidence,
   sas: sasIncidence,
 };

@@ -103,6 +103,67 @@ export async function verifySettingFilterControl(): Promise<Check[]> {
   return out;
 }
 
+/** Small-cell suppression (BR-DEL-004), executed end to end.
+ *
+ *  Runs the gold spec with threshold 3 and asserts the RELEASED table masks
+ *  exactly the cells it should — including the derivation-aware complementary
+ *  mask, which is the part that is easy to get subtly wrong and impossible to
+ *  notice by eye. Also asserts the originals are left intact for QC, so the
+ *  analyst can still see real numbers while only the *_released table travels. */
+export async function verifySuppression(): Promise<Check[]> {
+  const spec: StudySpec = JSON.parse(JSON.stringify(GOLD_A_SPEC));
+  spec.suppression = { enabled: true, threshold: 3 };
+  const { db, ok } = await seedAndRun(spec, GOLD_A_OPTS);
+  const out: Check[] = [];
+  const push = (name: string, cond: boolean, detail: string) =>
+    out.push({ name, status: cond ? "pass" : "fail", detail });
+  if (!ok) return [{ name: "suppression pass executes", status: "fail", detail: "execution failed" }];
+
+  const released = await rows<{ stratifier: string; stratum: string; patients: number | null; denominator: number | null; suppressed: number; suppression_rule: string }>(
+    db,
+    "SELECT stratifier, stratum, patients, denominator, suppressed, suppression_rule FROM tz_study_incidence_released ORDER BY stratifier, stratum",
+  );
+  const want = EXPECTED.suppressionThreshold3;
+  push("suppression: released table has every source row", released.length === EXPECTED.incidenceRowCount,
+    `expected ${EXPECTED.incidenceRowCount}, got ${released.length}`);
+
+  const find = (s: string, st: string) => released.find((r) => r.stratifier === s && r.stratum === st);
+  for (const [s, st] of want.masked) {
+    const r = find(s, st);
+    push(`suppression: ${s}/${st} is masked`,
+      !!r && r.suppressed === 1 && r.patients === null && r.denominator === null,
+      r ? `suppressed=${r.suppressed} patients=${r.patients} denominator=${r.denominator}` : "row missing");
+  }
+  for (const [s, st] of want.visible) {
+    const r = find(s, st);
+    push(`suppression: ${s}/${st} stays visible`,
+      !!r && r.suppressed === 0 && r.patients !== null,
+      r ? `suppressed=${r.suppressed} patients=${r.patients}` : "row missing");
+  }
+  push("suppression: every released row carries the rule label",
+    released.every((r) => typeof r.suppression_rule === "string" && r.suppression_rule.includes("3")),
+    released[0]?.suppression_rule ?? "none");
+
+  // the unsuppressed original must survive untouched for the analyst's QC
+  const raw = await scalar<number>(db, "SELECT count(*)::int FROM tz_study_incidence WHERE patients IS NULL");
+  push("suppression: original table is left intact for QC", raw === 0, `${raw} NULL patient counts in the source table`);
+
+  /* A masked group must not be reconstructible: at least TWO cells masked in any
+   * group that has a masked cell (or the whole group is a single row). This is
+   * the property complementary suppression exists to guarantee. */
+  const weak = await rows<{ stratifier: string; n_masked: number; n_cells: number }>(
+    db,
+    `SELECT stratifier, SUM(suppressed)::int AS n_masked, COUNT(*)::int AS n_cells
+     FROM tz_study_incidence_released GROUP BY stratifier
+     HAVING SUM(suppressed) = 1 AND COUNT(*) > 1`,
+  );
+  push("suppression: no group is left with exactly one masked cell (derivation-aware)",
+    weak.length === 0,
+    weak.length === 0 ? "every masked group has >= 2 masked cells" : weak.map((w) => `${w.stratifier}: 1 of ${w.n_cells}`).join(", "));
+
+  return out;
+}
+
 /** Full Gold Case A verification: execute + assert the hand-computed spine
  *  ground truth + invariants. (Descriptive-epi value checks activate once the
  *  incidence module lands in Step 4.) */

@@ -196,6 +196,64 @@ export function mutationChecks(): Check[] {
 
   checks.push(...sasStructureMutationChecks());
   checks.push(...spineMutationChecks());
+  checks.push(...suppressionMutationChecks());
+  return checks;
+}
+
+/** Corruptions of the SUPPRESSION pass. A disclosure control that quietly stops
+ *  working is the worst failure in this file's remit: the output still looks
+ *  finished, and the leak is invisible until someone else finds it. */
+function suppressionMutationChecks(): Check[] {
+  const checks: Check[] = [];
+  const sqlFiles = emitSql(GOLD_A_SPEC, "postgres", GOLD_A_OPTS);
+  const sup = sqlFiles.find((f) => /suppression/i.test(f.path));
+  if (!sup) return [{ name: "suppression mutation", status: "fail", detail: "no suppression program emitted" }];
+
+  const cases: Array<{ name: string; apply: (t: string) => string; detect: (t: string) => boolean }> = [
+    {
+      name: "threshold lowered to 1 (nothing would ever be masked)",
+      apply: (t) => t.replace(/< 11\b/g, "< 1"),
+      // a threshold of 1 can never fire: counts are integers, so n > 0 AND n < 1 is empty
+      detect: (t) => /< 1\b(?!\d)/.test(t),
+    },
+    {
+      name: "complementary (derivation-aware) clause removed",
+      // /g: the clause is emitted once per result table, and a real regression
+      // in the generator would drop every one of them — removing a single
+      // occurrence leaves the others and proves nothing (the same
+      // partial-replacement trap the D3 spine mutation fell into).
+      apply: (t) => t.replace(/WHEN g\.n_supp = 1 AND[^\n]*\n/g, ""),
+      detect: (t) => !/n_supp = 1 AND/.test(t),
+    },
+    {
+      name: "masking turned into a pass-through (values no longer nulled)",
+      apply: (t) => t.replace(/CASE WHEN supp = 1 THEN NULL ELSE (\w+) END AS \1/g, "$1"),
+      detect: (t) => !/THEN NULL ELSE/.test(t),
+    },
+    {
+      name: "denominator dropped from the small-cell test",
+      apply: (t) => t.replace(/\s*OR \(r\.denominator > 0 AND r\.denominator < \d+\)/g, ""),
+      detect: (t) => !/OR \(r\.denominator/.test(t),
+    },
+  ];
+
+  for (const c of cases) {
+    const mutated = c.apply(sup.content);
+    if (mutated === sup.content) {
+      checks.push({
+        name: `suppression mutation: ${c.name}`,
+        status: "fail",
+        detail: "mutation pattern did not match — vacuous test; update the pattern",
+      });
+      continue;
+    }
+    const caught = c.detect(mutated) && !c.detect(sup.content);
+    checks.push({
+      name: `suppression mutation caught: ${c.name}`,
+      status: caught ? "pass" : "fail",
+      detail: caught ? "the emitted suppression program no longer has the property it must have" : "NOT CAUGHT",
+    });
+  }
   return checks;
 }
 
