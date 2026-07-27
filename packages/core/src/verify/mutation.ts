@@ -33,6 +33,7 @@ import {
 } from "./fingerprint";
 import { sasStructureChecks } from "./sas-lint";
 import { GOLD_A_SPEC, GOLD_A_OPTS } from "./fixture";
+import type { StudySpec } from "../spec/types";
 import type { Check } from "./run";
 
 interface Mutation {
@@ -216,6 +217,7 @@ export function mutationChecks(): Check[] {
     });
   }
 
+  checks.push(...sasPrimaryMutationChecks());
   checks.push(...sasStructureMutationChecks());
   checks.push(...spineMutationChecks());
   checks.push(...suppressionMutationChecks());
@@ -342,6 +344,68 @@ function spineMutationChecks(): Check[] {
         : `NOT CAUGHT — spine fingerprint is blind (${JSON.stringify(base())})`,
     });
   }
+  return checks;
+}
+
+/** The SAS-PRIMARY contract must be enforceable in BOTH directions:
+ *  a column that SQL is supposed to leave NULL must not be computed there, and
+ *  a column SAS is supposed to compute must not go missing. Without these two
+ *  mutations the contract is just a comment — the exemption from numeric parity
+ *  would become a hole through which unverified numbers ship. */
+function sasPrimaryMutationChecks(): Check[] {
+  const checks: Check[] = [];
+  const spec: StudySpec = JSON.parse(JSON.stringify(GOLD_A_SPEC));
+  const inc = spec.analyses.find((a) => a.kind === "incidence_rate");
+  if (!inc || inc.kind !== "incidence_rate") {
+    return [{ name: "sas-primary mutations", status: "fail", detail: "no incidence analysis in the gold spec" }];
+  }
+  inc.ciMethod = "poisson_exact"; // activates the SAS-primary columns
+
+  const sqlProg = emitSql(spec, "postgres", GOLD_A_OPTS).find((f) => /incidence/.test(f.path))?.content ?? "";
+  const sasFiles = emitSas(spec, GOLD_A_OPTS);
+  const sasProg = sasFiles.find((f) => /incidence/.test(f.path))?.content ?? "";
+  const setup = sasFiles.find((f) => /setup/i.test(f.path))?.content ?? "";
+
+  // baseline: the contract must hold on the UNMUTATED emission
+  const baseSql = fingerprint("incidence", "sql", sqlProg);
+  const baseSas = fingerprint("incidence", "sas", sasProg, setup);
+  checks.push({
+    name: "sas-primary: contract holds on clean emission",
+    status: baseSql.exact_ci_null_in_sql === "yes" && baseSas.exact_ci_computed_in_sas === "yes" ? "pass" : "fail",
+    detail: `sql null=${baseSql.exact_ci_null_in_sql}, sas computed=${baseSas.exact_ci_computed_in_sas}`,
+  });
+
+  // direction 1: SQL fakes the number instead of leaving it NULL
+  const faked = sqlProg.replace(
+    /CAST\(NULL AS DOUBLE PRECISION\) AS ci_low_exact/i,
+    "ROUND(ci_low * 0.98, 2) AS ci_low_exact",
+  );
+  const fakedChanged = faked !== sqlProg;
+  const fakedFp = fingerprint("incidence", "sql", faked);
+  checks.push({
+    name: "sas-primary mutation caught: SQL computes a guess instead of NULL",
+    status: fakedChanged && fakedFp.exact_ci_null_in_sql !== "yes" ? "pass" : "fail",
+    detail: !fakedChanged
+      ? "mutation pattern did not match — vacuous test"
+      : fakedFp.exact_ci_null_in_sql !== "yes"
+        ? "a plausible-looking SQL value is rejected (it would be wrong AND labeled right)"
+        : "NOT CAUGHT — SQL may fabricate a SAS-primary column",
+  });
+
+  // direction 2: the SAS statistic is deleted
+  const stripped = sasProg.replace(/gaminv\(/gi, "0*(");
+  const strippedChanged = stripped !== sasProg;
+  const strippedFp = fingerprint("incidence", "sas", stripped, setup);
+  checks.push({
+    name: "sas-primary mutation caught: SAS exact statistic deleted",
+    status: strippedChanged && strippedFp.exact_ci_computed_in_sas !== "yes" ? "pass" : "fail",
+    detail: !strippedChanged
+      ? "mutation pattern did not match — vacuous test"
+      : strippedFp.exact_ci_computed_in_sas !== "yes"
+        ? "a SAS-primary column that stops being computed is detected"
+        : "NOT CAUGHT — the SAS side could quietly stop computing it",
+  });
+
   return checks;
 }
 

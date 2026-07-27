@@ -218,7 +218,14 @@ export function incidenceLimitations(an: IncidenceRateAnalysis, listSystem: Code
     out.push(`diagnosisPosition="primary" is NOT yet applied - any-position diagnoses count (the events spine does not record claim position yet)`);
   if (an.recurrence !== "first_only")
     out.push(`recurrence="all_events" is NOT implemented - FIRST-event incidence is produced`);
-  if (an.ciMethod !== "poisson_byar")
+  if (an.ciMethod === "poisson_exact")
+    out.push(
+      `ciMethod "poisson_exact": the SQL twin reports Byar's closed form (labeled poisson_byar) because ` +
+      `warehouse SQL cannot invert the Poisson CDF. The EXACT gamma interval IS produced, in the SAS twin, ` +
+      `as ci_low_exact / ci_high_exact (SAS-PRIMARY: NULL in SQL by contract, never approximated there). ` +
+      `Report the exact interval from the SAS output; the two agree closely except at very small counts`
+    );
+  else if (an.ciMethod !== "poisson_byar")
     out.push(`ciMethod "${an.ciMethod}" is NOT implemented - the Byar exact-Poisson approximation is produced and labeled poisson_byar`);
   if (an.personTimeRule.censorAt.includes("death"))
     out.push(DEATH_CENSOR_NOTE);

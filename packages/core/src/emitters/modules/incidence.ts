@@ -33,6 +33,7 @@ import {
   windowConds as sasWindowConds,
   INCLUDE_SETUP,
 } from "../sas-base";
+import { sasPrimarySqlColumns, exactPoissonSasLines, EXACT_POISSON_CI } from "../sas-primary";
 import {
   ageBandLabels,
   incidenceLimitations,
@@ -58,6 +59,11 @@ function sqlIncidence(ctx: SqlCtx, an: IncidenceRateAnalysis, suffix: string): S
   const listSystem = findCodeList(spec, clid)?.system ?? "icd10cm";
   const setting = outcomeSettingPlan(an.outcomeDefinition, listSystem);
   const M = an.rateMultiplier;
+  /* The analyst asked for an EXACT Poisson interval. SQL cannot invert the
+   * Poisson CDF, so under the SAS-primary contract the exact limits are emitted
+   * as NULL here and genuinely computed in the SAS twin — declared and labeled
+   * rather than silently downgraded to Byar. */
+  const wantsExact = an.ciMethod === "poisson_exact";
   // Rendered as a DECIMAL literal (e.g. "365.0") so the rate arithmetic is
   // numeric — an integer constant would trigger integer division (451 vs 451.55).
   const Y = renderDaysPerYear(spec);
@@ -203,6 +209,15 @@ function sqlIncidence(ctx: SqlCtx, an: IncidenceRateAnalysis, suffix: string): S
   // labeled with the method actually computed (Byar), never the merely-requested
   // one — a mislabeled statistic is worse than a visibly-substituted one
   L.push(`       'poisson_byar' AS ci_method`);
+  if (wantsExact) {
+    L.push(`       ,`);
+    for (const line of sasPrimarySqlColumns(EXACT_POISSON_CI)) {
+      L.push(line.startsWith("--") ? `       ${line}` : `       ${line}`);
+    }
+    // trim the trailing comma the helper leaves on its last value column
+    const last = L.length - 1;
+    L[last] = L[last].replace(/,\s*$/, "");
+  }
   L.push(`FROM summ;`);
   L.push("");
   L.push(`-- REVIEW: incidence rate per ${M} person-years, Overall + per stratum.`);
@@ -256,6 +271,11 @@ function sasIncidence(ctx: SasCtx, an: IncidenceRateAnalysis, num: string, suffi
     setting.enforce === "outpatient" ? `and e.setting = 'OP'` :
     setting.enforce === "inpatient" ? `and e.setting = 'IP'` : null;
   const M = an.rateMultiplier;
+  /* The analyst asked for an EXACT Poisson interval. SQL cannot invert the
+   * Poisson CDF, so under the SAS-primary contract the exact limits are emitted
+   * as NULL here and genuinely computed in the SAS twin — declared and labeled
+   * rather than silently downgraded to Byar. */
+  const wantsExact = an.ciMethod === "poisson_exact";
   const cens = an.personTimeRule.censorAt;
   const maxFu = an.personTimeRule.maxFollowupDays;
 
@@ -503,7 +523,7 @@ function sasIncidence(ctx: SasCtx, an: IncidenceRateAnalysis, num: string, suffi
     ``,
     `data ${outT};`,
     `  set work._${num}_summ;`,
-    `  length measure $20 ci_method $16;`,
+    `  length measure $20 ci_method $16${wantsExact ? " ci_low_exact_method $20" : ""};`,
     `  measure   = 'incidence';`,
     `  /* labeled with the method actually computed, never the merely-requested one */`,
     `  ci_method = 'poisson_byar';`,
@@ -522,6 +542,7 @@ function sasIncidence(ctx: SasCtx, an: IncidenceRateAnalysis, num: string, suffi
     `    ci_high = .;`,
     `  end;`,
     `  drop _byar_low _byar_high;`,
+    ...(wantsExact ? exactPoissonSasLines(M, "&days_per_year.") : []),
     `run;`,
     ``,
     `/* same presentation order as the SQL twin's REVIEW query */`,
@@ -532,7 +553,7 @@ function sasIncidence(ctx: SasCtx, an: IncidenceRateAnalysis, num: string, suffi
     `title "Incidence rate per ${M} person-years: ${label}";`,
     `proc print data=${outT} noobs;`,
     `  var measure stratifier stratum patients denominator person_days person_years`,
-    `      rate_per_1000py ci_low ci_high ci_method;`,
+    `      rate_per_1000py ci_low ci_high ci_method${wantsExact ? " ci_low_exact ci_high_exact" : ""};`,
     `run;`,
     ``
   );

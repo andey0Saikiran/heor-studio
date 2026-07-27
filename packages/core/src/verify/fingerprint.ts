@@ -167,6 +167,15 @@ function sqlFingerprint(kind: string, raw: string): Fingerprint {
       put(fp, "strictly_after_index", /a\.event_date\s*>\s*c\.index_date/i.test(sql) ? "yes" : "no");
       // Byar exponents, in order — a single altered cube changes the list.
       put(fp, "byar_exponents", sqlPowerExponents(sql));
+      /* SAS-PRIMARY contract: if the exact columns are present at all, SQL must
+       * emit them as NULL. A SQL twin that computes a plausible-looking exact
+       * limit is worse than one that omits it, because the number would be
+       * wrong and labeled right. */
+      if (/ci_low_exact/i.test(sql)) {
+        put(fp, "exact_ci_null_in_sql",
+          /CAST\(NULL AS [^)]*\)\s*AS ci_low_exact/i.test(sql) && /CAST\(NULL AS [^)]*\)\s*AS ci_high_exact/i.test(sql)
+            ? "yes" : "no");
+      }
       break;
     }
     case "cumulative_incidence": {
@@ -242,6 +251,11 @@ function sasFingerprint(kind: string, rawSas: string, setup: string): Fingerprin
       put(fp, "max_followup_days", grab(sas, [/min\([^;]*?index_date\s*\+\s*(\d+)\s*\)\s*as admin_censor/i]));
       put(fp, "strictly_after_index", /svcdate\s*>\s*a\.index_date/i.test(sas) ? "yes" : "no");
       put(fp, "byar_exponents", exponents(sas, /\*\*\s*(\d+)/g));
+      // SAS-PRIMARY contract: the exact limits must be genuinely computed here
+      if (/ci_low_exact/i.test(sas)) {
+        put(fp, "exact_ci_computed_in_sas",
+          /gaminv\(/i.test(sas) && /ci_low_exact\s*=/i.test(sas) && /ci_high_exact\s*=/i.test(sas) ? "yes" : "no");
+      }
       break;
     }
     case "cumulative_incidence": {
