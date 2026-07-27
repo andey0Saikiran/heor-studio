@@ -62,7 +62,13 @@ Those documents are accurate about what was *built*; they are wrong about what m
   tables), calendar trend (needs a multi-year fixture + p-value policy), and all
   of P2/P3/P4.
 
-**Next up: standardization + calendar trend, then P2 economics.**
+**The full 69-analysis plan now lives in `docs/ANALYSIS-BUILD-PLAN.md`** (9-agent
+workflow + 2 adversarial reviews). Headline: the 59 remaining analyses sit on ~12
+shared substrates, and 10 of the regression rows are ONE emitter. Wave 0 (the
+SAS-primary contract + fingerprint-coverage guard) is the first build and moves no
+pinned number.
+
+**Next up: Wave 0 of the analysis build plan.**
 
 ---
 
