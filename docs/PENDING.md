@@ -8,6 +8,24 @@ file:line evidence in the audit record._
 **This supersedes the priority order in `STATUS.md` and `NIGHT-REPORT-2026-07-26.md`.**
 Those documents are accurate about what was *built*; they are wrong about what matters *next*.
 
+## Progress (2026-07-26, same day)
+
+- **✅ Wave 0 — make silence impossible** (commit `919c32d`). Enabled-but-unemittable
+  analyses now block readiness; `run_verification` returns `inconclusive` (not `passed`) on
+  a zero-cohort spec; `tag`/naming are identifier-validated in both emitters + the MCP
+  boundary; a new `spec/shape.ts` structurally validates untrusted JSON; two comment-escape
+  injection vectors found by adversarial review (`meta.version` → SQL, `provenance.model` →
+  SAS) are closed at both the emitter and the boundary; bundle `placePath` fixed; docs
+  corrected (206→218 checks). 12 silence guards + 3 smoke assertions pin it.
+- **✅ Wave 1 — connect the ends** (commits `0f173fd` core, `aae0353` UI). The extractor
+  schema + prompt + `normalizeSpec` now produce the four verified descriptive-epi kinds
+  (was: legacy 7 types, everything but attrition/table1 force-disabled); the MCP schema
+  resource follows automatically; the web `SpecReview` has an editable card per analysis +
+  an add-analysis control; the demo spec ships two real descriptive-epi analyses. Browser-
+  verified end to end. Pinned by new "extractor reaches the modules" guards.
+
+**Next up: Wave 2 (make the verifier able to fail) and Wave 3 (the 12 confirmed defects).**
+
 ---
 
 ## The three findings that reorder everything
@@ -167,16 +185,18 @@ deliverables (washout attrition addendum, reusable `{tag}_at_risk` table, toggle
 
 ## Proposed sequence
 
-**Wave 0 — Make silence impossible** *(small, highest leverage)*
+**Wave 0 — Make silence impossible** ✅ DONE (`919c32d`)
 Block enabled-but-unregistered analyses in readiness; gate `run_verification` on a non-empty
-cohort; sanitize `tag`/prefix into SQL identifiers; make `validate_spec` actually normalize;
+cohort; sanitize `tag`/prefix into SQL identifiers; make `validate_spec` actually validate;
 correct the scope of the "machine-verified" claim in the docs and the bundle README.
+_(Plus two injection vectors closed that the adversarial diff-review found.)_
 
-**Wave 1 — Connect the ends** *(makes the product real)*
-Replace `SPEC_JSON_SCHEMA` with the real analysis-layer union (fixes the extractor *and* the
-MCP schema resource); rewrite `normalizeSpec`'s analysis handling; build analysis editor cards
-+ an add-analysis control in `SpecReview`; put a descriptive-epi analysis in the demo spec;
-run one real protocol on a funded key and check in the golden extraction.
+**Wave 1 — Connect the ends** ✅ DONE (`0f173fd`, `aae0353`)
+Replaced `SPEC_JSON_SCHEMA` with the real analysis-layer union (fixed the extractor *and* the
+MCP schema resource); rewrote `normalizeSpec`'s analysis handling; built analysis editor cards
++ an add-analysis control in `SpecReview`; put descriptive-epi analyses in the demo spec.
+_Remaining sub-item: run one real protocol on a funded key and check in the golden extraction
+(needs a key — deferred to an interactive/funded session)._
 
 **Wave 2 — Make the verifier able to fail**
 Derive each parity stamp by parsing that language's own emitted text; add a Snowflake parse
