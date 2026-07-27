@@ -8,6 +8,7 @@
 import { seedAndRun, scalar, rows } from "./engine";
 import { runInvariants, type InvariantResult } from "./invariants";
 import { sasSqlParityChecks } from "./parity";
+import { mutationChecks } from "./mutation";
 import { GOLD_A_SPEC, GOLD_A_OPTS, EXPECTED } from "./fixture";
 import type { StudySpec, EmitOptions } from "../index";
 
@@ -270,6 +271,12 @@ export async function verifyGoldA(): Promise<VerificationResult> {
   // SAS↔SQL twin parity: the SAS twin inherits this run's ground truth only if
   // it consumed identical parameters and carries the same arithmetic.
   checks.push(...sasSqlParityChecks(GOLD_A_SPEC, GOLD_A_OPTS));
+
+  // Mutation tests: corrupt the emitted code and assert the parity checks above
+  // actually go red. Without this, a green suite proves nothing about its own
+  // sensitivity — which is exactly how the stamp-only checks stayed green while
+  // being incapable of failing.
+  checks.push(...mutationChecks());
 
   const anyFail = !ok || checks.some((c) => c.status === "fail") || invariants.some((i) => i.status === "fail");
   return { status: anyFail ? "failed" : "passed", execution: steps, checks, invariants };

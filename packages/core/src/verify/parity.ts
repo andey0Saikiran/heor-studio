@@ -20,6 +20,15 @@ import { emitSql } from "../emitters/sql";
 import { emitSas } from "../emitters/sas";
 import { parseParityStamps } from "../emitters/parity";
 import { STAMP_KIND_BY_ANALYSIS } from "../emitters/modules/registry";
+import {
+  fingerprint,
+  expectedFromStamp,
+  diffFingerprints,
+  diffAgainstExpected,
+  constantProfile,
+  diffConstantProfile,
+  hasConstantProfile,
+} from "./fingerprint";
 import type { StudySpec, EmitOptions } from "../index";
 import type { Check } from "./run";
 
@@ -117,6 +126,9 @@ export function sasSqlParityChecks(spec: StudySpec, opts: EmitOptions): Check[] 
   const checks: Check[] = [];
   const sqlStamps = collect(emitSql(spec, "postgres", opts));
   const sasStamps = collect(emitSas(spec, opts));
+  const snowStamps = collect(emitSql(spec, "snowflake", opts));
+  const sasSetup = emitSas(spec, opts).find((f) => /setup/i.test(f.path))?.content ?? "";
+  const snowByKey = new Map(snowStamps.map((s) => [stampKey(s), s]));
 
   const expected = spec.analyses.filter((a) => a.enabled && STAMP_KIND_BY_ANALYSIS[a.kind]).length;
   checks.push({
@@ -143,7 +155,70 @@ export function sasSqlParityChecks(spec: StudySpec, opts: EmitOptions): Check[] 
       detail: a === b ? `${sq.path} == ${sa.path}` : `sql=${a} sas=${b}`,
     });
 
-    // 3. arithmetic signatures present in each twin
+    /* 3. CODE FINGERPRINTS — the checks with real falsifying power.
+     *    Unlike the stamp comparison above (both stamps come from the same
+     *    builder, so it cannot fail), every value here is scraped from that
+     *    language's own emitted text. verify/mutation.ts proves these go red
+     *    when the code is corrupted. */
+    const fpSql = fingerprint(sq.kind, "sql", sq.content);
+    const fpSas = fingerprint(sa.kind, "sas", sa.content, sasSetup);
+    const xlang = diffFingerprints(fpSql, fpSas);
+    checks.push({
+      name: `parity ${key}: emitted CODE agrees across twins (fingerprint)`,
+      status: xlang.length === 0 ? "pass" : "fail",
+      detail: xlang.length === 0
+        ? `${Object.keys(fpSql).length} values scraped from each twin's own code all match`
+        : xlang.join(" | "),
+    });
+
+    // the stamp must describe what the code actually does
+    for (const [lang, fp, stamp] of [["sql", fpSql, sq.values], ["sas", fpSas, sa.values]] as const) {
+      const drift = diffAgainstExpected(fp, expectedFromStamp(sq.kind, stamp));
+      if (drift.length > 0) {
+        checks.push({
+          name: `parity ${key}: ${lang} stamp matches its own code`,
+          status: "fail",
+          detail: drift.join(" | "),
+        });
+      }
+    }
+
+    // statistical constants, pinned per language (see fingerprint.ts)
+    if (hasConstantProfile(sq.kind)) {
+      const cSql = diffConstantProfile(sq.kind, "sql", constantProfile("sql", sq.content));
+      const cSas = diffConstantProfile(sq.kind, "sas", constantProfile("sas", sa.content, sasSetup));
+      checks.push({
+        name: `parity ${key}: CI constants intact in both twins`,
+        status: cSql.length + cSas.length === 0 ? "pass" : "fail",
+        detail: cSql.length + cSas.length === 0
+          ? "z / z^2 / z^2-2 / z^2-4 occur exactly as expected in each language"
+          : [...cSql.map((d) => `sql ${d}`), ...cSas.map((d) => `sas ${d}`)].join(" | "),
+      });
+    }
+
+    /* 3b. SNOWFLAKE — emitted into every bundle but previously covered by
+     *     NOTHING (not executed, not parsed, not even grepped). It cannot run
+     *     in PGlite, so it is verified by fingerprint against the Postgres twin
+     *     that IS execution-verified. */
+    const sn = snowByKey.get(key);
+    if (!sn) {
+      checks.push({ name: `parity ${key}: snowflake twin exists`, status: "fail", detail: "no snowflake stamp" });
+    } else {
+      const fpSnow = fingerprint(sn.kind, "sql", sn.content);
+      const sdiff = diffFingerprints(fpSql, fpSnow);
+      const csnow = hasConstantProfile(sn.kind)
+        ? diffConstantProfile(sn.kind, "sql", constantProfile("sql", sn.content))
+        : [];
+      checks.push({
+        name: `parity ${key}: snowflake code agrees with the executed postgres twin`,
+        status: sdiff.length + csnow.length === 0 ? "pass" : "fail",
+        detail: sdiff.length + csnow.length === 0
+          ? "dialect differs (DATEADD vs date arithmetic); every operative value matches"
+          : [...sdiff, ...csnow].join(" | "),
+      });
+    }
+
+    // 4. arithmetic signatures present in each twin
     const sig = SIGNATURES[sq.kind];
     if (sig) {
       const missSql = sig.sql.filter((f) => !sq.content.includes(f));
