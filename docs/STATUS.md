@@ -1,6 +1,6 @@
 # HEOR Studio — Status & Roadmap
 
-_Snapshot of what exists vs what's left. Last updated 2026-07-27 (after Waves 0-3; see
+_Snapshot of what exists vs what's left. Last updated 2026-07-27 (after Waves 0-4; see
 `docs/NIGHT-REPORT-2026-07-26.md` for the overnight build and **`docs/PENDING.md`
 for the audited, authoritative roadmap** — a 9-agent audit found 151 pending items
 and corrected several claims previously made here)._
@@ -42,8 +42,8 @@ Everything below is committed and pushed unless noted.
 - **Outcome care-setting filter** applied in both twins (shared `outcomeSettingPlan`), with a planted inpatient negative control.
 - **Honest labeling:** unimplemented options (Clopper-Pearson, Wald, KM, competing risk, minClaims>1, dx-position) → computed-with-closest-method + visible `REVIEW` note in both languages.
 
-### Verification harness (the "machine-verified" engine) — **281 passing checks**
-_(the figure once quoted as 207 was miscounted — a live run printed 206. Waves 0-3 took it to 281.)_
+### Verification harness (the "machine-verified" engine) — **308 passing checks**
+_(the figure once quoted as 207 was miscounted — a live run printed 206. Waves 0-4 took it to 308.)_
 - PGlite (real Postgres-16 wasm) executes the **actual emitted SQL** against a 12-patient synthetic MarketScan fixture with hand-computed ground truth.
 - **Gold Case A passes:** spine 12→11→10; incidence 3/8/2425/451.86/Byar CI + 6 stratum rows; point prevalence 4/10 + 7 strata; period prevalence 3/10 + 6 strata; cumulative incidence 3/8 = 0.375 Wilson (0.13684, 0.69426) + strata; plus zero-denominator and horizon-bound edge cases.
 - **SAS↔SQL parity harness:** every analysis stamps a `PARITY` record of consumed parameters, and — since Wave 2 — the harness ALSO compares values scraped from each language's own emitted text (fingerprints), plus the cohort spine, which previously had no parity coverage at all. The stamp comparison alone could not fail (both stamps came from one shared builder); the fingerprints can, and mutation tests prove it on every run.
@@ -95,7 +95,11 @@ Each has a real prerequisite — deliberately left for an awake session (see NIG
 
 ### F. Deliverable packaging (what clients actually receive)
 - **Excel table shells + Word report** (the real HEOR deliverable format), not only code files.
-- **Code-list appendix** as a primary output; **QC pack**; small-cell suppression.
+- ✅ **Small-cell suppression** — derivation-aware, both languages, on by default (Wave 4).
+- ✅ **Results contract** (`<prefix>_results`) — one tidy long-format table for shells to read.
+- ✅ **Reproducibility provenance** — emitter version + spec hash in code and README.
+- Still open: **Excel table shells + Word report**, **QC pack**, code-list appendix as a
+  primary output, IRB/DUA attestation block.
 
 ### G. Extractor + UI to match the new schema
 - Teach the extractor prompt/schema to fill the new analysis-layer fields.

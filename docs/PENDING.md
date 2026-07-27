@@ -38,7 +38,20 @@ Those documents are accurate about what was *built*; they are wrong about what m
   `e377fa2`). All 12 closed; each cohort-affecting fix has a regression case that
   was **confirmed to fail before the fix**. See the defect table below.
 
-**Next up: Wave 4 (suppression + deliverables), then Wave 5 (more analyses).**
+- **✅ Wave 4 (partial) — suppression + compliance** (commits `b967596`, `9f595ee`,
+  `dd91e71`). **Small-cell suppression** shipped in both languages: on by default at
+  threshold 11, triggered by a small numerator **or** denominator, **derivation-aware**
+  (a group left with one masked cell gets a second masked — the smallest *non-zero*
+  survivor), rule footnote on every row, originals kept intact for QC. Verified by
+  EXECUTION cell-by-cell plus 4 mutations. **Reproducibility provenance** (emitter
+  version + canonical spec hash) stamped into SQL, SAS and the bundle README.
+  **License files** finally shipped, with the AGPL-core-inside-Apache-shim
+  contradiction resolved. **Results contract** (`<prefix>_results`) gives table shells
+  one tidy shape and cannot leak a masked value.
+  _Still open in Wave 4:_ Excel table shells / Word report, QC pack, and the
+  IRB/DUA attestation surface.
+
+**Next up: finish Wave 4 (table shells + QC pack), then Wave 5 (more analyses).**
 
 ---
 
@@ -225,9 +238,10 @@ minClaims≥2, mid-follow-up disenrollment); add CI running typecheck/verify/smo
 
 **Wave 3 — Fix the confirmed defects** (D1–D12 above), each with a fixture case that fails first.
 
-**Wave 4 — Deliverable + compliance layer**
-Small-cell suppression (spec field + derivation-aware masking + footnote); results-dataset
-contract; Excel table shells; provenance/version stamping; LICENSE files; QC pack.
+**Wave 4 — Deliverable + compliance layer** — ✅ mostly done (`b967596`, `9f595ee`, `dd91e71`)
+✅ Small-cell suppression (spec field + derivation-aware masking + footnote) · ✅ results-dataset
+contract · ✅ provenance/version stamping · ✅ LICENSE files · ⬜ Excel table shells / Word report
+· ⬜ QC pack · ⬜ IRB/DUA attestation block.
 
 **Wave 5 — Then expand analyses**
 Enrolled-panel denominator spine → two-exposure-cohort spine → SMD/test-selection →
