@@ -2,7 +2,7 @@
 
 _Snapshot of what exists vs what's left. Last updated 2026-07-28 (after Analysis Waves
 1.6 through 3 — calendar trend, the claim-line ledger, the comorbidity-index
-engine and its Table 1 / SMD wiring, and the GLM emitter; **613 harness
+engine and its Table 1 / SMD wiring, and the GLM emitter; **639 harness
 checks**). See
 `docs/NIGHT-REPORT-2026-07-26.md` for the overnight build and **`docs/PENDING.md`
 for the audited, authoritative roadmap** — a 9-agent audit found 151 pending items
@@ -45,7 +45,7 @@ Everything below is committed and pushed unless noted.
 - **Outcome care-setting filter** applied in both twins (shared `outcomeSettingPlan`), with a planted inpatient negative control.
 - **Honest labeling:** unimplemented options (Clopper-Pearson, Wald, KM, competing risk, minClaims>1, dx-position) → computed-with-closest-method + visible `REVIEW` note in both languages.
 
-### Verification harness (the "machine-verified" engine) — **613 passing checks**
+### Verification harness (the "machine-verified" engine) — **639 passing checks**
 _(the figure once quoted as 207 was miscounted — a live run printed 206. Waves 0-4 took it to 308.)_
 - PGlite (real Postgres-16 wasm) executes the **actual emitted SQL** against a 12-patient synthetic MarketScan fixture with hand-computed ground truth.
 - **Gold Case A passes:** spine 12→11→10; incidence 3/8/2425/451.86/Byar CI + 6 stratum rows; point prevalence 4/10 + 7 strata; period prevalence 3/10 + 6 strata; cumulative incidence 3/8 = 0.375 Wilson (0.13684, 0.69426) + strata; plus zero-denominator and horizon-bound edge cases.
@@ -132,7 +132,7 @@ Each has a real prerequisite — deliberately left for an awake session (see NIG
 
 ## Analysis Waves 1.6 + 2 (2026-07-28) — 8 analyses now verified
 
-**Score: 11 of 69 done, 4 partial.** Harness: **613 checks, 0 failing** (was 396).
+**Score: 12 of 69 done, 4 partial.** Harness: **639 checks, 0 failing** (was 396).
 
 ### Calendar trend (`4758e5a`) — the 7th analysis
 Cochran-Armitage over calendar buckets. The statistic **z is closed form, computed
@@ -294,6 +294,31 @@ compared across languages, and a guard that emits a spec **declaring a cut** and
 asserts both twins bound at it. The guard carries a self-test that strips the cut
 from SAS and confirms the comparison goes red.
 
-**Next:** the Poisson family — designed, hand-derived and unblocked, but NOT
-built. See the end of `docs/ANALYSIS-BUILD-PLAN.md` for the feeder, the row
-shape, and the Gold Case A numbers (RR = 103/279 = 0.36918, SE = √1.5).
+### Poisson family (`d32de98`) — the 12th
+
+Slots INTO the GLM emitter rather than beside it: design, analytic dataset,
+SAS-primary contract and saturated anchor are shared; only the closed form and
+the offset differ. The anchor holds because a Poisson model with one binary
+predictor and a log person-time offset is saturated for the two-cell table, so
+its MLE is exactly ln(rate ratio).
+
+Hand-derived, matched to the digit: **RR = 1030/2790 = 103/279 = 0.36918**,
+SE = √1.5 = 1.22474, CI (0.03347, 4.07152), rate difference −447.39534/1000 PY.
+
+The load-bearing check: **1395 + 1030 = 2425**, the person-time every rate module
+already pins. The offset is built by rate-core's censoring plan — the one
+extracted to fix the data-cut divergence — so a feeder that disagreed with the
+incidence table could not pass, and the harness asserts the reconciliation
+rather than leaving it to coincidence.
+
+Note the SE uses **event counts alone**; person-time enters the estimate, not the
+variance. A mutation adds person-time terms to it, which narrows every interval
+while leaving the point estimate untouched.
+
+**A real mislabeling caught here:** adjusted rows came out as `odds_ratio` on a
+Poisson model. An odds-ratio label on a rate ratio reads as correct and is not.
+The statistic now follows the family and is stamped and asserted.
+
+**Still refused:** `negative_binomial` (a dispersion parameter has no closed form,
+so there is no anchor to check the fit against), `gamma_log`, `ols`.
+Overdispersion is an emitted limitation, not a silent assumption.
