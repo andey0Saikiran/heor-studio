@@ -2,7 +2,7 @@
 
 _Snapshot of what exists vs what's left. Last updated 2026-07-28 (after Analysis Waves
 1.6 through 3 — calendar trend, the claim-line ledger, the comorbidity-index
-engine and its Table 1 / SMD wiring, and the GLM emitter; **639 harness
+engine and its Table 1 / SMD wiring, and the GLM emitter; **666 harness
 checks**). See
 `docs/NIGHT-REPORT-2026-07-26.md` for the overnight build and **`docs/PENDING.md`
 for the audited, authoritative roadmap** — a 9-agent audit found 151 pending items
@@ -45,7 +45,7 @@ Everything below is committed and pushed unless noted.
 - **Outcome care-setting filter** applied in both twins (shared `outcomeSettingPlan`), with a planted inpatient negative control.
 - **Honest labeling:** unimplemented options (Clopper-Pearson, Wald, KM, competing risk, minClaims>1, dx-position) → computed-with-closest-method + visible `REVIEW` note in both languages.
 
-### Verification harness (the "machine-verified" engine) — **639 passing checks**
+### Verification harness (the "machine-verified" engine) — **666 passing checks**
 _(the figure once quoted as 207 was miscounted — a live run printed 206. Waves 0-4 took it to 308.)_
 - PGlite (real Postgres-16 wasm) executes the **actual emitted SQL** against a 12-patient synthetic MarketScan fixture with hand-computed ground truth.
 - **Gold Case A passes:** spine 12→11→10; incidence 3/8/2425/451.86/Byar CI + 6 stratum rows; point prevalence 4/10 + 7 strata; period prevalence 3/10 + 6 strata; cumulative incidence 3/8 = 0.375 Wilson (0.13684, 0.69426) + strata; plus zero-denominator and horizon-bound edge cases.
@@ -132,7 +132,7 @@ Each has a real prerequisite — deliberately left for an awake session (see NIG
 
 ## Analysis Waves 1.6 + 2 (2026-07-28) — 8 analyses now verified
 
-**Score: 12 of 69 done, 4 partial.** Harness: **639 checks, 0 failing** (was 396).
+**Score: 13 of 69 done, 4 partial.** Harness: **666 checks, 0 failing** (was 396).
 
 ### Calendar trend (`4758e5a`) — the 7th analysis
 Cochran-Armitage over calendar buckets. The statistic **z is closed form, computed
@@ -319,6 +319,41 @@ while leaving the point estimate untouched.
 Poisson model. An odds-ratio label on a rate ratio reads as correct and is not.
 The statistic now follows the family and is stamped and asserted.
 
-**Still refused:** `negative_binomial` (a dispersion parameter has no closed form,
-so there is no anchor to check the fit against), `gamma_log`, `ols`.
-Overdispersion is an emitted limitation, not a silent assumption.
+**Still refused:** `gamma_log`, `ols`. Overdispersion is an emitted limitation,
+not a silent assumption.
+
+### Negative binomial + the recurrence feeder (`d32de98`→ Wave 3.2) — the 13th
+
+**A correction first.** I twice refused NB on the grounds that "a dispersion
+parameter has no closed form and therefore no saturated anchor". The second half
+does not follow: at saturation the model reproduces the observed means, so the
+NB MLE equals the Poisson MLE equals ln(rate ratio). Dispersion affects the
+*standard errors*, not the point estimate. The anchor holds.
+
+The real blocker was the **fixture**. Counting events per at-risk subject on Gold
+Case A gives `[0,1,1,0,0,0,1,0,0,0]` — max 1. A 0/1 response is Bernoulli, whose
+variance is always below its mean, so dispersion is not identified. NB needs
+recurrent counts, which is a *feeder*, not a family.
+
+So `recurrence: "all_events"` makes the response a **count** of distinct
+qualifying event dates. Readiness refuses the two incoherent combinations: NB
+with `first_only`, and `all_events` with person-time censoring at `outcome`
+(counting every event while stopping the clock at the first).
+
+That changes the denominator, and the change *is* the methodology:
+
+| | |
+|---|---|
+| person-days | 1460 + 1460 = **2920** = 8 × 365 (not the 2425 of a first-event model) |
+| RR | (1/1460)/(2/1460) = **0.5 exactly** |
+| SE | √1.5 = 1.22474; CI (0.04534, 5.51434) |
+
+A check asserts the denominator must *differ* from 2425 — if it ever agrees,
+recurrence became unobservable.
+
+**The honest row:** the program reports `DEGENERATE: no subject has >1 event, so
+the dispersion parameter is NOT identified` rather than printing an estimate. It
+is asserted, so the day Gold Case B adds real recurrence the assertion changes.
+
+**Next:** Gold Case B — a separate seed with genuine recurrent events, which is
+what would exercise dispersion for real.
