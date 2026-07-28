@@ -5,7 +5,7 @@ analyses, 1 sequencer, and 2 adversarial reviewers (a MarketScan methodologist a
 a code-truth reviewer reading the actual repo). Both reviewers' corrections are
 folded in below and marked **[CORRECTION]**._
 
-**Status: 17 done, 4 partial (updated 2026-07-28 — see docs/STATUS.md).**
+**Status: 18 done, 4 partial (updated 2026-07-28 — see docs/STATUS.md).**
 
 ---
 
@@ -153,6 +153,13 @@ Stated up front so no one has to discover it later.
 - **Snowflake has never executed anywhere.** This plan adds substantial dialect surface
   (LISTAGG, PERCENTILE_CONT, recursive CTEs, calendar generators) to that half, which
   is fingerprint-checked but not run.
+- **Gray's test is REFUSED, not approximated.** The competing-risks analogue of
+  the log-rank compares subdistribution hazards, and its weights depend on the
+  cumulative incidence at each event time. It is closed form — this is not a
+  "SQL cannot" refusal — but it is a different and more intricate statistic than
+  the log-rank, and a close-enough version of it would be a mislabeled test
+  rather than a rounding error. Fine-Gray regression is refused for the same
+  reason plus the usual one: it needs Newton.
 - **Numbers in `docs/blueprints/p1/` must not be pinned as-is** — that README states
   the adversarial-verification pass never ran (the workflow hit a spend limit).
 
@@ -252,7 +259,10 @@ log-rank statistic IS the Cox score test at β = 0, and that identity is now
 asserted across the two modules. The other half was wrong — see the corrected
 bullet under "What will NOT be built": Cox does have an anchor.
 
-**Still unbuilt in this family**: competing-risks CIF (Aalen-Johansen), the
+**Competing-risks CIF landed** in Wave 6.3 (`b9123fa`), with Gold Case D. It is
+the first family in this bundle with nothing deferred to SAS.
+
+**Still unbuilt in this family**: the
 Brookmeyer-Crowley interval on the median (derivable from the band already
 computed, simply not built — and the emitted program says so rather than shipping
 a median with an invented interval), and a proportional-hazards TEST. The last

@@ -321,6 +321,83 @@ The statistic now follows the family and is stamped and asserted.
 
 Overdispersion is an emitted limitation, not a silent assumption.
 
+### Competing-risks CIF (Wave 6.3) — the 18th, and the first with nothing deferred to SAS
+
+Kaplan-Meier treats a competing event as censoring, which asserts that the
+subject who failed from another cause would have gone on to have the event of
+interest at the same rate as everyone still at risk. They cannot have it at all,
+so **1 − KM overstates the risk** — always.
+
+This module emits Aalen-Johansen **and the naive number it replaces**, so the
+reason for running it is a subtraction in the output rather than a claim in a
+method note. On Gold Case D:
+
+| | CIF (Aalen-Johansen) | naive 1 − KM | overstated by |
+|---|---|---|---|
+| event of interest | 1/3 | 3/8 | **1/24** |
+| competing cause | 1/6 | 1/5 | **1/30** |
+
+And the pathology, flagged in the output: the naive pair sums to **23/40**
+against a true total event probability of **1/2** — two mutually exclusive
+outcomes whose probabilities add to more than the chance of either happening.
+That is not rounding.
+
+**Nothing is SAS-primary here.** No p-value, no fitted coefficient — the first
+family in the bundle where the SQL twin is complete.
+
+**Three things make it checkable, all executed.** The partition identity
+Σ CIF_k(t) = 1 − S(t) is not a tolerance check: the sums telescope, so any error
+in one cause's accumulation breaks it. It ships as a *row*, so the check travels
+with the result. The bias is a number. And the naive-sum pathology is detected
+rather than left to be noticed.
+
+**The variance ships with a reduction check rather than on trust.** Three
+interacting delta-method terms are easy to get subtly wrong, and a wrong one
+still produces a plausible standard error. But with no competing event the whole
+expression must collapse to Greenwood — and on Gold Case A it does, at
+**15/512**, whose square root is the 0.17116 the survival module already pins
+independently for S(365).
+
+**Gold Case D exists because A, B and C cannot fail.** All three have a single
+kind of event, which makes the CIF and the naive 1 − KM the same number on every
+one of them. An implementation that had quietly built *per-cause* risk sets —
+the standard way to get this wrong — agrees with all three. Gold A is kept as
+the deliberate degenerate branch: three independent code paths must all reach
+3/8, the bias must be *exactly* zero, and the program must name it the
+degenerate case rather than an overstatement.
+
+**Refused, not approximated:** Gray's test (its weights depend on the cumulative
+incidence at each event time — closed form, but a different statistic, and a
+"close enough" version would be a mislabeled test) and Fine-Gray regression. The
+method notes state plainly that cause-specific and subdistribution hazards
+answer different questions and routinely point in different directions.
+
+**Readiness gates three things a reader would not think to check.** The mortality
+refusal applies here too, and the trap is that this analysis is *about* competing
+mortality, so a death endpoint reads as legitimate. It is not — the endpoint is
+what the CIF estimates. An analysis with no competing event is refused as a
+correction it is not making. And a competing cause sharing the endpoint's code
+list is refused because every event would count as both — with the partition
+identity still perfectly satisfied by the double count.
+
+*Five harness defects and two of mine.* The SAS twin had **no horizon rows at
+all** — I left a stub where the assembly should have been, and the constant
+profile caught it (4 z in SQL against 0 in SAS). A `CASE` built as a string
+concatenation didn't parse. The results contract needs two always-populated
+identifying columns, and `horizon`/`time_days` are mutually exclusive — collapsed
+into one `at_label`, which also removes a real collision when a horizon equals an
+event time. A shape's `rowDetailCol` must be a column the suppression pass
+*keeps*, or the contract fails at run time in the last program of the bundle;
+that is now a load-time throw. And a SAS scrape keyed on a program number where
+the text carries the resolved `&tag.`.
+
+Mine: the identity fingerprint tested for the "HOLDS" *text* and not the
+comparison, so a mutation reducing it to a tautology passed — and this one
+matters more than the Cox equivalent, because the identity ships *with the
+result* and nobody downstream re-derives it. And a check that failed a correct
+program: comparing se² against Greenwood at 1e-6 when the se is emitted rounded
+to five decimals.
+
 ### Cox proportional hazards + Gold Case C (Wave 6.2) — the 17th
 
 **The build plan was wrong about Cox, in a useful direction.** It lists the
