@@ -51,6 +51,10 @@ export interface IncidenceParity {
   daysPerYear: string;
   washout: { start: number | "anytime_before"; end: number | "anytime_after"; includesIndex: boolean };
   censorAt: string[]; // sorted
+  /** the DELIVERY's observation limit, when one is declared. Stamped because it
+   *  is not a censorAt value the analyst opts into — it is applied whenever
+   *  meta.dataCutDate is set, and the SAS twin used to omit it entirely. */
+  dataCut: string | null;
   maxFollowupDays: number | null;
   ciMethod: string;   // the method actually computed (not merely requested)
   recurrence: string; // the recurrence actually produced
@@ -247,7 +251,7 @@ export function incidenceLimitations(an: IncidenceRateAnalysis, listSystem: Code
 /** The parity record for an incidence twin, from values the caller consumed. */
 export function incidenceParity(
   an: IncidenceRateAnalysis,
-  consumed: { daysPerYear: string; censorTerms: string[]; settingFilter: string; strata: SupportedStratifier[] }
+  consumed: { daysPerYear: string; censorTerms: string[]; settingFilter: string; strata: SupportedStratifier[]; dataCut: string | null }
 ): IncidenceParity {
   return {
     id: an.id,
@@ -260,6 +264,7 @@ export function incidenceParity(
       includesIndex: an.washout.includesIndex,
     },
     censorAt: [...consumed.censorTerms].sort(),
+    dataCut: consumed.dataCut,
     maxFollowupDays: an.personTimeRule.maxFollowupDays ?? null,
     // what the twins actually compute today (limitations above make this loud)
     ciMethod: "poisson_byar",

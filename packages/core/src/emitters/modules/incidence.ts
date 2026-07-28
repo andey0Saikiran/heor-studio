@@ -34,8 +34,7 @@ import {
   INCLUDE_SETUP,
 } from "../sas-base";
 import { sasPrimarySqlColumns, exactPoissonSasLines, EXACT_POISSON_CI } from "../sas-primary";
-import { dataCutLimit } from "../parity";
-import { rateCoreSqlCtes, byarLowSql, byarHighSql, byarSasLines } from "../rate-core";
+import { rateCoreSqlCtes, byarLowSql, byarHighSql, byarSasLines, censorPlan, renderCensorSql, renderCensorSas } from "../rate-core";
 import {
   ageBandLabels,
   incidenceLimitations,
@@ -69,9 +68,6 @@ function sqlIncidence(ctx: SqlCtx, an: IncidenceRateAnalysis, suffix: string): S
   // Rendered as a DECIMAL literal (e.g. "365.0") so the rate arithmetic is
   // numeric — an integer constant would trigger integer division (451 vs 451.55).
   const Y = renderDaysPerYear(spec);
-  const maxFu = an.personTimeRule.maxFollowupDays;
-  const studyEnd = spec.meta.studyPeriod.end;
-
   // prevalent-case washout predicate (an outcome anywhere in this pre-index window)
   const wc = windowConds(an.washout, "a.event_date", "c.index_date", d);
   const washoutPred = wc.length > 0 ? wc.join("\n      AND ") : "TRUE";
@@ -81,18 +77,13 @@ function sqlIncidence(ctx: SqlCtx, an: IncidenceRateAnalysis, suffix: string): S
   // observable via DSTATUS, so this is a gap, not an impossibility). It is
   // excluded from the parity stamp below and surfaced as a REVIEW note, so a
   // requested death censor is never silently swallowed.
-  const terms: string[] = [];
-  const cens = an.personTimeRule.censorAt;
-  if (cens.includes("disenrollment")) terms.push("ep.episode_end");
-  if (cens.includes("study_end")) terms.push(`DATE '${studyEnd}'`);
-  if (cens.includes("max_followup") && maxFu != null) terms.push(d.offset("c.index_date", maxFu));
-  /* The DELIVERY's observation limit, independent of the protocol's. */
-  const cut = dataCutLimit(ctx.spec);
-  if (cut) terms.push(`DATE '${cut.date}'`);
-  if (terms.length === 0) terms.push(`DATE '${studyEnd}'`); // always bound follow-up
-  const appliedCensor = appliedCensorTerms(cens, maxFu);
-  const adminCensor = terms.length === 1 ? terms[0] : `LEAST(${terms.join(", ")})`;
-  const censorFinal = cens.includes("outcome")
+  /* Censoring is decided ONCE, in rate-core, and only RENDERED here — the SAS
+   * twin renders the same plan. It used to be decided independently in each
+   * builder, and they disagreed about the data cut. */
+  const plan = censorPlan(ctx.spec, an.personTimeRule);
+  const appliedCensor = plan.applied;
+  const adminCensor = renderCensorSql(ctx, plan);
+  const censorFinal = plan.atOutcome
     ? `LEAST(COALESCE(fu_date, DATE '9999-12-31'), admin_censor)`
     : `admin_censor`;
 
@@ -136,7 +127,7 @@ function sqlIncidence(ctx: SqlCtx, an: IncidenceRateAnalysis, suffix: string): S
   const L: string[] = [];
   // machine-readable twin contract: the harness compares this stamp against the
   // SAS twin's — built from the values THIS builder consumed (see parity.ts)
-  L.push(`-- ${parityStamp("incidence", incidenceParity(an, { daysPerYear: Y, censorTerms: appliedCensor, settingFilter: setting.stamped, strata }))}`);
+  L.push(`-- ${parityStamp("incidence", incidenceParity(an, { daysPerYear: Y, censorTerms: appliedCensor, settingFilter: setting.stamped, strata, dataCut: plan.dataCut }))}`);
   const limits = incidenceLimitations(an, listSystem, ctx.spec);
   if (limits.length > 0) {
     L.push(`-- REVIEW - spec options this program does not implement yet:`);
@@ -263,18 +254,16 @@ function sasIncidence(ctx: SasCtx, an: IncidenceRateAnalysis, num: string, suffi
    * rather than silently downgraded to Byar. */
   const wantsExact = an.ciMethod === "poisson_exact";
   const cens = an.personTimeRule.censorAt;
-  const maxFu = an.personTimeRule.maxFollowupDays;
 
   // administrative-censoring terms — mirrors the SQL twin exactly ("death" is
   // NOT applied; see DEATH_CENSOR_NOTE and BR-LIM-002)
-  const terms: string[] = [];
-  if (cens.includes("disenrollment")) terms.push("ep.dtend");
-  if (cens.includes("study_end")) terms.push("&study_end.");
-  if (cens.includes("max_followup") && maxFu != null) terms.push(`a.index_date + ${maxFu}`);
-  if (terms.length === 0) terms.push("&study_end."); // always bound follow-up
-  const appliedCensor = appliedCensorTerms(cens, maxFu);
-  const adminExpr = terms.length === 1 ? terms[0] : `min(${terms.join(", ")})`;
-  const censorsAtOutcome = cens.includes("outcome");
+  /* The SAME plan the SQL twin renders (rate-core.censorPlan). Building the
+   * term list here independently is exactly how the data-cut bound went missing
+   * from this twin while SQL applied it. */
+  const planS = censorPlan(ctx.spec, an.personTimeRule);
+  const appliedCensor = planS.applied;
+  const adminExpr = renderCensorSas(planS);
+  const censorsAtOutcome = planS.atOutcome;
 
   // demographic strata — labels shared with the SQL twin (parity.ts) so both
   // languages emit byte-identical stratum values. Derived from the enrollment
@@ -317,8 +306,9 @@ function sasIncidence(ctx: SasCtx, an: IncidenceRateAnalysis, num: string, suffi
   const censorWords = [
     ...(censorsAtOutcome ? ["first outcome"] : []),
     ...(cens.includes("disenrollment") ? ["disenrollment (episode end)"] : []),
-    ...(cens.includes("study_end") || terms.includes("&study_end.") ? ["study end"] : []),
-    ...(cens.includes("max_followup") && maxFu != null ? [`index + ${maxFu}d max follow-up`] : []),
+    ...(planS.terms.some((t) => t.kind === "study_end") ? ["study end"] : []),
+    ...(planS.terms.flatMap((t) => (t.kind === "max_followup" ? [`index + ${t.days}d max follow-up`] : []))),
+    ...(planS.dataCut ? [`data cut ${planS.dataCut}`] : []),
   ].join(" / ");
 
   const washLines = [
@@ -338,7 +328,7 @@ function sasIncidence(ctx: SasCtx, an: IncidenceRateAnalysis, num: string, suffi
     ]),
     // machine-readable twin contract: the harness compares this stamp against
     // the SQL twin's — built from the values THIS program consumed
-    `/* ${parityStamp("incidence", incidenceParity(an, { daysPerYear: ctx.daysPerYearLit, censorTerms: appliedCensor, settingFilter: setting.stamped, strata }))} */`,
+    `/* ${parityStamp("incidence", incidenceParity(an, { daysPerYear: ctx.daysPerYearLit, censorTerms: appliedCensor, settingFilter: setting.stamped, strata, dataCut: planS.dataCut }))} */`,
     ``,
   ];
 
@@ -434,7 +424,7 @@ function sasIncidence(ctx: SasCtx, an: IncidenceRateAnalysis, num: string, suffi
       : []),
     `/*----------------------------------------------------------------------------`,
     `  Person-time: administrative censor = earliest of`,
-    ...terms.map((t) => `    - ${cmt(t)}`),
+    ...planS.terms.map((t) => `    - ${cmt(t.kind === "disenrollment" ? "disenrollment (episode end)" : t.kind === "study_end" ? `study end ${t.date}` : t.kind === "max_followup" ? `index + ${t.days} days` : `data cut ${t.date}`)}`),
     `  taken on the stitched enrollment episode covering the index date.`,
     `----------------------------------------------------------------------------*/`,
     `proc sql;`,
@@ -554,12 +544,6 @@ function sasIncidence(ctx: SasCtx, an: IncidenceRateAnalysis, num: string, suffi
  *  "death" is requested-but-unimplemented, so it must not appear in the parity
  *  stamp — a stamp that claims a dropped parameter was consumed turns the twin
  *  comparison into a lie about both languages at once. */
-function appliedCensorTerms(censorAt: readonly string[], maxFu: number | null | undefined): string[] {
-  return censorAt.filter((c) =>
-    c === "outcome" || c === "disenrollment" || c === "study_end" || (c === "max_followup" && maxFu != null),
-  );
-}
-
 export const incidenceModule: AnalysisModule<IncidenceRateAnalysis> = {
   analysisKind: "incidence_rate",
   stampKind: "incidence",

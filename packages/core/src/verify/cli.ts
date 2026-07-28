@@ -1,5 +1,5 @@
 /* Verification entry — run: npm run verify -w @heor-studio/core */
-import { verifyGoldA, verifyDaysPerYearChoice, verifySettingFilterControl, verifySuppression, verifyWashoutToggle, verifyAscertainmentWindow } from "./run";
+import { verifyGoldA, verifyDaysPerYearChoice, verifySettingFilterControl, verifySuppression, verifyWashoutToggle, verifyAscertainmentWindow, verifyDataCutReachesBothTwins } from "./run";
 import { fingerprintCoverageChecks, coverageGuardSelfTest, standardPopulationChecks } from "./coverage";
 import { verifySilenceGuards } from "./guards";
 
@@ -8,6 +8,7 @@ async function main() {
   const dpy = await verifyDaysPerYearChoice();
   const sfc = await verifySettingFilterControl();
   const aw = await verifyAscertainmentWindow();
+  const dc = verifyDataCutReachesBothTwins();
   const wt = await verifyWashoutToggle();
   const sup = await verifySuppression();
   const sg = verifySilenceGuards();
@@ -37,6 +38,9 @@ async function main() {
   console.log("\n=== ascertainment window (studyPeriod must not truncate lookbacks) ===");
   for (const c of aw) console.log(`  ${c.status === "pass" ? "PASS" : "FAIL"}  ${c.name} — ${c.detail}`);
 
+  console.log("\n=== data cut / claims run-out (must reach BOTH twins) ===");
+  for (const c of dc) console.log(`  ${c.status === "pass" ? "PASS" : "FAIL"}  ${c.name} — ${c.detail}`);
+
   console.log("\n=== prevalent-case washout (incidence <-> prevalence toggle) ===");
   for (const c of wt) console.log(`  ${c.status === "pass" ? "PASS" : "FAIL"}  ${c.name} — ${c.detail}`);
 
@@ -50,11 +54,12 @@ async function main() {
   const sfcOk = sfc.every((c) => c.status === "pass");
   const covOk = cov.every((c) => c.status === "pass");
   const awOk = aw.every((c) => c.status === "pass");
+  const dcOk = dc.every((c) => c.status === "pass");
   const wtOk = wt.every((c) => c.status === "pass");
   const supOk = sup.every((c) => c.status === "pass");
   const sgOk = sg.every((c) => c.status === "pass");
-  console.log(`\nGold Case A: ${r.status.toUpperCase()}${dpyOk ? "" : "  (daysPerYear regression FAILED)"}${sfcOk ? "" : "  (setting-filter control FAILED)"}${covOk ? "" : "  (coverage guard FAILED)"}${awOk ? "" : "  (ascertainment window FAILED)"}${wtOk ? "" : "  (washout toggle FAILED)"}${supOk ? "" : "  (suppression FAILED)"}${sgOk ? "" : "  (silence guards FAILED)"}`);
-  process.exit(r.status === "passed" && dpyOk && sfcOk && covOk && awOk && wtOk && supOk && sgOk ? 0 : 1);
+  console.log(`\nGold Case A: ${r.status.toUpperCase()}${dpyOk ? "" : "  (daysPerYear regression FAILED)"}${sfcOk ? "" : "  (setting-filter control FAILED)"}${covOk ? "" : "  (coverage guard FAILED)"}${awOk ? "" : "  (ascertainment window FAILED)"}${dcOk ? "" : "  (data cut FAILED)"}${wtOk ? "" : "  (washout toggle FAILED)"}${supOk ? "" : "  (suppression FAILED)"}${sgOk ? "" : "  (silence guards FAILED)"}`);
+  process.exit(r.status === "passed" && dpyOk && sfcOk && covOk && awOk && dcOk && wtOk && supOk && sgOk ? 0 : 1);
 }
 
 main().catch((e) => { console.error("crashed:", e); process.exit(1); });

@@ -153,6 +153,18 @@ function sqlWindowOffset(sql: string, cmp: ">=" | "<="): string {
   return bare ? "0" : "ABSENT";
 }
 
+/** Date bounds inside the admin-censor expression, ISO, in order. */
+function censorBoundsSql(sql: string): string {
+  const line = sql.split("\n").find((l) => /AS admin_censor/i.test(l)) ?? "";
+  return (line.match(/DATE\s*'(\d{4}-\d{2}-\d{2})'/g) ?? []).map((m) => m.slice(6, -1)).join(",");
+}
+
+/** SAS twin of the above; `&study_end.` is already macro-resolved by the caller. */
+function censorBoundsSas(sas: string): string {
+  const line = sas.split("\n").find((l) => /as admin_censor/i.test(l)) ?? "";
+  return (line.match(/'\d{2}[A-Z]{3}\d{4}'d/g) ?? []).map((m) => sasDateToIso(m) ?? m).join(",");
+}
+
 /** Lower bound of a pre-index lookback, from either SQL dialect. */
 function sqlLookbackOffset(sql: string): string {
   const pg = /event_date\s*>=\s*\(c\.index_date\s*([+-])\s*(\d+)\)/i.exec(sql);
@@ -206,6 +218,11 @@ function sqlFingerprint(kind: string, raw: string): Fingerprint {
         /index_date\s*\+\s*(\d+)\s*\)/i,
       ]));
       put(fp, "strictly_after_index", /a\.event_date\s*>\s*c\.index_date/i.test(sql) ? "yes" : "no");
+      /* Every DATE bound inside the admin-censor expression, in order. The data
+       * cut lives here and nowhere else, which is how the SAS twin managed to
+       * omit it while SQL applied it — the stamps agreed because neither
+       * recorded it. */
+      put(fp, "censor_bounds", censorBoundsSql(sql));
       // Byar exponents, in order — a single altered cube changes the list.
       put(fp, "byar_exponents", sqlPowerExponents(sql));
       /* SAS-PRIMARY contract: if the exact columns are present at all, SQL must
@@ -227,6 +244,11 @@ function sqlFingerprint(kind: string, raw: string): Fingerprint {
       ]));
       put(fp, "washout_includes_index", /event_date\s*<=\s*c\.index_date/i.test(sql) ? "yes" : "no");
       put(fp, "strictly_after_index", /a\.event_date\s*>\s*c\.index_date/i.test(sql) ? "yes" : "no");
+      /* Every DATE bound inside the admin-censor expression, in order. The data
+       * cut lives here and nowhere else, which is how the SAS twin managed to
+       * omit it while SQL applied it — the stamps agreed because neither
+       * recorded it. */
+      put(fp, "censor_bounds", censorBoundsSql(sql));
       break;
     }
     case "point_prevalence": {
@@ -409,6 +431,7 @@ function sasFingerprint(kind: string, rawSas: string, setup: string): Fingerprin
       // same arithmetic cannot stand in for the code that computes it.
       put(fp, "max_followup_days", grab(sas, [/min\([^;]*?index_date\s*\+\s*(\d+)\s*\)\s*as admin_censor/i]));
       put(fp, "strictly_after_index", /svcdate\s*>\s*a\.index_date/i.test(sas) ? "yes" : "no");
+      put(fp, "censor_bounds", censorBoundsSas(sas));
       put(fp, "byar_exponents", exponents(sas, /\*\*\s*(\d+)/g));
       // SAS-PRIMARY contract: the exact limits must be genuinely computed here
       if (/ci_low_exact/i.test(sas)) {
@@ -421,6 +444,7 @@ function sasFingerprint(kind: string, rawSas: string, setup: string): Fingerprin
       put(fp, "horizon_days", grab(sas, [/svcdate\s*<=\s*a\.index_date\s*\+\s*(\d+)/i, /index_date\s*\+\s*(\d+)/i]));
       put(fp, "washout_includes_index", /svcdate\s*<=\s*a\.index_date(?!\s*\+)/i.test(sas) ? "yes" : "no");
       put(fp, "strictly_after_index", /svcdate\s*>\s*a\.index_date/i.test(sas) ? "yes" : "no");
+      put(fp, "censor_bounds", censorBoundsSas(sas));
       break;
     }
     case "point_prevalence": {

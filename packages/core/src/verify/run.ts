@@ -6,6 +6,9 @@
  * row-level data — safe to return over MCP).
  */
 import { seedAndRun, scalar, rows } from "./engine";
+import { emitSql } from "../emitters/sql";
+import { parseParityStamps } from "../emitters/parity";
+import { fingerprint } from "./fingerprint";
 import { runInvariants, type InvariantResult } from "./invariants";
 import { sasSqlParityChecks } from "./parity";
 import { mutationChecks } from "./mutation";
@@ -271,6 +274,80 @@ export async function verifyWashoutToggle(): Promise<Check[]> {
  *  success. Silent and plausible, so nothing else would have caught it.
  *
  *  Both readings of studyPeriod must now give the SAME cohort numbers. */
+/**
+ * The DELIVERY's observation limit must reach BOTH twins.
+ *
+ * This guard exists because it did not. `meta.dataCutDate` was applied by the
+ * SQL builder and ignored by the SAS builder, so a study declaring a cut got
+ * two different person-times from one bundle — and nothing failed: the PARITY
+ * stamp recorded `censorAt` (which both read from the same field), the
+ * fingerprints scraped the max-follow-up offset rather than the bound, and Gold
+ * Case A does not declare a cut, so no fixture ever ran the path.
+ *
+ * The censoring plan now lives in rate-core and each language only renders it,
+ * which makes the divergence structurally impossible. This asserts it anyway,
+ * ON A SPEC THAT DECLARES A CUT — the condition the original defect needed.
+ */
+export function verifyDataCutReachesBothTwins(): Check[] {
+  const spec: StudySpec = JSON.parse(JSON.stringify(GOLD_A_SPEC));
+  spec.meta.dataCutDate = "2020-03-31";
+  spec.meta.claimsRunoutMonths = 3; // effective bound: 2019-12-31
+  const EFFECTIVE = "2019-12-31";
+  const out: Check[] = [];
+
+  const sqlProg = emitSql(spec, "postgres", GOLD_A_OPTS).find((f) => /incidence/.test(f.path))?.content ?? "";
+  const sasFiles = emitSas(spec, GOLD_A_OPTS);
+  const sasProg = sasFiles.find((f) => /incidence/.test(f.path))?.content ?? "";
+  const setup = sasFiles.find((f) => /setup/i.test(f.path))?.content ?? "";
+
+  const fpSql = fingerprint("incidence", "sql", sqlProg);
+  const fpSas = fingerprint("incidence", "sas", sasProg, setup);
+  out.push({
+    name: "data cut: both twins bound follow-up at the SAME dates",
+    status: fpSql.censor_bounds === fpSas.censor_bounds ? "pass" : "fail",
+    detail: fpSql.censor_bounds === fpSas.censor_bounds
+      ? `censor bounds ${fpSql.censor_bounds} in both languages`
+      : `sql bounds [${fpSql.censor_bounds}] vs sas bounds [${fpSas.censor_bounds}] — one twin is censoring somewhere the other is not`,
+  });
+  for (const [lang, fp] of [["sql", fpSql], ["sas", fpSas]] as const) {
+    out.push({
+      name: `data cut: the ${lang} twin actually applies the ${EFFECTIVE} bound`,
+      status: (fp.censor_bounds ?? "").split(",").includes(EFFECTIVE) ? "pass" : "fail",
+      detail: (fp.censor_bounds ?? "").split(",").includes(EFFECTIVE)
+        ? `cut applied (data cut 2020-03-31 minus 3 months run-out)`
+        : `bounds are [${fp.censor_bounds}] — the immature tail would be counted as event-free person-time`,
+    });
+  }
+  /* PROOF THE GUARD CAN FAIL. Strip the cut from the SAS twin — reproducing
+   * the exact defect this guard was written for — and assert the comparison
+   * goes red. A guard that has only ever been green is an unproven guard. */
+  {
+    const broken = sasProg.replace(/,\s*'31DEC2019'd/g, "");
+    const changed = broken !== sasProg;
+    const fpBroken = fingerprint("incidence", "sas", broken, setup);
+    out.push({
+      name: "data cut: the guard DETECTS a twin that drops the cut (self-test)",
+      status: changed && fpBroken.censor_bounds !== fpSql.censor_bounds ? "pass" : "fail",
+      detail: !changed
+        ? "mutation pattern did not match — the self-test is vacuous"
+        : fpBroken.censor_bounds !== fpSql.censor_bounds
+          ? `stripping the cut from SAS yields [${fpBroken.censor_bounds}] vs sql [${fpSql.censor_bounds}] — detected`
+          : "NOT DETECTED — the guard would have missed the original defect",
+    });
+  }
+
+  // and the stamp must say so, in both languages
+  for (const [lang, prog] of [["sql", sqlProg], ["sas", sasProg]] as const) {
+    const stamp = parseParityStamps(prog).find((s) => s.kind === "incidence")?.values ?? {};
+    out.push({
+      name: `data cut: the ${lang} PARITY stamp records it`,
+      status: stamp.dataCut === EFFECTIVE ? "pass" : "fail",
+      detail: `stamp dataCut = ${JSON.stringify(stamp.dataCut)}`,
+    });
+  }
+  return out;
+}
+
 export async function verifyAscertainmentWindow(): Promise<Check[]> {
   const out: Check[] = [];
   const push = (name: string, cond: boolean, detail: string) =>
