@@ -2,7 +2,7 @@
 
 _Snapshot of what exists vs what's left. Last updated 2026-07-28 (after Analysis Waves
 1.6 through 3 — calendar trend, the claim-line ledger, the comorbidity-index
-engine and its Table 1 / SMD wiring, and the GLM emitter; **666 harness
+engine and its Table 1 / SMD wiring, and the GLM emitter; **700 harness
 checks**). See
 `docs/NIGHT-REPORT-2026-07-26.md` for the overnight build and **`docs/PENDING.md`
 for the audited, authoritative roadmap** — a 9-agent audit found 151 pending items
@@ -45,7 +45,7 @@ Everything below is committed and pushed unless noted.
 - **Outcome care-setting filter** applied in both twins (shared `outcomeSettingPlan`), with a planted inpatient negative control.
 - **Honest labeling:** unimplemented options (Clopper-Pearson, Wald, KM, competing risk, minClaims>1, dx-position) → computed-with-closest-method + visible `REVIEW` note in both languages.
 
-### Verification harness (the "machine-verified" engine) — **666 passing checks**
+### Verification harness (the "machine-verified" engine) — **700 passing checks**
 _(the figure once quoted as 207 was miscounted — a live run printed 206. Waves 0-4 took it to 308.)_
 - PGlite (real Postgres-16 wasm) executes the **actual emitted SQL** against a 12-patient synthetic MarketScan fixture with hand-computed ground truth.
 - **Gold Case A passes:** spine 12→11→10; incidence 3/8/2425/451.86/Byar CI + 6 stratum rows; point prevalence 4/10 + 7 strata; period prevalence 3/10 + 6 strata; cumulative incidence 3/8 = 0.375 Wilson (0.13684, 0.69426) + strata; plus zero-denominator and horizon-bound edge cases.
@@ -132,7 +132,7 @@ Each has a real prerequisite — deliberately left for an awake session (see NIG
 
 ## Analysis Waves 1.6 + 2 (2026-07-28) — 8 analyses now verified
 
-**Score: 13 of 69 done, 4 partial.** Harness: **666 checks, 0 failing** (was 396).
+**Score: 13 of 69 done, 4 partial. 2 gold cases.** Harness: **700 checks, 0 failing** (was 396).
 
 ### Calendar trend (`4758e5a`) — the 7th analysis
 Cochran-Armitage over calendar buckets. The statistic **z is closed form, computed
@@ -355,5 +355,34 @@ recurrence became unobservable.
 the dispersion parameter is NOT identified` rather than printing an estimate. It
 is asserted, so the day Gold Case B adds real recurrence the assertion changes.
 
-**Next:** Gold Case B — a separate seed with genuine recurrent events, which is
-what would exercise dispersion for real.
+### Gold Case B (`ba64b3f`) — the 2nd gold case
+
+Exists for a condition Gold A **cannot** produce: on A no at-risk subject has
+more than one qualifying event, so the response is Bernoulli and NB's dispersion
+parameter is not identified. B is seeded so it is — one arm carries a subject
+with seven events.
+
+A separate **seed**, not an append: an extra indexed patient in A would move
+attrition, the at-risk 8, the 2425 person-days and every downstream estimate at
+once. `seedAndRun` now takes the seed and each case runs in its own PGlite.
+
+Hand-derived and matched: RR = (8/1460)/(4/1460) = **2.0 exactly**, SE = √0.375 =
+0.61237, CI (0.60224, 6.64189), rate difference 1000.68493/1000 PY.
+
+**The contrast is the deliverable.** A closed-form variance-to-mean ratio now
+ships in both twins — the statistic that says whether NB earns its extra
+parameter. Same emitter, opposite verdicts, both read off the data:
+
+| case | counts | ratio | verdict |
+|---|---|---|---|
+| Gold A | 1,1,0,0,1,0,0,0 | 0.71429 | NOT overdispersed |
+| Gold B | 1,1,2,0,0,0,1,7 | 3.61905 | OVERDISPERSED, NB warranted |
+
+**The defect B found on its first run:** the analytic dataset built trailing
+commas from one optional column, so a count family *without* a comorbidity
+covariate emitted `... AS sex_male CAST(...) AS person_days` and failed to parse.
+Gold A's NB analysis happens to carry that covariate, so the path was never
+exercised — same shape as the data-cut divergence. It earned its keep before it
+finished being written.
+
+B runs the full parity and SAS-structure checks on its **own** emission too.
