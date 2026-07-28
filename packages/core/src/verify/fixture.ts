@@ -507,6 +507,44 @@ export const EXPECTED = {
       logRankAllNull: true,
     },
   },
+  /* ---------------- Cox proportional hazards ---------------- *
+   * Gold Case A has NO tied event times, which makes it the case that pins two
+   * identities Gold Case C cannot: the Cox information at beta = 0 EQUALS the
+   * log-rank variance, and the Cox score EQUALS the log-rank numerator. It also
+   * exercises the closed-form anchor's NOT-APPLICABLE branch.
+   *
+   *   loglik(0) = -(ln 8 + ln 7 + ln 6) = -5.81711, so -2logL(0) = 11.63422
+   *   U(0)      = O - E = -31/42 = -0.73810
+   *   I(0)      = 1/4 + 12/49 + 2/9 = 1265/1764 = 0.71712 = the log-rank V
+   *   chi^2     = 0.75968, the same number the log-rank reports
+   *   one-step  = exp(U/I) = 0.35728  (NOT the maximum, which is 0.35583)
+   *
+   * The true MLE is beta = -1.03329, HR = 0.35583, found by an independent
+   * Newton solve. It is recorded here and NOT asserted: the SQL twin cannot
+   * compute it and no SAS runs in CI, so pinning it would be pinning a number
+   * nothing in this repo produces. The one-step's visible drift from it is the
+   * reason the one-step is labelled rather than reported as the answer. */
+  cox: {
+    rowCount: 19, // 4 design + 8 score + 1 one-step + 3 anchor + 3 adjusted
+    eventTimes: 3,
+    eventsTotal: 3,
+    eventsExposed: 1,
+    tiedEventTimes: 0,
+    partialLogLik0: -5.81711,
+    minusTwoLogLik0: 11.63422,
+    scoreU0: -0.7381,
+    information0: 0.71712,
+    logRankVariance: 0.71712, // EQUAL here, and only because nothing is tied
+    scoreChiSquare: 0.75968,
+    reject: 0,
+    oneStep: { hr: 0.35728, se: 1.18088, ci: [0.0353, 3.61563] as [number, number] },
+    /** the risk-set exposed share runs 1/2, 4/7, 2/3 — so no closed form */
+    anchorApplies: false,
+    eventShareExposed: 0.33333,
+    /** recorded, not asserted: nothing in this repo computes it */
+    trueMleBeta: -1.03329,
+    trueMleHr: 0.35583,
+  },
   cumulativeIncidence: {
     // a_ci_365: horizon 365d. Cases in (index, index+365]: P02(100),P03(200),
     // P07(300) → 3/8 = 0.375, reproducing EXPECTED.wilsonCi from this module.
@@ -1207,6 +1245,27 @@ export const GOLD_A_SPEC: StudySpec = {
       ciMethod: "log_log",
       groupVarId: "g_arm",
       emitLifeTable: true,
+    },
+    /* COX on the same endpoint as a_km. Gold A has NO tied event times, which
+     * makes it the case that pins two identities the tie fixture cannot:
+     *   - Cox's information at beta = 0 EQUALS the log-rank variance
+     *     (1265/1764), because the (n-d)/(n-1) correction is 1 throughout;
+     *   - the Cox score at beta = 0 EQUALS the log-rank numerator O - E.
+     * It also exercises the anchor's NOT-APPLICABLE branch: the risk-set
+     * exposed share runs 1/2, 4/7, 2/3, so there is no closed-form maximum and
+     * the program must say so rather than print a number. Gold Case C is the
+     * mirror image on both counts. */
+    {
+      id: "a_cox", label: "Cox proportional hazards, X vs Y", kind: "cox", enabled: true,
+      endpoint: {
+        kind: "claims_event",
+        outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "outpatient", diagnosisPosition: "any" },
+      },
+      washout: { start: -365, end: 0, includesIndex: true },
+      personTimeRule: { start: "index", censorAt: ["outcome", "disenrollment", "study_end", "max_followup"], maxFollowupDays: 365 },
+      groupVarId: "g_arm",
+      covariateIds: ["b_age", "b_sex"],
+      ties: "breslow",
     },
     /* Covariate balance between the exposure arms. Age is deliberately
      * IMBALANCED (SMD -0.63246, |SMD| > 0.1) and sex is deliberately BALANCED

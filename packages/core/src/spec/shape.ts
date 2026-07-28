@@ -31,7 +31,7 @@ const DEMO_AXES = new Set(["age_band", "sex", "region", "plan_type", "year"]);
 const ANALYSIS_KINDS = new Set([
   "attrition", "table1", "point_prevalence", "period_prevalence", "cumulative_incidence",
   "incidence_rate", "standardization", "calendar_trend", "resource_use",
-  "comorbidity_index", "regression", "survival", "statistical_engine", "future_stub",
+  "comorbidity_index", "regression", "survival", "cox", "statistical_engine", "future_stub",
 ]);
 const SURVIVAL_CI = new Set(["log_log", "linear"]);
 const SURVIVAL_ENDPOINTS = new Set(["claims_event", "death"]);
@@ -325,6 +325,21 @@ function checkAnalysis(p: Problems, v: unknown, path: string): void {
       if (v.groupVarId !== undefined) needStr(p, v, "groupVarId", path, { nonEmpty: true });
       if (!Array.isArray(v.horizonDays)) p.push(`${path}.horizonDays`, `expected an array of day marks, got ${typeOf(v.horizonDays)}`);
       else v.horizonDays.forEach((x, j) => need(p, `${path}.horizonDays[${j}]`, typeof x === "number" && Number.isFinite(x), `expected a number, got ${typeOf(x)}`));
+      break;
+    }
+    case "cox": {
+      const epc = `${path}.endpoint`;
+      if (!isObj(v.endpoint)) p.push(epc, `expected {kind, ...}, got ${typeOf(v.endpoint)}`);
+      else {
+        needEnum(p, v.endpoint, "kind", epc, SURVIVAL_ENDPOINTS);
+        if (v.endpoint.kind === "claims_event") checkOutcomeDefinition(p, v.endpoint.outcomeDefinition, `${epc}.outcomeDefinition`);
+      }
+      checkWindow(p, v.washout, `${path}.washout`);
+      checkPersonTimeRule(p, v.personTimeRule, `${path}.personTimeRule`);
+      needStr(p, v, "groupVarId", path, { nonEmpty: true });
+      needStr(p, v, "ties", path, { nonEmpty: true });
+      if (!Array.isArray(v.covariateIds)) p.push(`${path}.covariateIds`, `expected an array of baseline ids, got ${typeOf(v.covariateIds)}`);
+      else v.covariateIds.forEach((x, j) => need(p, `${path}.covariateIds[${j}]`, isStr(x), `expected a baseline id string, got ${typeOf(x)}`));
       break;
     }
     case "standardization":

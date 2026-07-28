@@ -330,6 +330,61 @@ export function verifySilenceGuards(): Check[] {
     );
   }
 
+  /* 3f-ter. The mortality refusal must cover EVERY time-to-event kind.
+   *
+   * The survival gate came first; Cox arrived later and reads the SAME
+   * MORTALITY_REFUSAL constant. This asserts that it does — a refusal copied
+   * into one switch arm and not the other is a gate with a hole in it, and the
+   * hole would be invisible from the survival side. */
+  {
+    const base: StudySpec = JSON.parse(JSON.stringify(GOLD_A_SPEC));
+    const coxAnalysis = (over: Record<string, unknown>) => ({
+      id: "guard_cox", label: "guard cox", kind: "cox", enabled: true,
+      endpoint: { kind: "claims_event", outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "outpatient", diagnosisPosition: "any" } },
+      washout: { start: -365, end: 0, includesIndex: true },
+      personTimeRule: { start: "index", censorAt: ["outcome", "disenrollment", "study_end", "max_followup"], maxFollowupDays: 365 },
+      groupVarId: "g_arm", covariateIds: [], ties: "breslow",
+      ...over,
+    });
+
+    const deadCox: StudySpec = JSON.parse(JSON.stringify(base));
+    deadCox.analyses.push(coxAnalysis({ endpoint: { kind: "death", source: "dstatus" } }) as never);
+    const rdc = specReadiness(deadCox);
+    push(
+      "guard: a DEATH endpoint on a COX model is refused too, from the same constant",
+      !rdc.ready && rdc.problems.some((p) => p.includes("overall survival is REFUSED") && p.includes("DSTATUS")),
+      rdc.problems.find((p) => p.includes("REFUSED"))?.slice(0, 90) ?? "cox accepted a mortality endpoint",
+    );
+
+    /* EFRON is refused, and the reason is the twin contract rather than taste:
+     * every closed form the SQL twin computes is Breslow's, so a SAS fit
+     * maximizing Efron's likelihood would fail the program's own
+     * U(beta_hat) = 0 self-check while being perfectly correct. */
+    const efron: StudySpec = JSON.parse(JSON.stringify(base));
+    efron.analyses.push(coxAnalysis({ ties: "efron" }) as never);
+    const re = specReadiness(efron);
+    const efronMsg = re.problems.find((p) => p.includes('ties:"efron"'));
+    push(
+      "guard: cox ties:\"efron\" is refused, with the twin-contract reason",
+      !!efronMsg && efronMsg.includes("U(beta_hat)=0"),
+      efronMsg?.slice(0, 120) ?? "efron was accepted",
+    );
+    push(
+      "guard: the efron refusal still says WHEN efron would be preferable",
+      !!efronMsg && efronMsg.includes("COMMON"),
+      efronMsg ?? "no message",
+    );
+
+    // and the buildable configuration must stay ready
+    const okCox: StudySpec = JSON.parse(JSON.stringify(base));
+    okCox.analyses.push(coxAnalysis({}) as never);
+    push(
+      "guard: a breslow cox model on a claims endpoint is NOT refused",
+      !specReadiness(okCox).problems.some((p) => p.includes("guard_cox")),
+      specReadiness(okCox).problems.filter((p) => p.includes("guard_cox")).join("; ") || "no cox problems",
+    );
+  }
+
   /* 3g. Reproducibility provenance. "Identical spec in, identical code out" is
      only auditable against a generator VERSION and a spec identity — otherwise
      a reviewer re-running a study a year later cannot tell a legitimate emitter

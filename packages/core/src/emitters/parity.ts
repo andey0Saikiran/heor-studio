@@ -25,6 +25,7 @@ import type {
   RelativeWindow,
   ResourceUseAnalysis,
   Stratifier,
+  CoxAnalysis,
   SurvivalAnalysis,
   TrendSpec,
 } from "../spec/types";
@@ -1203,5 +1204,100 @@ export function survivalParity(
     logRankStatistic: "closed_form_mantel",
     logRankPValue: "sas_primary",
     kmAnchor: "lifetest_equals_closed_form_product_limit",
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ *  Cox proportional hazards
+ * ------------------------------------------------------------------ */
+
+export interface CoxParity {
+  id: string;
+  codeListId: string;
+  washout: { start: number | "anytime_before"; end: number | "anytime_after"; includesIndex: boolean };
+  censorTerms: string[];
+  dataCut: string | null;
+  settingFilter: string;
+  referenceLevel: string;
+  exposedLevel: string;
+  /** fitted-model terms in order, exposure first */
+  terms: string[];
+  /** Breslow only — readiness refuses anything else, and the reason is that the
+   *  SQL twin's closed forms ARE Breslow's. A stamp that let this vary would let
+   *  the twins disagree about which likelihood is being maximized. */
+  ties: "breslow";
+  /** what each twin actually produces */
+  nullLoglik: "closed_form_breslow";
+  score: "closed_form_equals_logrank_numerator";
+  information: "closed_form_breslow";
+  oneStep: "first_newton_step";
+  fittedCoefficient: "sas_primary";
+  /** the three checks the SAS twin runs on PROC PHREG */
+  selfChecks: ["null_minus_2_loglik", "score_at_beta_hat_is_zero", "constant_proportion_closed_form"];
+}
+
+/** Spec options the Cox twins do NOT implement. Each is a real modelling choice
+ *  a protocol might ask for, named rather than silently absent. */
+export function coxLimitations(
+  an: CoxAnalysis, listSystem: CodeSystem, covLabels: string[], droppedCovs: string[], spec?: StudySpec,
+): string[] {
+  const out: string[] = [];
+  const od = survivalOutcome(an);
+  if (od) {
+    const settingNote = outcomeSettingPlan(od, listSystem).note;
+    if (settingNote) out.push(settingNote);
+    if (od.minClaims > 1)
+      out.push(`endpoint minClaims=${od.minClaims} is NOT yet enforced - any single qualifying claim counts, so the survival time is the FIRST claim's date`);
+  }
+  if (an.personTimeRule.censorAt.includes("death")) out.push(DEATH_CENSOR_NOTE);
+  if (spec && !dataCutLimit(spec)) out.push(NO_DATA_CUT_NOTE);
+  for (const d of droppedCovs)
+    out.push(`covariate "${d}" is NOT in the fitted model - only age, sex and a comorbidity_index referencing an ENABLED index analysis are derivable from the cohort spine today`);
+  if (covLabels.length === 0)
+    out.push(`no covariates resolved, so the "adjusted" model is the unadjusted one - it is still emitted, and at that point its coefficient is the one every closed form on this table describes`);
+  /* THE ASSUMPTION THE MODEL IS NAMED AFTER, and it is not tested here. */
+  out.push(`PROPORTIONAL HAZARDS IS ASSUMED AND NOT TESTED. A Schoenfeld-residual test needs residuals evaluated at the fitted coefficient and a p-value for their correlation with time, neither of which this program computes. If the hazard ratio changes over follow-up, the single number reported here is a weighted average of a ratio that was never constant - and nothing in the output says so. Run "assess ph / resample" in PROC PHREG, or report a time-stratified estimate`);
+  out.push(`NO time-varying covariates: every covariate is measured once, at baseline, so a treatment that starts after index is modelled as if it had always been there (immortal-time bias)`);
+  out.push(`NO stratified baseline hazard: a single baseline hazard is assumed to apply to every subject`);
+  out.push(`ties are handled by BRESLOW's approximation. When tied event times are COMMON, Efron's is materially better and Breslow biases the coefficient toward the null - the tied_event_times row in the result says how many there are, which is the number that decides whether this matters`);
+  return out;
+}
+
+/** Method notes ALWAYS emitted (describe what IS computed). */
+export const COX_METHOD_NOTES = [
+  `the COEFFICIENT is SAS-primary: maximizing a partial likelihood needs Newton-Raphson, which warehouse SQL cannot run, so SQL emits it NULL beside the procedure that produces it - never a guess`,
+  `everything the fit is CHECKED AGAINST is closed form and computed in BOTH twins: the partial log-likelihood at the null, the score, the information, the score test and the one-step estimator`,
+  `the SCORE at beta = 0 IS the log-rank numerator O - E. The log-rank test is the Cox score test at the null, so a survival analysis and a Cox model on the same data must agree on that number exactly`,
+  `the INFORMATION at beta = 0 equals the LOG-RANK VARIANCE when no event time is tied, and differs when one is - the log-rank carries a (n-d)/(n-1) correction Breslow's information does not. Both are emitted, beside a count of tied event times, so a reader can see which regime the data are in`,
+  `SELF-CHECK, in the SAS twin: U(beta_hat) = 0. That is the equation DEFINING the estimate, and because the exposure is binary the score at any beta is closed form in the risk-set counts alone - so the fitted coefficient is checked against its own definition rather than trusted`,
+  `SELF-CHECK: PROC PHREG's "without covariates" -2 LOG L must equal -2 times the closed-form null partial log-likelihood computed here from the same data`,
+  `THE ANCHOR, where it applies: if every risk set has the same exposed share p, the partial likelihood collapses to a binomial whose maximum is closed form, HR = [q/(1-q)] / [p/(1-p)] with q the exposed share of events. Real risk sets drift, so this is usually NOT APPLICABLE and says so - it is a verification device, the way a saturated 2x2 is`,
+  `the one-step estimator exp(U(0)/I(0)) is the FIRST NEWTON STEP from the null, not the maximum. It is reported because it is executable, and labelled because it is not the answer`,
+];
+
+export function coxParity(
+  an: CoxAnalysis,
+  consumed: {
+    settingFilter: string; censorTerms: string[]; dataCut: string | null;
+    referenceLevel: string; exposedLevel: string; terms: string[];
+  },
+): CoxParity {
+  return {
+    id: an.id,
+    codeListId: survivalOutcome(an)?.codeListId ?? "",
+    washout: { start: an.washout.start, end: an.washout.end, includesIndex: an.washout.includesIndex },
+    censorTerms: consumed.censorTerms,
+    dataCut: consumed.dataCut,
+    settingFilter: consumed.settingFilter,
+    referenceLevel: consumed.referenceLevel,
+    exposedLevel: consumed.exposedLevel,
+    terms: consumed.terms,
+    ties: "breslow",
+    nullLoglik: "closed_form_breslow",
+    score: "closed_form_equals_logrank_numerator",
+    information: "closed_form_breslow",
+    oneStep: "first_newton_step",
+    fittedCoefficient: "sas_primary",
+    selfChecks: ["null_minus_2_loglik", "score_at_beta_hat_is_zero", "constant_proportion_closed_form"],
   };
 }

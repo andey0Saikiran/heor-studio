@@ -373,11 +373,49 @@ export interface SurvivalAnalysis extends AnalysisCommon {
   emitLifeTable: boolean;
 }
 
-/** The outcome definition a survival endpoint carries, or null for the refused
- *  mortality endpoint. Callers that reach the emitters never see null: readiness
- *  blocks the death arm before any code is generated. */
-export function survivalOutcome(an: SurvivalAnalysis): OutcomeDefinition | null {
+/**
+ * THE MORTALITY REFUSAL, written once and used by every time-to-event kind.
+ *
+ * It lives here rather than inline in one readiness case because the argument is
+ * about the DATA, not about any particular analysis: the moment a second kind
+ * accepted a `death` endpoint, a refusal copied into one switch arm and not the
+ * other would be a gate with a hole in it. Survival and Cox both read this.
+ */
+export const MORTALITY_REFUSAL =
+  `overall survival is REFUSED, not approximated. MarketScan's only native death signal is DSTATUS, which records IN-HOSPITAL death only and is masked from data year 2016 — so this analysis would silently become "time to in-hospital death before 2016, with every other death censored". Censoring by death is exactly the informative censoring Kaplan-Meier and Cox both assume away, and it biases survival UPWARD. Use a claims_event endpoint (an observable diagnosis or procedure), or bring linked mortality data and a design that states its ascertainment.`;
+
+/** The outcome definition a time-to-event endpoint carries, or null for the
+ *  refused mortality endpoint. Callers that reach the emitters never see null:
+ *  readiness blocks the death arm before any code is generated. */
+export function survivalOutcome(an: { endpoint: SurvivalEndpoint }): OutcomeDefinition | null {
   return an.endpoint.kind === "claims_event" ? an.endpoint.outcomeDefinition : null;
+}
+
+/**
+ * Cox proportional hazards.
+ *
+ * The one family whose coefficient genuinely needs Newton — and, it turns out,
+ * not the family with the least verification. See emitters/cox-core.ts: the
+ * partial log-likelihood at the null, the score, the information and the
+ * one-step estimator are all closed form and run in both twins, and the emitted
+ * SAS checks PROC PHREG against three of them rather than trusting it.
+ *
+ * `ties` is deliberately not a free choice — see readiness.
+ *
+ * Ref: Cox JRSS-B 1972;34:187; Breslow Biometrics 1974;30:89.
+ */
+export interface CoxAnalysis extends AnalysisCommon {
+  kind: "cox";
+  endpoint: SurvivalEndpoint;
+  washout: RelativeWindow;
+  /** the clock. MUST censor at "outcome", same as survival. */
+  personTimeRule: PersonTimeRule;
+  /** REQUIRED two-level exposure — the coefficient this model is about */
+  groupVarId: string;
+  /** adjusted terms; the adjusted fit is SAS-primary in full */
+  covariateIds: string[];
+  /** Breslow only. Efron is refused, with its reason, in readiness. */
+  ties: "breslow" | "efron";
 }
 
 /* ----- Regression (one GLM emitter) ----- */
@@ -628,6 +666,7 @@ export type Analysis =
   | ComorbidityIndexAnalysis
   | RegressionAnalysis
   | SurvivalAnalysis
+  | CoxAnalysis
   | StatisticalEngineAnalysis
   | FutureAnalysisStub;
 
@@ -654,6 +693,7 @@ export const EMITTABLE_ANALYSIS_KINDS: ReadonlySet<AnalysisKind> = new Set<Analy
   "comorbidity_index",
   "regression",
   "survival",
+  "cox",
 ]);
 
 export type DescriptiveAnalysis =
@@ -1076,9 +1116,7 @@ export function validateAnalyses(spec: StudySpec): string[] {
          * direction that flatters survival, because dying is the most
          * censoring-like thing a person can do. */
         if (a.endpoint.kind === "death") {
-          problems.push(
-            `${w}: overall survival is REFUSED, not approximated. MarketScan's only native death signal is DSTATUS, which records IN-HOSPITAL death only and is masked from data year 2016 — so this curve would silently become "time to in-hospital death before 2016, with every other death censored". Censoring by death is exactly the informative censoring Kaplan-Meier assumes away, and it biases survival UPWARD. Use a claims_event endpoint (an observable diagnosis or procedure), or bring linked mortality data and a design that states its ascertainment.`,
-          );
+          problems.push(`${w}: ${MORTALITY_REFUSAL}`);
           break;
         }
         requireCodeList(a.endpoint.outcomeDefinition.codeListId, `${w} endpoint`);
@@ -1108,6 +1146,45 @@ export function validateAnalyses(spec: StudySpec): string[] {
               problems.push(`${w}: exposure "${gvS.id}" has no referenceLevel — without one the sign of the log-rank statistic, and therefore the direction of the hazard ratio, is arbitrary.`);
           }
         }
+        break;
+      }
+      case "cox": {
+        /* The SAME mortality gate as survival, from the SAME constant. A second
+         * time-to-event kind is exactly how a refusal quietly stops covering
+         * everything it was written for. */
+        if (a.endpoint.kind === "death") {
+          problems.push(`${w}: ${MORTALITY_REFUSAL}`);
+          break;
+        }
+        requireCodeList(a.endpoint.outcomeDefinition.codeListId, `${w} endpoint`);
+        if (a.endpoint.outcomeDefinition.minClaims < 1) problems.push(`${w}: minClaims must be >= 1.`);
+        if (!a.personTimeRule.censorAt.includes("outcome"))
+          problems.push(
+            `${w}: personTimeRule.censorAt must include "outcome" for a Cox model — otherwise every survival time is the administrative one and the partial likelihood is built on risk sets that never lose anyone to the event.`,
+          );
+        /* BRESLOW ONLY, and the reason matters more than the rule.
+         *
+         * Efron's approximation is usually the better one when ties are common,
+         * and PROC PHREG will happily fit it. But every closed form the SQL twin
+         * computes — the null log-likelihood, the score, the information, the
+         * one-step estimator — is Breslow's. If SAS maximized Efron's likelihood
+         * instead, the emitted program's own self-check "U(beta_hat) = 0" would
+         * be testing the fitted coefficient against the WRONG score function and
+         * would fail on a correct fit. A twin pair that disagrees about which
+         * likelihood is being maximized is worse than one that only offers one. */
+        if (a.ties !== "breslow")
+          problems.push(
+            `${w}: ties:"${a.ties}" is not emitted — both twins compute Breslow's closed forms, and a SAS fit maximizing Efron's likelihood would fail this program's own U(beta_hat)=0 self-check even when correct. Efron is generally preferable when tied event times are COMMON, so if that is the case here, treat this model as approximate and say so. Set ties:"breslow".`,
+          );
+        const gvC = groupVars.find((g) => g.id === a.groupVarId);
+        if (!gvC) problems.push(`${w}: groupVarId "${a.groupVarId}" is not in groupVars[].`);
+        else {
+          if (gvC.levels.length !== 2)
+            problems.push(`${w}: exposure "${gvC.id}" has ${gvC.levels.length} levels — the closed forms this model is checked against are the two-group ones, so exactly 2 are required.`);
+          if (!gvC.referenceLevel)
+            problems.push(`${w}: exposure "${gvC.id}" has no referenceLevel — without one the sign of the coefficient, and so the direction of the hazard ratio, is arbitrary.`);
+        }
+        a.covariateIds.forEach((b) => requireBaseline(b, `${w} covariate`));
         break;
       }
       case "statistical_engine": {

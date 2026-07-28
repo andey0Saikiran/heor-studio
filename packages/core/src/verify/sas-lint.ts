@@ -179,7 +179,15 @@ export function sasStructureChecks(files: SasFile[]): Check[] {
      * a DATA step does, and this check flagged a correct program until it knew
      * that. Found by the regression module, which is the first to capture
      * PROC LOGISTIC's ParameterEstimates. */
-    for (const m of codeNS.matchAll(/ods\s+output\s+[^;]*?=\s*(work\.\w+)/gi)) created.add(m[1].toLowerCase());
+    /* ONE `ods output` statement can route SEVERAL tables at once:
+     *   ods output ParameterEstimates = work._a
+     *              FitStatistics      = work._b;
+     * The old pattern was non-greedy up to the first `=`, so it saw work._a and
+     * missed work._b — and then flagged the program for reading a dataset
+     * nothing created. Take every target in the statement, not the first. */
+    for (const stmt of codeNS.matchAll(/ods\s+output\b[^;]*/gi)) {
+      for (const m of stmt[0].matchAll(/=\s*(work\.\w+)/gi)) created.add(m[1].toLowerCase());
+    }
     const referenced = new Set<string>();
     for (const m of codeNS.matchAll(/\bfrom\s+(work\.\w+)/gi)) referenced.add(m[1].toLowerCase());
     for (const m of codeNS.matchAll(/\bjoin\s+(work\.\w+)/gi)) referenced.add(m[1].toLowerCase());

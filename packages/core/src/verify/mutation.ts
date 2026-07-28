@@ -478,6 +478,93 @@ const MUTATIONS: Mutation[] = [
       /(CAST\('p_value' AS VARCHAR\),\s*\n\s*CAST\(40004 AS INT\),(?:\s*CAST\(NULL AS INT\),)+\s*\n\s*)CAST\(NULL AS NUMERIC\)/,
       "$1CAST(0.05 AS NUMERIC)"),
   },
+  /* ---- cox ----------------------------------------------------------------- *
+   * The first two are the ones worth reading. Both corrupt a quantity that is
+   * NUMERICALLY IDENTICAL on Gold Case A to the thing it was swapped with, so
+   * execution against that fixture cannot see them at all — the fingerprint
+   * can, and Gold Case C then makes them numbers. That pairing is the argument
+   * for having both mechanisms. */
+  {
+    /* Breslow's information replaced by the LOG-RANK VARIANCE. They are the same
+     * value whenever no event time is tied, which is every event time on Gold
+     * Case A — so every executed check there still passes. On Gold Case C the
+     * two are 3/4 and 13/20. */
+    name: "SQL Cox information silently becomes the log-rank variance (identical without ties)",
+    kind: "cox", lang: "sql",
+    apply: (t) => t.replace(
+      /SUM\(d \* 1\.0 \* n1 \* \(n - n1\) \/ NULLIF\(n \* 1\.0 \* n, 0\)\) AS information0/,
+      "SUM(CASE WHEN n > 1 THEN d * 1.0 * (n - d) * n1 * (n - n1) / (n * 1.0 * n * (n - 1)) ELSE 0 END) AS information0"),
+  },
+  {
+    /* The null partial log-likelihood loses its event-count weight. With d = 1
+     * everywhere, d*ln(n) IS ln(n), so this changes nothing on Gold Case A and
+     * shifts the number PHREG is checked against the moment a time is tied. */
+    name: "SAS null log-likelihood drops the event-count weight (invisible without ties)",
+    kind: "cox", lang: "sas",
+    apply: (t) => t.replace(/-sum\(d \* log\(n\)\) as loglik0/, "-sum(log(n)) as loglik0"),
+  },
+  {
+    /* The score loses its expectation: what remains is the raw exposed event
+     * count, which is a number with the right units and no meaning as a score. */
+    name: "SQL Cox score drops the expected count (U becomes O)",
+    kind: "cox", lang: "sql",
+    apply: (t) => t.replace(/SUM\(d1\) - SUM\(d \* 1\.0 \* n1 \/ NULLIF\(n, 0\)\) AS score_u0/, "SUM(d1) AS score_u0"),
+  },
+  {
+    /* THE ANCHOR FIRES UNCONDITIONALLY. The closed form is only the maximum
+     * when the risk-set share is constant; without that guard it prints a
+     * confident wrong hazard ratio on every study that is not Gold Case C. */
+    name: "SQL closed-form anchor drops its constant-proportion guard",
+    kind: "cox", lang: "sql",
+    apply: (t) => t.replace(/AND ABS\(c\.p_max - c\.p_min\) < 1e-12/, "AND 1 = 1"),
+  },
+  {
+    /* The separation guard removed: with every event in one arm the maximum
+     * likelihood estimate is INFINITE, and this would report a finite number
+     * for it. */
+    name: "SAS closed-form anchor stops guarding complete separation",
+    kind: "cox", lang: "sas",
+    apply: (t) => t.replace(/and d1_exposed > 0 and d1_exposed < d_total then do;/, "and 1 then do;"),
+  },
+  {
+    /* THE STRONGEST SELF-CHECK, deleted. The program still fits the model and
+     * still prints a coefficient; nothing then verifies that the coefficient
+     * solves the equation defining it. */
+    name: "SAS deletes the U(beta_hat) = 0 self-check",
+    kind: "cox", lang: "sas",
+    apply: (t) => t.replace(
+      /u_at_bhat = u_at_bhat \+ d1 - d \* \(n1 \* _r\) \/ \(\(n - n1\) \+ n1 \* _r\);/,
+      "u_at_bhat = 0;"),
+  },
+  {
+    // The null -2logL comparison silently always passes.
+    name: "SAS null -2logL check compares a number against itself",
+    kind: "cox", lang: "sas",
+    apply: (t) => t.replace(/_gap = abs\(closed_form_m2ll - phreg_m2ll\);/, "_gap = 0;"),
+  },
+  {
+    /* ties=efron with Breslow closed forms. PHREG would maximize a DIFFERENT
+     * likelihood than every quantity this program checks it against, so the
+     * U(beta_hat)=0 check would fail on a correct fit — which is exactly why
+     * readiness refuses efron rather than offering it. */
+    name: "SAS switches to Efron ties while the closed forms stay Breslow",
+    kind: "cox", lang: "sas",
+    apply: (t) => t.replace(/\/ ties=breslow risklimits;/, "/ ties=efron risklimits;"),
+  },
+  {
+    /* SAS-PRIMARY, filled in: SQL reports the one-step estimate as the fitted
+     * coefficient. It is the right order of magnitude and the wrong number —
+     * 0.35728 against a maximum of 0.35583 on Gold Case A, and 0.51342 against
+     * an exact 0.5 on Gold Case C. */
+    name: "SQL reports the one-step estimate as the FITTED Cox coefficient",
+    kind: "cox", lang: "sql",
+    /* /g DELIBERATELY: the emitter writes one adjusted row per model term, and
+     * corrupting only the first leaves the others NULL for a single-occurrence
+     * check to find. Same trap as the OLS pooled variance and the D3 spine. */
+    apply: (t) => t.replace(
+      /(CAST\('adjusted' AS VARCHAR\) AS component,[\s\S]{0,200}?CAST\(\d+ AS INT\) AS ord,\s*\n\s*)CAST\(NULL AS NUMERIC\) AS estimate/g,
+      "$1ROUND(CAST(EXP(score_u0 / NULLIF(information0, 0)) AS NUMERIC), 5) AS estimate"),
+  },
 ];
 
 interface Program {

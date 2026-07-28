@@ -790,6 +790,7 @@ const ANALYSIS_KIND_LABELS: Record<AnalysisKind, string> = {
   comorbidity_index: "Comorbidity index",
   regression: "Regression model",
   survival: "Survival (Kaplan-Meier / log-rank)",
+  cox: "Cox proportional hazards",
   statistical_engine: "Statistical comparison",
   future_stub: "Planned (not generated yet)",
 };

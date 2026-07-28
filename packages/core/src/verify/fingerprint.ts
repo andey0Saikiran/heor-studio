@@ -427,6 +427,59 @@ function sqlFingerprint(kind: string, raw: string): Fingerprint {
       }
       break;
     }
+    case "cox": {
+      /* A Cox model is its RISK SETS and its likelihood. Every scrape below is
+       * an expression whose corruption still yields a plausible hazard ratio. */
+      put(fp, "exposed_level", grab(sql, [/WHEN arm = '([^']+)' THEN 1 ELSE 0 END AS exposed/i]));
+      put(fp, "arm_levels", (sql.match(/arm IN \('([^']+)', '([^']+)'\)/i) ?? []).slice(1).join(","));
+      put(fp, "risk_set_includes_t", count(sql, /s\.t >= e\.t/g));
+      put(fp, "time_stops_at_event", /LEAST\(COALESCE\(fu_date, DATE '9999-12-31'\), admin_censor\)/i.test(sql) ? "yes" : "no");
+      put(fp, "censor_bounds", censorBoundsSql(sql));
+      /* THE SCORE. Corrupting it to SUM(d1) alone, or to the wrong margin,
+       * produces a number with the right units and the wrong meaning. */
+      put(fp, "score_is_o_minus_e",
+        /SUM\(d1\) - SUM\(d \* 1\.0 \* n1 \/ NULLIF\(n, 0\)\) AS score_u0/i.test(sql) ? "yes" : "no");
+      /* BRESLOW INFORMATION, which is NOT the log-rank variance: it has no
+       * (n-d)/(n-1) factor. Substituting one for the other is invisible on any
+       * fixture without a tied event time, which is why Gold Case C exists. */
+      put(fp, "information_is_breslow",
+        /SUM\(d \* 1\.0 \* n1 \* \(n - n1\) \/ NULLIF\(n \* 1\.0 \* n, 0\)\) AS information0/i.test(sql) ? "yes" : "no");
+      put(fp, "null_loglik_form", /-SUM\(d \* LN\(n\)\) AS loglik0/i.test(sql) ? "yes" : "no");
+      put(fp, "logrank_variance_emitted_beside", /'logrank_variance'/i.test(sql) ? "yes" : "no");
+      put(fp, "one_step_is_u_over_i", /score_u0 \/ NULLIF\(information0, 0\)/i.test(sql) ? "yes" : "no");
+      /* Anchored on the information0 guard, not on a bare "> n THEN 1": the
+       * tied-event-time counter is written `CASE WHEN d > 1 THEN 1 ELSE 0 END`
+       * and matched first, so the loose pattern reported the critical value as
+       * "1" on a perfectly correct program. */
+      put(fp, "score_critical_value", grab(sql, [/NULLIF\(information0, 0\) > ([\d.]+) THEN 1 ELSE 0 END/i]));
+      /* THE ANCHOR and its two guards. A closed form emitted when the
+       * proportion is NOT constant would be a wrong number; one emitted under
+       * complete separation would be a finite stand-in for an infinite
+       * estimate. */
+      put(fp, "anchor_requires_constant_proportion",
+        /ABS\(c\.p_max - c\.p_min\) < 1e-12/i.test(sql) ? "yes" : "no");
+      put(fp, "anchor_guards_separation",
+        /c\.d1_exposed > 0 AND c\.d1_exposed < c\.d_total/i.test(sql) ? "yes" : "no");
+      put(fp, "anchor_closed_form",
+        /\/ \(c\.p_min \/ \(1 - c\.p_min\)\)/i.test(sql) ? "yes" : "no");
+      put(fp, "model_terms", [...sql.matchAll(/CAST\('adjusted' AS VARCHAR\) AS component, CAST\('([^']*)' AS VARCHAR\) AS term/g)].map((m) => m[1]).join(","));
+      // SAS-PRIMARY (language-local): the fitted coefficient must be NULL here.
+      /* EVERY adjusted estimate must be NULL, counted — not "some adjusted row
+       * has a NULL estimate somewhere".
+       *
+       * The first version looked for one matching row, and a mutation that
+       * filled in only the FIRST of three adjusted rows left it green: the
+       * regex simply found one of the two that were still NULL. The contract
+       * is universal, so the check counts. (This is the third time a
+       * single-occurrence pattern has hidden a partial corruption in this repo
+       * — the D3 spine mutation and the OLS pooled variance were the others.) */
+      {
+        const adjusted = [...sql.matchAll(/CAST\('adjusted' AS VARCHAR\) AS component,[\s\S]{0,240}?CAST\(\d+ AS INT\) AS ord,\s*\n\s*(\S+[^\n]*?) AS estimate/g)];
+        put(fp, "cox_fit_null_in_sql",
+          adjusted.length > 0 && adjusted.every((m) => m[1] === "CAST(NULL AS NUMERIC)") ? "yes" : "no");
+      }
+      break;
+    }
     case "comorbidity_index": {
       /* The index IS its weights and its hierarchy. A dropped supersession or a
        * shifted weight produces a score that is wrong by a plausible amount on
@@ -676,6 +729,46 @@ function sasFingerprint(kind: string, rawSas: string, setup: string): Fingerprin
       put(fp, "km_anchor_present",
         /proc lifetest data=work\.\w+ method=km conftype=\w+ outsurv=/i.test(sas) &&
         /anchor_verdict = 'PASS: LIFETEST = closed-form product limit'/i.test(sas) ? "yes" : "no");
+      break;
+    }
+    case "cox": {
+      put(fp, "exposed_level", grab(sas, [/exposed = \(arm = "([^"]+)"\)/i]));
+      put(fp, "arm_levels", (sas.match(/arm not in \("([^"]+)", "([^"]+)"\)/i) ?? []).slice(1).join(","));
+      put(fp, "risk_set_includes_t", count(sas, /s\.t >= e\.t/g));
+      put(fp, "time_stops_at_event", /min\(coalesce\(fu_date, '31DEC9999'd\), admin_censor\)/i.test(sas) ? "yes" : "no");
+      put(fp, "censor_bounds", censorBoundsSas(sas));
+      put(fp, "score_is_o_minus_e", /sum\(d1\) - sum\(d \* n1 \/ n\) as score_u0/i.test(sas) ? "yes" : "no");
+      put(fp, "information_is_breslow", /sum\(d \* n1 \* \(n - n1\) \/ \(n \* n\)\) as information0/i.test(sas) ? "yes" : "no");
+      put(fp, "null_loglik_form", /-sum\(d \* log\(n\)\) as loglik0/i.test(sas) ? "yes" : "no");
+      put(fp, "logrank_variance_emitted_beside", /'logrank_variance'/i.test(sas) ? "yes" : "no");
+      put(fp, "one_step_is_u_over_i", /_lhr = score_u0 \/ information0/i.test(sas) ? "yes" : "no");
+      put(fp, "score_critical_value", grab(sas, [/estimate = \(_chi > ([\d.]+)\)/i]));
+      put(fp, "anchor_requires_constant_proportion", /abs\(p_max - p_min\) < 1e-12/i.test(sas) ? "yes" : "no");
+      put(fp, "anchor_guards_separation", /d1_exposed > 0 and d1_exposed < d_total/i.test(sas) ? "yes" : "no");
+      put(fp, "anchor_closed_form", /\(_q \/ \(1 - _q\)\) \/ \(p_min \/ \(1 - p_min\)\)/i.test(sas) ? "yes" : "no");
+      put(fp, "model_terms", (sas.match(/term="([^"]*)"; ord=4\d+; output;/g) ?? []).map((m) => (/term="([^"]*)"/.exec(m) ?? [])[1]).join(","));
+      /* Language-local: the fit itself, and the THREE self-checks on it. Each
+       * can be deleted individually while leaving a program that still produces
+       * every number and checks none of them. */
+      /* The tie option is scraped FROM THE MODEL STATEMENT, not from anywhere
+       * in the file. A bare /ties=breslow/ also matched the method label
+       * "sas_proc_phreg (ties=breslow)" further down, so switching the actual
+       * fit to Efron — which would make every closed form here describe a
+       * different likelihood than the one being maximized — left this green. */
+      put(fp, "cox_fit_in_sas",
+        /proc phreg data=work\.\w+;/i.test(sas) && /model t\*ev\(0\) = [^;]*ties=breslow/i.test(sas) ? "yes" : "no");
+      /* The COMPARISON, not just the verdict string. Testing for the PASS text
+       * alone passed a mutation that set the gap to a constant zero: the
+       * program still printed "PASS" and had checked nothing. */
+      put(fp, "cox_null_loglik_check",
+        /_gap = abs\(closed_form_m2ll - phreg_m2ll\);/i.test(sas) &&
+        /null_ll_verdict = 'PASS: PHREG null -2logL = closed form'/i.test(sas) ? "yes" : "no");
+      put(fp, "cox_score_zero_check",
+        /u_at_bhat = u_at_bhat \+ d1 - d \* \(n1 \* _r\) \/ \(\(n - n1\) \+ n1 \* _r\)/i.test(sas) &&
+        /score_verdict = 'PASS: U\(beta_hat\) = 0, the fit solves its own equation'/i.test(sas) ? "yes" : "no");
+      put(fp, "cox_anchor_check",
+        /anchor_verdict = 'PASS: fitted HR = closed-form binomial maximum'/i.test(sas) &&
+        /anchor_verdict = 'NOT APPLICABLE: risk-set exposure share is not constant'/i.test(sas) ? "yes" : "no");
       break;
     }
     case "comorbidity_index": {
@@ -1165,6 +1258,15 @@ const EXPECTED_CONSTANTS: Record<string, Record<"sql" | "sas", ConstantProfileSp
     sql: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
     sas: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
   },
+  cox: {
+    /* z = 2: both bounds of the one-step hazard ratio's Wald interval, and
+     *        nowhere else - the fitted interval is PHREG's and is NULL here.
+     * z2 = 1: 3.8416 in the score test's alpha = 0.05 decision, the same
+     *        literal the Wilson interval uses, because it IS z^2.
+     * The Wilson constants must not appear: no proportion is estimated here. */
+    sql: { z: 2, z2_half: 0, z2: 1, z2_quarter: 0 },
+    sas: { z: 2, z2_half: 0, z2: 1, z2_quarter: 0 },
+  },
   survival: {
     /* TWO whole profiles, because a survival analysis with a two-group
      * comparison genuinely emits two more intervals than one without.
@@ -1280,6 +1382,11 @@ export const LANGUAGE_LOCAL_KEYS: Record<string, { language: "sql" | "sas"; must
   logrank_p_null_in_sql: { language: "sql", must: "yes", means: "the log-rank p-value is NULL in SQL, not approximated from the statistic beside it" },
   logrank_p_computed_in_sas: { language: "sas", must: "yes", means: "the log-rank p-value is genuinely produced by PROC LIFETEST" },
   km_anchor_present: { language: "sas", must: "yes", means: "PROC LIFETEST is run beside the closed-form life table and compared to it, with a verdict printed" },
+  cox_fit_null_in_sql: { language: "sql", must: "yes", means: "the fitted Cox coefficient is NULL in SQL, not approximated by the one-step estimate sitting above it" },
+  cox_fit_in_sas: { language: "sas", must: "yes", means: "PROC PHREG fits the model, with ties=breslow stated explicitly rather than left to the default" },
+  cox_null_loglik_check: { language: "sas", must: "yes", means: "PHREG's null -2 LOG L is checked against the closed-form partial log-likelihood" },
+  cox_score_zero_check: { language: "sas", must: "yes", means: "U(beta_hat) = 0 is verified — the fitted coefficient is checked against the equation that defines it" },
+  cox_anchor_check: { language: "sas", must: "yes", means: "the constant-proportion closed form is checked, and says NOT APPLICABLE rather than passing vacuously when it does not apply" },
 };
 
 /** Assert every language-local key present in a fingerprint holds its required

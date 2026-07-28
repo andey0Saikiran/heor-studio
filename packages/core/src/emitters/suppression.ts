@@ -231,6 +231,21 @@ export const SUPPRESSION_SHAPES: Record<string, SuppressionShape> = {
     keepCols: ["ord", "method"],
     tieBreakCol: "time_days",
   },
+  cox: {
+    /* Same shape as the regression table, and for the same reason: the DESIGN
+     * rows are the counts everything else is computed from, so everything masks
+     * with them. The score, information and one-step rows carry no counts, but
+     * an estimate fitted on a handful of events is as identifying as the event
+     * counts it came from — and unlike the survival life table, none of these
+     * rows is per-patient, so the whole table does not vanish at a realistic
+     * threshold. */
+    labelCols: ["measure", "component", "term", "statistic"],
+    groupCols: ["measure", "component"],
+    countCol: "estimate",
+    maskCols: ["estimate", "se", "ci_low", "ci_high"],
+    keepCols: ["ord", "method"],
+    tieBreakCol: "statistic",
+  },
   table1: {
     labelCols: ["ord", "characteristic", "category"],
     groupCols: ["characteristic"],

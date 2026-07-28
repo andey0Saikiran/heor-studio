@@ -16,6 +16,7 @@ import { sasStructureChecks } from "./sas-lint";
 import { emitSas } from "../emitters/sas";
 import { GOLD_A_SPEC, GOLD_A_OPTS, EXPECTED } from "./fixture";
 import { GOLD_B_SPEC, GOLD_B_OPTS, EXPECTED_B, fixtureBSeedSql } from "./fixture-b";
+import { GOLD_C_SPEC, GOLD_C_OPTS, EXPECTED_C, fixtureCSeedSql } from "./fixture-c";
 import { EMITTABLE_ANALYSIS_KINDS } from "../spec/types";
 import type { StudySpec, EmitOptions } from "../index";
 
@@ -456,6 +457,153 @@ export async function verifyGoldB(): Promise<Check[]> {
   // parity for B's own emission, not just A's
   out.push(...sasSqlParityChecks(GOLD_B_SPEC, GOLD_B_OPTS));
   out.push(...sasStructureChecks(emitSas(GOLD_B_SPEC, GOLD_B_OPTS)));
+  return out;
+}
+
+/**
+ * Gold Case C — the tie fixture.
+ *
+ * Three pieces of arithmetic are unreachable on Gold Cases A and B, because on
+ * both of them every subject fails on a different day: the Kaplan-Meier (n-d)/n
+ * factor with d > 1, the log-rank's (n-d)/(n-1) tie correction, and the gap
+ * between Cox's Breslow information and the log-rank variance — which is
+ * exactly that correction and is therefore INVISIBLE without a tie.
+ *
+ * This case makes all three numbers. It also, unexpectedly, has a closed-form
+ * Cox coefficient: every risk set here is half exposed, and under a constant
+ * exposure share the partial likelihood is binomial.
+ */
+export async function verifyGoldC(): Promise<Check[]> {
+  const { db, ok, steps } = await seedAndRun(GOLD_C_SPEC, GOLD_C_OPTS, fixtureCSeedSql());
+  const out: Check[] = [];
+  if (!ok) {
+    return [{
+      name: "Gold Case C executes",
+      status: "fail",
+      detail: steps.filter((x) => !x.ok).map((x) => `${x.path}: ${x.error}`).join(" | "),
+    }];
+  }
+  const eq = (name: string, got: number | null | undefined, want: number) =>
+    out.push({ name, status: got === want ? "pass" : "fail", detail: `expected ${want}, got ${got}` });
+  const approx = (name: string, got: number, want: number, tol: number) =>
+    out.push({ name, status: Math.abs(got - want) <= tol ? "pass" : "fail", detail: `expected ${want}±${tol}, got ${got}` });
+
+  eq("C: cohort N = 6", await scalar<number>(db, "SELECT count(*)::int FROM tz_c_cohort"), EXPECTED_C.cohortN);
+
+  /* ---- Kaplan-Meier with a TIED event time ---- */
+  const kmRow = async (stratum: string, t: number) =>
+    (
+      await rows<{ n_risk: number; n_event: number; estimate: number; se: number; ci_low: number; ci_high: number }>(
+        db,
+        `SELECT n_risk, n_event, estimate::float8, se::float8, ci_low::float8, ci_high::float8
+           FROM tz_c_km
+          WHERE component = 'life_table' AND stratum = '${stratum}' AND time_days = ${t}`,
+      )
+    )[0];
+  for (const want of EXPECTED_C.km.overall) {
+    const r = await kmRow("Overall", want.t);
+    const tag = `C: km Overall @${want.t}d`;
+    if (!r) { out.push({ name: tag, status: "fail", detail: "row missing" }); continue; }
+    eq(`${tag}: at risk = ${want.nRisk}`, Number(r.n_risk), want.nRisk);
+    /* d = 2 HERE. This is the number no other fixture produces, and the factor
+     * (n-d)/n it drives: a life table that removed one member per event time
+     * would report 5/6 = 0.83333 instead of 4/6. */
+    eq(`${tag}: events = ${want.nEvent}${want.nEvent > 1 ? " (TIED — unreachable on Gold A/B)" : ""}`, Number(r.n_event), want.nEvent);
+    approx(`${tag}: S = ${want.surv}`, Number(r.estimate), want.surv, 0.00001);
+    approx(`${tag}: Greenwood se = ${want.se}`, Number(r.se), want.se, 0.00001);
+    approx(`${tag}: CI low = ${want.ci[0]}`, Number(r.ci_low), want.ci[0], 0.00001);
+    approx(`${tag}: CI high = ${want.ci[1]}`, Number(r.ci_high), want.ci[1], 0.00001);
+  }
+  const medRow = async (stratum: string) =>
+    (
+      await rows<{ estimate: number | null }>(
+        db,
+        `SELECT estimate::float8 FROM tz_c_km WHERE component = 'median' AND stratum = '${stratum}'`,
+      )
+    )[0];
+  eq("C: median Overall = 200", Number((await medRow("Overall"))?.estimate), EXPECTED_C.km.medianOverall);
+  eq("C: median DRUG_X = 200", Number((await medRow("DRUG_X"))?.estimate), EXPECTED_C.km.medianX);
+  out.push({
+    name: "C: median DRUG_Y is NOT REACHED",
+    status: (await medRow("DRUG_Y"))?.estimate === null ? "pass" : "fail",
+    detail: `got ${(await medRow("DRUG_Y"))?.estimate}`,
+  });
+
+  /* ---- the log-rank, with the tie correction ACTIVE ---- */
+  const lrRow = async (statistic: string) =>
+    (
+      await rows<{ estimate: number | null }>(
+        db,
+        `SELECT estimate::float8 FROM tz_c_km WHERE component = 'logrank' AND statistic = '${statistic}'`,
+      )
+    )[0];
+  eq("C: log-rank observed = 1", Number((await lrRow("observed_exposed"))?.estimate), EXPECTED_C.logRank.observed);
+  approx("C: log-rank expected = 3/2", Number((await lrRow("expected_exposed"))?.estimate), EXPECTED_C.logRank.expected, 0.00001);
+  /* (n-d)/(n-1) = 4/5 at the tied time. Without the correction the variance
+   * would be 0.75 + 0.25 = 1.0 rather than 13/20 — which is exactly the Cox
+   * information below, and is how the two could be confused. */
+  approx("C: log-rank variance = 13/20, the TIE CORRECTION applied", Number((await lrRow("variance"))?.estimate), EXPECTED_C.logRank.variance, 0.00001);
+  approx("C: log-rank chi-square = 5/13", Number((await lrRow("chi_square"))?.estimate), EXPECTED_C.logRank.chiSquare, 0.00001);
+
+  /* ---- Cox: the closed forms, and the difference a tie makes ---- */
+  const cxRow = async (statistic: string) =>
+    (
+      await rows<{ estimate: number | null; se: number | null; ci_low: number | null; ci_high: number | null; method: string }>(
+        db,
+        `SELECT estimate::float8, se::float8, ci_low::float8, ci_high::float8, method
+           FROM tz_c_cox WHERE statistic = '${statistic}'`,
+      )
+    )[0];
+  eq("C: 1 tied event time", Number((await cxRow("tied_event_times"))?.estimate), EXPECTED_C.cox.tiedEventTimes);
+  approx("C: partial logL(0) = -(2 ln 6 + ln 4)", Number((await cxRow("partial_loglik_0"))?.estimate), EXPECTED_C.cox.partialLogLik0, 0.00001);
+  approx("C: -2 logL(0) = 9.93963 (compare PHREG's null fit statistic)", Number((await cxRow("minus_2_loglik_0"))?.estimate), EXPECTED_C.cox.minusTwoLogLik0, 0.00001);
+  /* The SCORE is the same statistic as the log-rank numerator even here. */
+  approx("C: Cox score U(0) = -1/2", Number((await cxRow("score_u0"))?.estimate), EXPECTED_C.cox.score, 0.00001);
+  const lrN = Number((await lrRow("observed_exposed"))?.estimate) - Number((await lrRow("expected_exposed"))?.estimate);
+  approx("C: the Cox score EQUALS the log-rank numerator O - E", Number((await cxRow("score_u0"))?.estimate), lrN, 0.00001);
+
+  /* THE HEADLINE OF THIS FIXTURE. Breslow information and log-rank variance are
+   * the SAME number on Gold A and DIFFERENT here — 3/4 against 13/20. An
+   * implementation that reused one for the other passes every check on A. */
+  const info = Number((await cxRow("information_0"))?.estimate);
+  const lrv = Number((await cxRow("logrank_variance"))?.estimate);
+  approx("C: Cox information I(0) = 3/4", info, EXPECTED_C.cox.information, 0.00001);
+  approx("C: log-rank variance beside it = 13/20", lrv, EXPECTED_C.cox.logRankVariance, 0.00001);
+  out.push({
+    name: "C: information and log-rank variance DIFFER, because an event time is tied",
+    status: Math.abs(info - lrv) > 0.0001 ? "pass" : "fail",
+    detail: `I(0) = ${info} vs log-rank V = ${lrv} (they are equal on Gold Case A, which is the point)`,
+  });
+  approx("C: score chi-square = 1/3", Number((await cxRow("score_chi_square"))?.estimate), EXPECTED_C.cox.scoreChiSquare, 0.00001);
+
+  /* ---- THE ANCHOR: a closed-form Cox coefficient ---- */
+  const share = await cxRow("risk_set_exposed_share");
+  approx("C: every risk set is HALF exposed", Number(share?.estimate), EXPECTED_C.cox.riskSetProportion, 0.00001);
+  out.push({
+    name: "C: the program recognises the share as CONSTANT",
+    status: (share?.method ?? "").startsWith("CONSTANT") ? "pass" : "fail",
+    detail: share?.method ?? "no row",
+  });
+  approx("C: exposed share of EVENTS q = 1/3", Number((await cxRow("event_share_exposed"))?.estimate), EXPECTED_C.cox.eventShareExposed, 0.00001);
+  /* HR = [q/(1-q)] / [p/(1-p)] = (1/2)/(1) = 1/2, and an independent Newton
+   * solve of the partial likelihood agrees to ten decimals. This is the only
+   * place a Cox coefficient is checkable against anything but itself. */
+  approx("C: closed-form Cox HR = 1/2 EXACTLY (constant-proportion anchor)", Number((await cxRow("closed_form_hazard_ratio"))?.estimate), EXPECTED_C.cox.closedFormHr, 0.00001);
+  const one = await cxRow("hazard_ratio_one_step");
+  approx("C: one-step HR = exp(-2/3) = 0.51342", Number(one?.estimate), EXPECTED_C.cox.oneStepHr, 0.00001);
+  approx("C: one-step se = 1/sqrt(3/4)", Number(one?.se), EXPECTED_C.cox.oneStepSe, 0.00001);
+  /* The one-step is NOT the maximum, and here the gap is visible: 0.51342
+   * against the exact 0.5. A module that reported the one-step as "the hazard
+   * ratio" would be wrong by that much and look right. */
+  out.push({
+    name: "C: the one-step estimate DIFFERS from the exact maximum, as it must",
+    status: Math.abs(Number(one?.estimate) - EXPECTED_C.cox.closedFormHr) > 0.001 ? "pass" : "fail",
+    detail: `one-step ${one?.estimate} vs closed form ${EXPECTED_C.cox.closedFormHr}`,
+  });
+
+  // parity for C's own emission, not just A's
+  out.push(...sasSqlParityChecks(GOLD_C_SPEC, GOLD_C_OPTS));
+  out.push(...sasStructureChecks(emitSas(GOLD_C_SPEC, GOLD_C_OPTS)));
   return out;
 }
 
@@ -1316,6 +1464,90 @@ export async function verifyGoldA(): Promise<VerificationResult> {
       name: "km no-events: the median row EXISTS and says NOT REACHED",
       status: nMed !== undefined && nMed.estimate === null && /NOT REACHED/.test(nMed.method) ? "pass" : "fail",
       detail: nMed?.method ?? "row missing",
+    });
+
+    /* ---- Cox: what is closed form, and what is deferred ---- */
+    const cx = EXPECTED.cox;
+    const X_T = "tz_study_cox";
+    eq(`cox rows = ${cx.rowCount}`, await scalar<number>(db, `SELECT count(*)::int FROM ${X_T}`), cx.rowCount);
+    const xRow = async (statistic: string) =>
+      (
+        await rows<{ estimate: number | null; se: number | null; ci_low: number | null; ci_high: number | null; method: string }>(
+          db,
+          `SELECT estimate::float8, se::float8, ci_low::float8, ci_high::float8, method FROM ${X_T} WHERE statistic = '${statistic}'`,
+        )
+      )[0];
+    eq("cox: 3 distinct event times", Number((await xRow("event_times"))?.estimate), cx.eventTimes);
+    eq("cox: NO tied event times on Gold A", Number((await xRow("tied_event_times"))?.estimate), cx.tiedEventTimes);
+    approx("cox: partial logL(0) = -(ln8 + ln7 + ln6)", Number((await xRow("partial_loglik_0"))?.estimate), cx.partialLogLik0, 0.00001);
+    approx("cox: -2 logL(0) = 11.63422 (compare PHREG's null fit statistic)", Number((await xRow("minus_2_loglik_0"))?.estimate), cx.minusTwoLogLik0, 0.00001);
+    approx("cox: score U(0) = -31/42", Number((await xRow("score_u0"))?.estimate), cx.scoreU0, 0.00001);
+    approx("cox: information I(0) = 1265/1764", Number((await xRow("information_0"))?.estimate), cx.information0, 0.00001);
+
+    /* TWO IDENTITIES, both only checkable where nothing is tied.
+     * The log-rank test IS the Cox score test at the null, so the survival
+     * module and this one must produce the same two numbers from different
+     * expressions over different CTEs. Gold Case C shows the information and
+     * the variance coming apart the moment a tie exists. */
+    approx(
+      "cox: the score EQUALS the survival module's log-rank numerator O - E",
+      Number((await xRow("score_u0"))?.estimate),
+      EXPECTED.survival.logRank.observed - EXPECTED.survival.logRank.expected,
+      0.00001,
+    );
+    approx(
+      "cox: with NO ties, the information EQUALS the log-rank variance",
+      Number((await xRow("information_0"))?.estimate),
+      EXPECTED.survival.logRank.variance,
+      0.00001,
+    );
+    approx(
+      "cox: the score chi-square EQUALS the log-rank chi-square",
+      Number((await xRow("score_chi_square"))?.estimate),
+      EXPECTED.survival.logRank.chiSquare,
+      0.00001,
+    );
+    eq("cox: does NOT reject at alpha 0.05", Number((await xRow("reject_at_0.05"))?.estimate), cx.reject);
+
+    const os = await xRow("hazard_ratio_one_step");
+    approx("cox: one-step HR = exp(U/I) = 0.35728", Number(os?.estimate), cx.oneStep.hr, 0.00001);
+    approx("cox: one-step se = 1/sqrt(I) = 1.18088", Number(os?.se), cx.oneStep.se, 0.00001);
+    approx("cox: one-step CI low = 0.0353", Number(os?.ci_low), cx.oneStep.ci[0], 0.00001);
+    approx("cox: one-step CI high = 3.61563", Number(os?.ci_high), cx.oneStep.ci[1], 0.00001);
+    checks.push({
+      name: "cox: the one-step is LABELLED a Newton step, not the maximum",
+      status: /FIRST NEWTON STEP/.test(os?.method ?? "") ? "pass" : "fail",
+      detail: os?.method ?? "no row",
+    });
+
+    /* THE ANCHOR'S OTHER BRANCH. The risk-set exposed share here runs
+     * 1/2, 4/7, 2/3, so there is no closed-form maximum and the program must
+     * say NOT APPLICABLE rather than print the number Gold Case C gets. A
+     * check that only ever saw the applicable branch would not notice an
+     * anchor that fired unconditionally. */
+    const shareRow = await xRow("risk_set_exposed_share");
+    checks.push({
+      name: "cox: the exposed share VARIES, so no share is reported",
+      status: shareRow?.estimate === null && /VARIES/.test(shareRow?.method ?? "") ? "pass" : "fail",
+      detail: `estimate=${shareRow?.estimate}, method="${shareRow?.method}"`,
+    });
+    approx("cox: exposed share of EVENTS q = 1/3", Number((await xRow("event_share_exposed"))?.estimate), cx.eventShareExposed, 0.00001);
+    const cf = await xRow("closed_form_hazard_ratio");
+    checks.push({
+      name: "cox: the closed-form anchor is NOT APPLICABLE here, and says so",
+      status: cf?.estimate === null && /NOT APPLICABLE/.test(cf?.method ?? "") ? "pass" : "fail",
+      detail: cf?.method ?? "no row",
+    });
+
+    /* SAS-PRIMARY, asserted as ABSENT. A number in any adjusted row would mean
+     * something approximated a partial-likelihood maximum. */
+    const fitted = await rows<{ n: number }>(db, `SELECT count(*)::int AS n FROM ${X_T} WHERE component = 'adjusted' AND estimate IS NOT NULL`);
+    eq("cox: every fitted coefficient is NULL in SQL", Number(fitted[0]?.n), 0);
+    const scorePv = await xRow("score_p_value");
+    checks.push({
+      name: "cox: the score p-value is NULL and names PROC PHREG",
+      status: scorePv?.estimate === null && /sas_proc_phreg/.test(scorePv?.method ?? "") ? "pass" : "fail",
+      detail: scorePv?.method ?? "no row",
     });
 
     /* ---- Table 1 comorbidity-index row (executed) ----

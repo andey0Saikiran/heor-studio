@@ -24,6 +24,7 @@ import { resourceUseModule } from "./resource_use";
 import { comorbidityIndexModule } from "./comorbidity_index";
 import { regressionModule } from "./regression";
 import { survivalModule } from "./survival";
+import { coxModule } from "./cox";
 
 export const ANALYSIS_MODULES: Partial<Record<Analysis["kind"], AnalysisModule<never>>> = {
   incidence_rate: incidenceModule as AnalysisModule<never>,
@@ -37,6 +38,7 @@ export const ANALYSIS_MODULES: Partial<Record<Analysis["kind"], AnalysisModule<n
   comorbidity_index: comorbidityIndexModule as AnalysisModule<never>,
   regression: regressionModule as AnalysisModule<never>,
   survival: survivalModule as AnalysisModule<never>,
+  cox: coxModule as AnalysisModule<never>,
 };
 
 /* Readiness (spec/types.ts EMITTABLE_ANALYSIS_KINDS) blocks enabled analyses
