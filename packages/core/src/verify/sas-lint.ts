@@ -146,6 +146,12 @@ export function sasStructureChecks(files: SasFile[]): Check[] {
     // an append target counts as created (checked against 030_index, which
     // legitimately accumulates into work._030_dob0 that way).
     for (const m of code.matchAll(/proc\s+append[^;]*base\s*=\s*(work\.\w+)/gi)) created.add(m[1].toLowerCase());
+    /* ODS OUTPUT routes a procedure's own output table into a dataset — the way
+     * fitted model estimates are captured. It creates the dataset as surely as
+     * a DATA step does, and this check flagged a correct program until it knew
+     * that. Found by the regression module, which is the first to capture
+     * PROC LOGISTIC's ParameterEstimates. */
+    for (const m of code.matchAll(/ods\s+output\s+[^;]*?=\s*(work\.\w+)/gi)) created.add(m[1].toLowerCase());
     const referenced = new Set<string>();
     for (const m of code.matchAll(/\bfrom\s+(work\.\w+)/gi)) referenced.add(m[1].toLowerCase());
     for (const m of code.matchAll(/\bjoin\s+(work\.\w+)/gi)) referenced.add(m[1].toLowerCase());

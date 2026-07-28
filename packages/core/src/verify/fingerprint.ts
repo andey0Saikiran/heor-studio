@@ -271,6 +271,28 @@ function sqlFingerprint(kind: string, raw: string): Fingerprint {
         put(fp, "cci_hierarchy_withholds", /THEN 0 ELSE cd\.weight END AS weight_applied/i.test(sql) ? "yes" : "no");
       break;
     }
+    case "regression": {
+      /* The model IS its design. A shifted horizon, a flipped reference level or
+       * a lost washout each produce a complete, plausible odds ratio for a
+       * different question. */
+      put(fp, "horizon_days", grab(sql, [/fu_date <= DATEADD\(\s*day\s*,\s*(\d+)\s*,/i, /fu_date <= \(s\.index_date \+ (\d+)\)/i]));
+      put(fp, "exposed_level", grab(sql, [/WHEN s\.arm = '([^']+)' THEN 1/i, /WHEN s\.index_code = '([^']+)' THEN 1/i]));
+      put(fp, "arm_levels", (sql.match(/s\.arm IN \('([^']+)', '([^']+)'\)/i) ?? []).slice(1).join(","));
+      // 2x2 cell definitions — an inverted cell silently inverts the estimate.
+      put(fp, "cell_a", /SUM\(CASE WHEN exposed = 1 AND y = 1 THEN 1 ELSE 0 END\) AS a_ee/i.test(sql) ? "yes" : "no");
+      put(fp, "cell_d", /SUM\(CASE WHEN exposed = 0 AND y = 0 THEN 1 ELSE 0 END\) AS d_un/i.test(sql) ? "yes" : "no");
+      put(fp, "log_or_is_cross_product", /LN\(\(a_ee \* 1\.0 \* d_un\) \/ \(b_en \* 1\.0 \* c_ue\)\)/i.test(sql) ? "yes" : "no");
+      put(fp, "woolf_se", /SQRT\(1\.0\/a_ee \+ 1\.0\/b_en \+ 1\.0\/c_ue \+ 1\.0\/d_un\)/i.test(sql) ? "yes" : "no");
+      /* A zero cell must yield NULL, never a continuity-corrected number: a
+       * correction changes the estimand, and applying one silently is how a
+       * study reports an estimate nobody chose. */
+      put(fp, "zero_cell_returns_null", /CASE WHEN b_en > 0 AND c_ue > 0 AND a_ee > 0 AND d_un > 0/i.test(sql) ? "yes" : "no");
+      put(fp, "model_terms", (sql.match(/SELECT 'adjusted', '([^']*)'/g) ?? []).map((m) => (/'adjusted', '([^']*)'/.exec(m) ?? [])[1]).join(","));
+      // SAS-PRIMARY (language-local): the fitted estimates must be NULL here.
+      put(fp, "adjusted_null_in_sql",
+        /SELECT 'adjusted', '[^']*', 'odds_ratio', \d+, CAST\(NULL AS NUMERIC\)/i.test(sql) ? "yes" : "no");
+      break;
+    }
     case "comorbidity_index": {
       /* The index IS its weights and its hierarchy. A dropped supersession or a
        * shifted weight produces a score that is wrong by a plausible amount on
@@ -432,6 +454,24 @@ function sasFingerprint(kind: string, rawSas: string, setup: string): Fingerprin
         [...sas.matchAll(/value_ref = round\((\w+?)_[mp]_ref/g)].map((m) => PRE_TO_COL[m[1]] ?? `UNMAPPED(${m[1]})`).join(","));
       if (/weight_applied/i.test(sas))
         put(fp, "cci_hierarchy_withholds", /then 0 else cd\.weight end as weight_applied/i.test(sas) ? "yes" : "no");
+      break;
+    }
+    case "regression": {
+      put(fp, "horizon_days", grab(sas, [/svcdate <= a\.index_date \+ (\d+)/i]));
+      put(fp, "exposed_level", grab(sas, [/when a\.arm = '([^']+)' then 1/i]));
+      put(fp, "arm_levels", (sas.match(/in \('([^']+)', '([^']+)'\)/i) ?? []).slice(1).join(","));
+      put(fp, "cell_a", /sum\(case when exposed = 1 and y = 1 then 1 else 0 end\) as a_ee/i.test(sas) ? "yes" : "no");
+      put(fp, "cell_d", /sum\(case when exposed = 0 and y = 0 then 1 else 0 end\) as d_un/i.test(sas) ? "yes" : "no");
+      put(fp, "log_or_is_cross_product", /log\(\(a_ee \* d_un\) \/ \(b_en \* c_ue\)\)/i.test(sas) ? "yes" : "no");
+      put(fp, "woolf_se", /sqrt\(1\/a_ee \+ 1\/b_en \+ 1\/c_ue \+ 1\/d_un\)/i.test(sas) ? "yes" : "no");
+      put(fp, "zero_cell_returns_null", /if a_ee > 0 and b_en > 0 and c_ue > 0 and d_un > 0/i.test(sas) ? "yes" : "no");
+      put(fp, "model_terms", (sas.match(/term="([^"]*)"; ord=2\d;/g) ?? []).map((m) => (/term="([^"]*)"/.exec(m) ?? [])[1]).join(","));
+      /* SAS-PRIMARY (language-local), plus the ANCHOR. The saturated model and
+       * the self-check are what make the fitted estimates trustworthy at all;
+       * losing either leaves a column of numbers nothing ever validated. */
+      put(fp, "adjusted_fitted_in_sas", /proc logistic/i.test(sas) && /_adj_pe/i.test(sas) ? "yes" : "no");
+      put(fp, "saturated_anchor_present",
+        /model y = exposed;/i.test(sas) && /anchor_verdict/i.test(sas) ? "yes" : "no");
       break;
     }
     case "comorbidity_index": {
@@ -687,6 +727,24 @@ export function expectedFromStamp(kind: string, stamp: Record<string, unknown>):
       }
       break;
     }
+    case "regression": {
+      const h = num(stamp.horizonDays);
+      if (h) exp.horizon_days = h;
+      if (typeof stamp.exposedLevel === "string") exp.exposed_level = stamp.exposedLevel;
+      if (typeof stamp.referenceLevel === "string" && typeof stamp.exposedLevel === "string")
+        exp.arm_levels = `${stamp.referenceLevel},${stamp.exposedLevel}`;
+      if (Array.isArray(stamp.terms)) exp.model_terms = (stamp.terms as string[]).join(",");
+      /* The stamp CLAIMS a closed-form crude effect and a saturated anchor; the
+       * code has to actually be those things. */
+      if (stamp.crudeEffect === "closed_form_2x2") {
+        exp.cell_a = "yes";
+        exp.cell_d = "yes";
+        exp.log_or_is_cross_product = "yes";
+        exp.woolf_se = "yes";
+        exp.zero_cell_returns_null = "yes";
+      }
+      break;
+    }
     case "comorbidity_index": {
       if (Array.isArray(stamp.conditions)) {
         const cs = stamp.conditions as Array<{ id: string; weight: number }>;
@@ -805,6 +863,14 @@ const EXPECTED_CONSTANTS: Record<string, Record<"sql" | "sas", Record<string, nu
     sql: { z: 2, z2_half: 2, z2: 2, z2_quarter: 2 },
     sas: { z: 1, z2_half: 2, z2: 2, z2_quarter: 1 },
   },
+  regression: {
+    /* z = 1.96 appears exactly TWICE in each twin, in the two Wald bounds on the
+     * log odds ratio, and nowhere else. The Wilson constants must not appear at
+     * all — a z^2 here would mean somebody added a proportion interval to a
+     * table of ratios. */
+    sql: { z: 2, z2_half: 0, z2: 0, z2_quarter: 0 },
+    sas: { z: 2, z2_half: 0, z2: 0, z2_quarter: 0 },
+  },
   comorbidity_index: {
     /* No interval anywhere — the index reports a mean, an SD and a median, none
      * of which is a confidence interval. A z here would mean an interval was
@@ -907,6 +973,9 @@ export const LANGUAGE_LOCAL_KEYS: Record<string, { language: "sql" | "sas"; must
   exact_ci_computed_in_sas: { language: "sas", must: "yes", means: "exact Poisson limits are genuinely computed in SAS" },
   trend_p_null_in_sql: { language: "sql", must: "yes", means: "the trend p-value is NULL in SQL, not guessed" },
   trend_p_computed_in_sas: { language: "sas", must: "yes", means: "the trend p-value is genuinely computed in SAS" },
+  adjusted_null_in_sql: { language: "sql", must: "yes", means: "fitted GLM coefficients are NULL in SQL, not approximated" },
+  adjusted_fitted_in_sas: { language: "sas", must: "yes", means: "fitted GLM coefficients are genuinely produced by PROC LOGISTIC" },
+  saturated_anchor_present: { language: "sas", must: "yes", means: "the saturated model and its self-check against the closed form are emitted" },
 };
 
 /** Assert every language-local key present in a fingerprint holds its required

@@ -697,6 +697,66 @@ export async function verifyGoldA(): Promise<VerificationResult> {
       detail: `mean $${Number(all?.paid_per_patient).toLocaleString()} vs median $${Number(all?.paid_median).toLocaleString()}`,
     });
 
+    /* ---- logistic regression: the 2x2 and the closed-form crude effect ----
+     * The adjusted coefficients are SAS-primary and cannot be executed here.
+     * What CAN be executed is everything they are anchored to: the design, the
+     * closed form, and the fact that SQL leaves the fitted estimates NULL. */
+    const rg = EXPECTED.regression;
+    eq(
+      `regression rows = ${rg.rowCount} (4 design + 3 crude + ${rg.adjustedTerms.length} adjusted)`,
+      await scalar<number>(db, "SELECT count(*)::int FROM tz_study_glm"),
+      rg.rowCount,
+    );
+    const glmRow = async (component: string, term: string, statistic: string) =>
+      (
+        await rows<{ estimate: number | null; ci_low: number | null; ci_high: number | null; se_log: number | null; method: string }>(
+          db,
+          `SELECT estimate::float8, ci_low::float8, ci_high::float8, se_log::float8, method
+             FROM tz_study_glm WHERE component = '${component}' AND term = '${term}' AND statistic = '${statistic}'`,
+        )
+      )[0];
+    eq("glm design: exposed arm n = 4", Number((await glmRow("design", "DRUG_Y", "n"))?.estimate), rg.design.exposedN);
+    eq("glm design: exposed arm events = 1", Number((await glmRow("design", "DRUG_Y", "events"))?.estimate), rg.design.exposedEvents);
+    eq("glm design: reference arm n = 4", Number((await glmRow("design", "DRUG_X", "n"))?.estimate), rg.design.referenceN);
+    eq("glm design: reference arm events = 2", Number((await glmRow("design", "DRUG_X", "events"))?.estimate), rg.design.referenceEvents);
+    const orRow = await glmRow("crude", "Index drug", "odds_ratio");
+    approx("glm crude OR = 1/3 EXACTLY (hand-computed from the 2x2)", Number(orRow?.estimate), rg.oddsRatio.estimate, 0.00001);
+    approx(`glm crude OR CI low = ${rg.oddsRatio.ciLow}`, Number(orRow?.ci_low), rg.oddsRatio.ciLow, 0.00001);
+    approx(`glm crude OR CI high = ${rg.oddsRatio.ciHigh}`, Number(orRow?.ci_high), rg.oddsRatio.ciHigh, 0.00001);
+    approx("glm Woolf SE(log OR) = sqrt(7/3)", Number(orRow?.se_log), rg.oddsRatio.seLog, 0.00001);
+    approx("glm crude RR = 0.5 EXACTLY", Number((await glmRow("crude", "Index drug", "risk_ratio"))?.estimate), rg.riskRatio, 0.00001);
+    approx("glm crude RD = -0.25 EXACTLY", Number((await glmRow("crude", "Index drug", "risk_difference"))?.estimate), rg.riskDifference, 0.00001);
+    /* The SATURATED-DESIGN ANCHOR, from this side. A logistic model whose only
+     * predictor is the exposure has as many parameters as the 2x2 has cells, so
+     * its MLE must be exactly ln(1/3). The SAS twin checks itself against the
+     * closed form; the harness pins what that closed form has to be. */
+    checks.push({
+      name: "glm: the saturated-design anchor value is ln(1/3) — what the SAS MLE must reproduce",
+      status: Math.abs(Math.log(Number(orRow?.estimate)) - rg.logOr) < 0.0001 ? "pass" : "fail",
+      detail: `ln(${orRow?.estimate}) = ${Math.log(Number(orRow?.estimate)).toFixed(7)}, expected ${rg.logOr}`,
+    });
+    /* SAS-primary, asserted by EXECUTION: every adjusted estimate must arrive
+     * NULL from a real Postgres run, with the procedure that produces it named.
+     * A SQL twin that quietly filled these in with the crude estimate would be
+     * reporting an unadjusted number under an adjusted label. */
+    const adj = await rows<{ term: string; estimate: number | null; method: string }>(
+      db,
+      "SELECT term, estimate::float8, method FROM tz_study_glm WHERE component = 'adjusted' ORDER BY ord",
+    );
+    checks.push({
+      name: "glm: every ADJUSTED estimate is NULL in executed SQL, with its source labeled",
+      status: adj.length === rg.adjustedTerms.length && adj.every((r) => r.estimate === null && r.method === "sas_proc_logistic") ? "pass" : "fail",
+      detail:
+        adj.every((r) => r.estimate === null)
+          ? `${adj.length} terms declared and NULL: ${adj.map((r) => r.term).join(", ")}`
+          : `SQL populated an adjusted estimate — the SAS-primary contract is broken`,
+    });
+    checks.push({
+      name: "glm: the adjusted model carries the exposure AND every resolved covariate",
+      status: JSON.stringify(adj.map((r) => r.term)) === JSON.stringify(rg.adjustedTerms) ? "pass" : "fail",
+      detail: `terms ${adj.map((r) => r.term).join(", ")}`,
+    });
+
     /* ---- Table 1 comorbidity-index row (executed) ----
      * The row is scored by the SAME shared engine as the index analysis and the
      * balance table, so this asserts the wiring rather than the arithmetic:

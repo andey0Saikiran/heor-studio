@@ -322,6 +322,39 @@ export interface ResourceUseAnalysis extends AnalysisCommon {
   edPlaceOfService?: string[];
 }
 
+/* ----- Regression (one GLM emitter) ----- */
+
+/**
+ * A generalized linear model over the cohort.
+ *
+ * The split that makes this honest: the ANALYTIC DATASET and the CRUDE effect
+ * are deterministic and both twins compute them; the FITTED coefficients need
+ * IRLS/Newton, which warehouse SQL has no way to run, so they are SAS-primary.
+ *
+ * The one real check available is the SATURATED DESIGN. A model whose only
+ * predictor is the two-level exposure is saturated for a 2x2 table, and its
+ * maximum-likelihood estimate is EXACTLY the closed-form log odds ratio. That
+ * gives the generated SAS something to validate itself against at the site,
+ * from its own data, with no reference value shipped alongside it.
+ *
+ * Ref: McCullagh & Nelder, Generalized Linear Models 2e (1989); Woolf,
+ * Ann Hum Genet 1955;19:251 (the log-odds standard error).
+ */
+export interface RegressionAnalysis extends AnalysisCommon {
+  kind: "regression";
+  family: RegressionFamily;
+  /** binary outcome: a qualifying event inside `horizonDays` after index */
+  outcomeDefinition: OutcomeDefinition;
+  /** prevalent-case washout, so the outcome is INCIDENT */
+  washout: RelativeWindow;
+  horizonDays: number;
+  /** two-level exposure -> GroupVariable.id; its referenceLevel is the baseline
+   *  category, so the reported effect is for the OTHER level */
+  groupVarId: string;
+  /** baseline characteristics entering the ADJUSTED model (SAS-primary) */
+  covariateIds: string[];
+}
+
 /* ----- Weighted comorbidity index ----- */
 
 /** One condition in a weighted comorbidity index. */
@@ -514,6 +547,7 @@ export type Analysis =
   | CalendarTrendAnalysis
   | ResourceUseAnalysis
   | ComorbidityIndexAnalysis
+  | RegressionAnalysis
   | StatisticalEngineAnalysis
   | FutureAnalysisStub;
 
@@ -538,6 +572,7 @@ export const EMITTABLE_ANALYSIS_KINDS: ReadonlySet<AnalysisKind> = new Set<Analy
   "calendar_trend",
   "resource_use",
   "comorbidity_index",
+  "regression",
 ]);
 
 export type DescriptiveAnalysis =
@@ -877,6 +912,34 @@ export function validateAnalyses(spec: StudySpec): string[] {
         if (a.scoreBands.length === 0) problems.push(`${w}: scoreBands[] is empty — no distribution would be reported.`);
         if (a.scoreBands.some((b, i) => i > 0 && b <= a.scoreBands[i - 1]))
           problems.push(`${w}: scoreBands must be strictly increasing lower bounds.`);
+        break;
+      }
+      case "regression": {
+        requireCodeList(a.outcomeDefinition.codeListId, `${w} outcome`);
+        if (a.horizonDays <= 0) problems.push(`${w}: horizonDays must be > 0.`);
+        /* ONE family is built. The others are refused BY NAME rather than
+         * half-emitted, because each needs a feeder this emitter does not
+         * construct and would otherwise produce a complete-looking model of the
+         * wrong thing. */
+        if (a.family !== "logistic")
+          problems.push(
+            `${w}: regression family "${a.family}" is not emitted yet — only "logistic" is built. ` +
+              (a.family === "poisson" || a.family === "negative_binomial"
+                ? `A count model needs a person-time offset per subject, and negative binomial needs a dispersion parameter with no closed form. `
+                : a.family === "gamma_log"
+                  ? `A cost model needs the claim-line ledger's per-subject totals as its response, which this emitter does not build. `
+                  : `An OLS model needs a continuous response, which this emitter does not construct. `) +
+              `Set family:"logistic", or disable the analysis to keep it visible as planned work.`
+          );
+        const gv = groupVars.find((g) => g.id === a.groupVarId);
+        if (!gv) problems.push(`${w}: groupVarId "${a.groupVarId}" is not in groupVars[].`);
+        else {
+          if (gv.levels.length !== 2)
+            problems.push(`${w}: exposure "${gv.id}" has ${gv.levels.length} levels — the closed-form anchor this model is checked against is only defined for a 2x2, so exactly 2 are required.`);
+          if (!gv.referenceLevel)
+            problems.push(`${w}: exposure "${gv.id}" has no referenceLevel — without one the sign of every coefficient is arbitrary.`);
+        }
+        a.covariateIds.forEach((b) => requireBaseline(b, `${w} covariate`));
         break;
       }
       case "statistical_engine": {

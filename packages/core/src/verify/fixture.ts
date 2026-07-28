@@ -512,6 +512,39 @@ export const EXPECTED = {
      * so the failure has a name when it appears. */
     withoutHierarchy: { p03: 3, p05: 4, sum: 13, mean: 1.3 },
   },
+  /* Logistic regression, hand-derived from the 2x2.
+   *
+   * At risk after washout = 8 (P02..P05 on DRUG_X, P07..P10 on DRUG_Y).
+   * Incident events inside 365 days: P02, P03 (X) and P07 (Y).
+   *
+   *                events   non-events
+   *   DRUG_Y (exposed)   a=1        b=3
+   *   DRUG_X (reference) c=2        d=2
+   *
+   * DRUG_X is the referenceLevel, so the coefficient is for DRUG_Y:
+   *   OR  = (a*d)/(b*c) = (1*2)/(3*2) = 1/3 EXACTLY
+   *   ln(OR) = -1.0986123
+   *   Woolf SE = sqrt(1/1 + 1/3 + 1/2 + 1/2) = sqrt(7/3) = 1.5275252
+   *   95% Wald on the log scale: -1.0986123 +/- 1.96*1.5275252
+   *                            = (-4.0925617, 1.8953715)
+   *   OR interval = (0.01670, 6.65479)
+   *   RR = (1/4)/(2/4) = 0.5 EXACTLY
+   *   RD = 0.25 - 0.5  = -0.25 EXACTLY
+   *
+   * The SATURATED ANCHOR is the point of all this: a logistic model with only
+   * the exposure term has as many parameters as this table has cells, so its
+   * MLE must be exactly ln(1/3). The emitted SAS checks that against the closed
+   * form it computes from its own data. */
+  regression: {
+    rowCount: 11, // 4 design + 3 crude + 4 adjusted terms
+    design: { exposedN: 4, exposedEvents: 1, referenceN: 4, referenceEvents: 2 },
+    oddsRatio: { estimate: 0.33333, ciLow: 0.0167, ciHigh: 6.65479, seLog: 1.52753 },
+    riskRatio: 0.5,
+    riskDifference: -0.25,
+    logOr: -1.0986123,
+    /** terms of the adjusted model, in emission order */
+    adjustedTerms: ["Index drug", "Age at index", "Sex", "Comorbidity index"],
+  },
   /* SMD balance, DRUG_X (reference) vs DRUG_Y, over the 10-patient cohort.
    *   ages X = 40,45,50,55,60 -> mean 50, sample variance 62.5
    *   ages Y = 45,50,55,60,65 -> mean 55, sample variance 62.5
@@ -779,6 +812,21 @@ export const GOLD_A_SPEC: StudySpec = {
         { id: "sliv", label: "Moderate/severe liver disease", codeListId: "cci_sliv_dx", weight: 3, supersedes: ["mliv"] },
       ],
       scoreBands: [0, 1, 3],
+    },
+    /* Logistic regression of the incident AE on the exposure arm.
+     *
+     * The at-risk set is the incidence module's: 8 subjects after washout,
+     * 4 per arm. Events inside the 365-day horizon are P02 and P03 (DRUG_X)
+     * and P07 (DRUG_Y). DRUG_X is the reference, so the reported effect is for
+     * DRUG_Y and every closed-form quantity is exact — see EXPECTED. */
+    {
+      id: "a_glm", label: "Adjusted odds of incident AE within 1 year", kind: "regression", enabled: true,
+      family: "logistic",
+      outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "outpatient", diagnosisPosition: "any" },
+      washout: { start: -365, end: 0, includesIndex: true },
+      horizonDays: 365,
+      groupVarId: "g_arm",
+      covariateIds: ["b_age", "b_sex", "b_cci"],
     },
     /* Covariate balance between the exposure arms. Age is deliberately
      * IMBALANCED (SMD -0.63246, |SMD| > 0.1) and sex is deliberately BALANCED

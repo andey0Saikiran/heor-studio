@@ -173,6 +173,22 @@ export const SUPPRESSION_SHAPES: Record<string, SuppressionShape> = {
     keepCols: ["ord", "weight", "index_name"],
     tieBreakCol: "category",
   },
+  regression: {
+    /* The DESIGN rows are the 2x2, and the crude effect is computed FROM them,
+     * so they are the disclosive quantity and everything derived masks with
+     * them. Cells within a component do partition (exposed n = events +
+     * non-events), which is why complementary suppression applies.
+     *
+     * The adjusted rows carry no counts at all — their estimates come from SAS —
+     * but they mask with their group anyway: an adjusted odds ratio computed on
+     * a handful of subjects is as identifying as the cells it was fitted on. */
+    labelCols: ["measure", "component", "term", "statistic"],
+    groupCols: ["measure", "component"],
+    countCol: "estimate",
+    maskCols: ["estimate", "ci_low", "ci_high", "se_log"],
+    keepCols: ["ord", "method"],
+    tieBreakCol: "term",
+  },
   table1: {
     labelCols: ["ord", "characteristic", "category"],
     groupCols: ["characteristic"],

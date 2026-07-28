@@ -29,6 +29,7 @@ import {
   diffAgainstExpected,
   constantProfile,
   diffConstantProfile,
+  languageLocalChecks,
   spineFingerprint,
 } from "./fingerprint";
 import { sasStructureChecks } from "./sas-lint";
@@ -164,6 +165,52 @@ const MUTATIONS: Mutation[] = [
     name: "SAS trend z divides by the variance, not its square root",
     kind: "calendar_trend", lang: "sas",
     apply: (t) => t.replace(/round\(t_stat \/ sqrt\(var_t\)/, "round(t_stat / (var_t)"),
+  },
+  {
+    /* The cross-product inverted: OR becomes its own reciprocal. Still a
+     * perfectly plausible odds ratio, pointing the opposite way. */
+    name: "SQL odds ratio inverts the cross product (a*d / b*c becomes b*c / a*d)",
+    kind: "regression", lang: "sql",
+    apply: (t) => t.replace(/LN\(\(a_ee \* 1\.0 \* d_un\) \/ \(b_en \* 1\.0 \* c_ue\)\)/, "LN((b_en * 1.0 * c_ue) / (a_ee * 1.0 * d_un))"),
+  },
+  {
+    // Exposure and reference swap, flipping the sign of every reported effect.
+    name: "SAS regression flips which arm is the exposure",
+    kind: "regression", lang: "sas",
+    apply: (t) => t.replace(/when a\.arm = 'DRUG_Y' then 1/, "when a.arm = 'DRUG_X' then 1"),
+  },
+  {
+    // A shorter horizon drops later events; the model answers a different question.
+    name: "SQL regression horizon shortened (365 -> 180 days)",
+    kind: "regression", lang: "sql",
+    apply: (t) => t.replace(/fu_date <= \(s\.index_date \+ 365\)/, "fu_date <= (s.index_date + 180)"),
+  },
+  {
+    /* The Woolf SE loses a term: the interval narrows and the estimate looks
+     * more precise than the data supports. */
+    name: "SAS Woolf standard error drops a cell (1/d_un lost)",
+    kind: "regression", lang: "sas",
+    apply: (t) => t.replace(/sqrt\(1\/a_ee \+ 1\/b_en \+ 1\/c_ue \+ 1\/d_un\)/, "sqrt(1/a_ee + 1/b_en + 1/c_ue)"),
+  },
+  {
+    /* A zero cell silently continuity-corrected instead of returning NULL —
+     * the estimand changes and nothing says so. */
+    name: "SQL adds a continuity correction instead of returning NULL on a zero cell",
+    kind: "regression", lang: "sql",
+    apply: (t) => t.replace(/CASE WHEN b_en > 0 AND c_ue > 0 AND a_ee > 0 AND d_un > 0/, "CASE WHEN 1 = 1"),
+  },
+  {
+    // The SAS twin stops fitting, leaving a column of NULLs in both languages.
+    name: "SAS regression stops fitting the adjusted model",
+    kind: "regression", lang: "sas",
+    apply: (t) => t.replace(/_adj_pe/g, "_adj_skipped"),
+  },
+  {
+    /* THE ANCHOR REMOVED. Without the saturated self-check the fitted estimates
+     * are simply trusted — the one validation the site could actually see. */
+    name: "SAS regression drops the saturated-design anchor check",
+    kind: "regression", lang: "sas",
+    apply: (t) => t.replace(/anchor_verdict/g, "unused_note"),
   },
   {
     /* THE EXACT BUG the axis-vs-measure keying prevents: a second CONTINUOUS
@@ -332,11 +379,23 @@ export function mutationChecks(): Check[] {
     const vsStampSas = diffAgainstExpected(fpSas, expectedFromStamp(m.kind, sasProg.stamp));
     const constSql = diffConstantProfile(m.kind, "sql", constantProfile("sql", mutatedSql));
     const constSas = diffConstantProfile(m.kind, "sas", constantProfile("sas", mutatedSas, mutatedSetup));
+    /* SAS-PRIMARY contract keys are language-LOCAL, so the cross-language diff
+     * deliberately skips them (see LANGUAGE_LOCAL_KEYS). They therefore have to
+     * be evaluated here too, or a mutation that breaks the contract — SAS
+     * quietly stopping fitting, or the saturated anchor being deleted — would
+     * read as "not caught" while the harness genuinely does check it elsewhere.
+     * Doing it in the generic runner means every future language-local key is
+     * covered by every mutation automatically. */
+    const local = [
+      ...languageLocalChecks("sql", fpSql).filter((c) => !c.ok),
+      ...languageLocalChecks("sas", fpSas).filter((c) => !c.ok),
+    ];
 
     const reasons = [
       crossLang.length > 0 ? `cross-language: ${crossLang.join(" | ")}` : "",
       vsStampSql.length + vsStampSas.length > 0 ? `vs stamp: ${[...vsStampSql, ...vsStampSas].join(" | ")}` : "",
       constSql.length + constSas.length > 0 ? `constants: ${[...constSql, ...constSas].join(" | ")}` : "",
+      local.length > 0 ? `SAS-primary contract: ${local.map((c) => c.detail).join(" | ")}` : "",
     ].filter(Boolean);
     const caught = reasons.length > 0;
     const how = reasons.join("; ");

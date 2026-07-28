@@ -788,6 +788,7 @@ const ANALYSIS_KIND_LABELS: Record<AnalysisKind, string> = {
   calendar_trend: "Calendar trend",
   resource_use: "Resource use and cost",
   comorbidity_index: "Comorbidity index",
+  regression: "Regression model",
   statistical_engine: "Statistical comparison",
   future_stub: "Planned (not generated yet)",
 };

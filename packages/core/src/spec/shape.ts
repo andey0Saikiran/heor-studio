@@ -31,7 +31,7 @@ const DEMO_AXES = new Set(["age_band", "sex", "region", "plan_type", "year"]);
 const ANALYSIS_KINDS = new Set([
   "attrition", "table1", "point_prevalence", "period_prevalence", "cumulative_incidence",
   "incidence_rate", "standardization", "calendar_trend", "resource_use",
-  "comorbidity_index", "statistical_engine", "future_stub",
+  "comorbidity_index", "regression", "statistical_engine", "future_stub",
 ]);
 
 const LEDGER_SETTINGS = new Set(["inpatient", "ed", "outpatient", "pharmacy"]);
@@ -272,6 +272,16 @@ function checkAnalysis(p: Problems, v: unknown, path: string): void {
       });
       if (!Array.isArray(v.scoreBands)) p.push(`${path}.scoreBands`, `expected an array of numbers, got ${typeOf(v.scoreBands)}`);
       else v.scoreBands.forEach((b, j) => need(p, `${path}.scoreBands[${j}]`, isNum(b), `expected a finite number, got ${typeOf(b)}`));
+      break;
+    }
+    case "regression": {
+      needStr(p, v, "family", path, { nonEmpty: true });
+      checkOutcomeDefinition(p, v.outcomeDefinition, `${path}.outcomeDefinition`);
+      checkWindow(p, v.washout, `${path}.washout`);
+      needNum(p, v, "horizonDays", path, { min: 1 });
+      needStr(p, v, "groupVarId", path, { nonEmpty: true });
+      if (!Array.isArray(v.covariateIds)) p.push(`${path}.covariateIds`, `expected an array of baseline ids, got ${typeOf(v.covariateIds)}`);
+      else v.covariateIds.forEach((x, j) => need(p, `${path}.covariateIds[${j}]`, isStr(x), `expected a baseline id string, got ${typeOf(x)}`));
       break;
     }
     case "standardization":

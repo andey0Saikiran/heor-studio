@@ -21,6 +21,7 @@ import type {
   OutcomeDefinition,
   PeriodPrevalenceAnalysis,
   PointPrevalenceAnalysis,
+  RegressionAnalysis,
   RelativeWindow,
   ResourceUseAnalysis,
   Stratifier,
@@ -1009,5 +1010,78 @@ export function comorbidityIndexParity(
     bands: consumed.bands.map((b) => b.label),
     supersessionEffect: "withholds_weight_keeps_prevalence",
     medianEstimator: "percentile_cont_equivalent",
+  };
+}
+
+/* ================================================================== *
+ *  Regression (GLM)
+ * ================================================================== */
+
+/** The parameter set a regression twin must consume identically. */
+export interface RegressionParity {
+  id: string;
+  family: string;
+  codeListId: string;
+  washout: { start: number | "anytime_before"; end: number | "anytime_after"; includesIndex: boolean };
+  horizonDays: number;
+  groupVarId: string;
+  /** baseline category; the coefficient is for the OTHER level */
+  referenceLevel: string;
+  exposedLevel: string;
+  /** adjusted-model terms in order, exposure first */
+  terms: string[];
+  settingFilter: string;
+  /** what each twin actually produces */
+  crudeEffect: "closed_form_2x2";
+  adjustedSource: "sas_primary";
+  /** the check the SAS twin performs on itself */
+  saturatedAnchor: "unadjusted_mle_equals_closed_form_log_or";
+}
+
+/** Spec options the regression twins do NOT implement yet. */
+export function regressionLimitations(an: RegressionAnalysis, listSystem: CodeSystem, covLabels: string[], droppedCovs: string[]): string[] {
+  const out: string[] = [];
+  const settingNote = outcomeSettingPlan(an.outcomeDefinition, listSystem).note;
+  if (settingNote) out.push(settingNote);
+  if (an.outcomeDefinition.minClaims > 1)
+    out.push(`outcome minClaims=${an.outcomeDefinition.minClaims} is NOT yet enforced - any single qualifying claim inside the horizon counts as an event`);
+  for (const d of droppedCovs)
+    out.push(`covariate "${d}" is NOT in the adjusted model - only age, sex and a comorbidity_index referencing an ENABLED index analysis are derivable from the cohort spine today`);
+  if (covLabels.length === 0)
+    out.push(`no covariates resolved, so the "adjusted" model is identical to the crude one - it is still emitted, and at that point its MLE MUST reproduce the closed-form estimate exactly`);
+  out.push(`NO variable selection, interaction, spline or collinearity diagnostic is emitted - the model is exactly the terms listed, in the order listed`);
+  out.push(`the crude interval is the WOOLF (log-odds) Wald interval; it is poor at small cell counts and is not an exact interval. Any zero cell makes it undefined, and the program returns NULL rather than adding a continuity correction, because a correction silently changes the estimand`);
+  return out;
+}
+
+/** Method notes ALWAYS emitted (describe what IS computed). */
+export const REGRESSION_METHOD_NOTES = [
+  `the ANALYTIC DATASET and the CRUDE effect are computed in BOTH twins: a 2x2 of exposure by incident event, and from it the odds ratio, risk ratio and risk difference in closed form`,
+  `the ADJUSTED coefficients are SAS-PRIMARY. Fitting a GLM needs iteratively reweighted least squares, which warehouse SQL cannot run, so SQL emits those estimates as NULL beside a label naming the procedure that produces them - never a guess`,
+  `SATURATED-DESIGN ANCHOR: a logistic model whose only predictor is the two-level exposure is saturated for a 2x2, so its maximum-likelihood estimate EQUALS the closed-form log odds ratio. The SAS program fits that model and checks itself against the closed form it computes from its own data - no reference number is shipped with it`,
+  `the outcome is INCIDENT: prevalent cases are removed by the washout before the model is built, so the odds ratio is for new-onset disease and not for prevalence`,
+  `subjects are counted ONCE. A subject with several qualifying claims inside the horizon contributes one event, and the horizon is measured from each subject's own index date`,
+  `the exposure coefficient is for the NON-reference level. Flipping referenceLevel inverts the sign of every reported effect, which is why it is stamped and compared across the twins`,
+];
+
+/** The parity record for a regression twin, from consumed values. */
+export function regressionParity(
+  an: RegressionAnalysis,
+  consumed: { referenceLevel: string; exposedLevel: string; terms: string[]; settingFilter: string },
+): RegressionParity {
+  return {
+    id: an.id,
+    family: an.family,
+    codeListId: an.outcomeDefinition.codeListId,
+    washout: { start: an.washout.start, end: an.washout.end, includesIndex: an.washout.includesIndex },
+    horizonDays: an.horizonDays,
+    groupVarId: an.groupVarId,
+    referenceLevel: consumed.referenceLevel,
+    exposedLevel: consumed.exposedLevel,
+    terms: consumed.terms,
+    settingFilter: consumed.settingFilter,
+    crudeEffect: "closed_form_2x2",
+    adjustedSource: "sas_primary",
+    saturatedAnchor: "unadjusted_mle_equals_closed_form_log_or",
   };
 }
