@@ -305,13 +305,25 @@ function sqlFingerprint(kind: string, raw: string): Fingerprint {
         /a\.event_date <= \(c\.index_date \+ (\d+)\)/i,
       ]));
       put(fp, "response_is_count", /COUNT\(DISTINCT a\.event_date\) AS n_events/i.test(sql) ? "yes" : "no");
+      /* Cost family. The response is a ledger total, the closed form is a ratio
+       * of arm MEANS, and zero-cost subjects are excluded because a gamma
+       * response must be strictly positive. */
+      if (/COALESCE\(cp\.cost, 0\) AS y/i.test(sql)) {
+        put(fp, "cost_ratio_is_mean_over_mean",
+          /LN\(\(a_ee \* 1\.0 \/ b_en\) \/ \(c_ue \* 1\.0 \/ d_un\)\)/i.test(sql) ? "yes" : "no");
+        put(fp, "gamma_excludes_zero_cost", /AND y > 0 THEN y ELSE 0 END\) AS a_ee/i.test(sql) ? "yes" : "no");
+        put(fp, "crude_interval_is_delta_method", /'delta_method_ratio_of_means'/i.test(sql) ? "yes" : "no");
+      }
       put(fp, "exposed_level", grab(sql, [/WHEN s\.arm = '([^']+)' THEN 1/i, /WHEN s\.index_code = '([^']+)' THEN 1/i]));
       put(fp, "arm_levels", (sql.match(/s\.arm IN \('([^']+)', '([^']+)'\)/i) ?? []).slice(1).join(","));
       // 2x2 cell definitions — an inverted cell silently inverts the estimate.
       /* A COUNT response has no "non-event" cell: a_ee is the SUM of counts,
        * not a tally of subjects. Checking it against the indicator algebra
        * would fail a correct program. */
-      if (/COUNT\(DISTINCT a\.event_date\)/i.test(sql)) {
+      if (/COALESCE\(cp\.cost, 0\) AS y/i.test(sql)) {
+        put(fp, "cell_a", /SUM\(CASE WHEN exposed = 1 AND y > 0 THEN y ELSE 0 END\) AS a_ee/i.test(sql) ? "yes" : "no");
+        put(fp, "cell_d", /SUM\(CASE WHEN exposed = 0 AND y > 0 THEN 1 ELSE 0 END\) AS d_un/i.test(sql) ? "yes" : "no");
+      } else if (/COUNT\(DISTINCT a\.event_date\)/i.test(sql)) {
         put(fp, "cell_a", /SUM\(CASE WHEN exposed = 1 THEN y ELSE 0 END\) AS a_ee/i.test(sql) ? "yes" : "no");
         put(fp, "cell_d", /SUM\(CASE WHEN exposed = 0 THEN 1 ELSE 0 END\) AS d_un/i.test(sql) ? "yes" : "no");
       } else {
@@ -515,9 +527,18 @@ function sasFingerprint(kind: string, rawSas: string, setup: string): Fingerprin
     case "regression": {
       put(fp, "horizon_days", grab(sas, [/svcdate <= a\.index_date \+ (\d+)/i]));
       put(fp, "response_is_count", /count\(distinct e\.svcdate\) as n_events/i.test(sas) ? "yes" : "no");
+      if (/coalesce\(cst\.cost, 0\) as y/i.test(sas)) {
+        put(fp, "cost_ratio_is_mean_over_mean",
+          /log\(\(a_ee \/ b_en\) \/ \(c_ue \/ d_un\)\)/i.test(sas) ? "yes" : "no");
+        put(fp, "gamma_excludes_zero_cost", /and y > 0 then y else 0 end\) as a_ee/i.test(sas) ? "yes" : "no");
+        put(fp, "crude_interval_is_delta_method", /se_log_cr = sqrt\(/i.test(sas) ? "yes" : "no");
+      }
       put(fp, "exposed_level", grab(sas, [/when a\.arm = '([^']+)' then 1/i]));
       put(fp, "arm_levels", (sas.match(/in \('([^']+)', '([^']+)'\)/i) ?? []).slice(1).join(","));
-      if (/count\(distinct e\.svcdate\)/i.test(sas)) {
+      if (/coalesce\(cst\.cost, 0\) as y/i.test(sas)) {
+        put(fp, "cell_a", /sum\(case when exposed = 1 and y > 0 then y else 0 end\) as a_ee/i.test(sas) ? "yes" : "no");
+        put(fp, "cell_d", /sum\(case when exposed = 0 and y > 0 then 1 else 0 end\) as d_un/i.test(sas) ? "yes" : "no");
+      } else if (/count\(distinct e\.svcdate\)/i.test(sas)) {
         put(fp, "cell_a", /sum\(case when exposed = 1 then y else 0 end\) as a_ee/i.test(sas) ? "yes" : "no");
         put(fp, "cell_d", /sum\(case when exposed = 0 then 1 else 0 end\) as d_un/i.test(sas) ? "yes" : "no");
       } else {
@@ -801,8 +822,12 @@ export function expectedFromStamp(kind: string, stamp: Record<string, unknown>):
       break;
     }
     case "regression": {
+      /* A cost response does not use the outcome horizon at all — the window
+       * that matters is costResponse's. Expecting a horizon in the code would
+       * fail a correct gamma program. */
+      const isCostStamp = stamp.responseKind === "cost";
       const h = num(stamp.horizonDays);
-      if (h) exp.horizon_days = h;
+      if (h && !isCostStamp) exp.horizon_days = h;
       if (typeof stamp.exposedLevel === "string") exp.exposed_level = stamp.exposedLevel;
       if (typeof stamp.referenceLevel === "string" && typeof stamp.exposedLevel === "string")
         exp.arm_levels = `${stamp.referenceLevel},${stamp.exposedLevel}`;
@@ -822,11 +847,16 @@ export function expectedFromStamp(kind: string, stamp: Record<string, unknown>):
        * code has to actually be those things — but WHICH closed form depends on
        * the family. An offset in the stamp means a rate model, and a rate model
        * must not be checked against the odds-ratio algebra. */
-      if (typeof stamp.responseKind === "string") exp.response_is_count = stamp.responseKind === "count" ? "yes" : "no";
+      if (typeof stamp.responseKind === "string" && !isCostStamp)
+        exp.response_is_count = stamp.responseKind === "count" ? "yes" : "no";
       if (stamp.crudeEffect === "closed_form_2x2") {
         exp.cell_a = "yes";
         exp.cell_d = "yes";
-        if (stamp.offset === null) {
+        if (isCostStamp) {
+          exp.cost_ratio_is_mean_over_mean = "yes";
+          exp.gamma_excludes_zero_cost = "yes";
+          exp.crude_interval_is_delta_method = "yes";
+        } else if (stamp.offset === null) {
           exp.log_or_is_cross_product = "yes";
           exp.woolf_se = "yes";
           exp.zero_cell_returns_null = "yes";

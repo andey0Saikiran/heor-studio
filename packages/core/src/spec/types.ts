@@ -359,6 +359,11 @@ export interface RegressionAnalysis extends AnalysisCommon {
    *  dispersion parameter is not identified and the model collapses to Poisson.
    *  NB therefore requires "all_events". */
   recurrence?: Recurrence;
+  /** REQUIRED for gamma_log: where the per-subject COST response comes from.
+   *  Read through the shared claim-line ledger, so the model's response is the
+   *  same quantity the resource-use table reports — including the inpatient
+   *  double-count rule. */
+  costResponse?: { window: RelativeWindow; settings: LedgerSetting[]; costField: "paytot" | "netpay" };
   /** REQUIRED for count families: how each subject's person-time (the model's
    *  log offset) is accrued. Shared with the rate modules via rate-core's
    *  censoring plan, so the offset cannot disagree with the incidence table. */
@@ -934,14 +939,20 @@ export function validateAnalyses(spec: StudySpec): string[] {
          * construct and would otherwise produce a complete-looking model of the
          * wrong thing. */
         const COUNT_FAMILIES = ["poisson", "negative_binomial"];
-        if (!["logistic", "poisson", "negative_binomial"].includes(a.family))
+        if (!["logistic", "poisson", "negative_binomial", "gamma_log"].includes(a.family))
           problems.push(
-            `${w}: regression family "${a.family}" is not emitted yet — "logistic", "poisson" and "negative_binomial" are built. ` +
-              (a.family === "gamma_log"
-                ? `A cost model needs the claim-line ledger's per-subject totals as its response, which this emitter does not build. `
-                : `An OLS model needs a continuous response, which this emitter does not construct. `) +
+            `${w}: regression family "${a.family}" is not emitted yet — "logistic", "poisson", "negative_binomial" and "gamma_log" are built. ` +
+              `An OLS model needs a continuous response this emitter does not construct. ` +
               `Disable the analysis to keep it visible as planned work.`
           );
+        if (a.family === "gamma_log") {
+          if (!a.costResponse)
+            problems.push(`${w}: a gamma_log regression requires costResponse — without it there is no continuous response to model.`);
+          else if (a.costResponse.settings.length === 0)
+            problems.push(`${w}: costResponse.settings[] is empty, so every subject's cost would be zero.`);
+          if (a.personTimeRule)
+            problems.push(`${w}: a gamma_log cost model takes no person-time offset — costs are totals over the window, not rates. Remove personTimeRule or choose a count family.`);
+        }
         /* A count model without person-time would silently become a model of
          * the COUNT rather than the RATE — same coefficients, different
          * estimand, no way to tell from the output. */

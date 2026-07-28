@@ -40,6 +40,7 @@ import type { AnalysisModule, SqlCtx, SasCtx, SqlModuleFile } from "./types";
 import { oneLine, q, describeWindow, windowConds } from "../sql-base";
 import { cmt, header, levelCheck, sq, windowConds as sasWindowConds, INCLUDE_SETUP } from "../sas-base";
 import { rateCoreSqlCtes, censorPlan, renderCensorSql, renderCensorSas } from "../rate-core";
+import { ledgerSqlCtes, ledgerSasSteps, DEFAULT_ED_PLACE_OF_SERVICE } from "../ledger";
 import { comorbidityScoreSasScore, comorbidityScoreSasSteps, comorbidityScoreSqlCtes, indexAnalysisFor } from "../comorbidity";
 import {
   balanceCovariates,
@@ -59,6 +60,7 @@ const ADJ_METHOD_BY_FAMILY: Record<string, string> = {
   logistic: "sas_proc_logistic",
   poisson: "sas_proc_genmod",
   negative_binomial: "sas_proc_genmod_negbin",
+  gamma_log: "sas_proc_genmod_gamma",
 };
 const adjMethod = (family: string) => ADJ_METHOD_BY_FAMILY[family] ?? "sas_primary";
 /** The effect a family's exponentiated coefficient IS. Labelling a Poisson
@@ -68,6 +70,7 @@ const ADJ_STATISTIC_BY_FAMILY: Record<string, string> = {
   logistic: "odds_ratio",
   poisson: "rate_ratio",
   negative_binomial: "rate_ratio",
+  gamma_log: "cost_ratio",
 };
 const adjStatistic = (family: string) => ADJ_STATISTIC_BY_FAMILY[family] ?? "effect";
 
@@ -114,6 +117,7 @@ function sqlRegression(ctx: SqlCtx, an: RegressionAnalysis, suffix: string): Sql
   const washoutPred = wc.length > 0 ? wc.join("\n      AND ") : "TRUE";
   const horizonEnd = d.offset("s.index_date", an.horizonDays);
   const isCount = an.family === "poisson" || an.family === "negative_binomial";
+  const isCost = an.family === "gamma_log";
   const isRecurrent = (an.recurrence ?? "first_only") === "all_events";
   const censor = an.personTimeRule ? censorPlan(spec, an.personTimeRule) : null;
   const censorFinal = censor?.atOutcome
@@ -129,7 +133,7 @@ function sqlRegression(ctx: SqlCtx, an: RegressionAnalysis, suffix: string): Sql
         referenceLevel: p.referenceLevel, exposedLevel: p.exposedLevel, terms: modelTerms,
         settingFilter: setting.stamped, effectStatistic: adjStatistic(an.family),
         offset: censor ? { applied: censor.applied, dataCut: censor.dataCut } : null,
-        responseKind: isRecurrent ? "count" : "indicator",
+        responseKind: isCost ? "cost" : isRecurrent ? "count" : "indicator",
       }),
     )}`,
   );
@@ -199,6 +203,27 @@ function sqlRegression(ctx: SqlCtx, an: RegressionAnalysis, suffix: string): Sql
     L.push(`  FROM ptc0`);
     L.push(`),`);
   }
+  if (isCost && an.costResponse) {
+    /* The RESPONSE is each subject's COST, read through the SHARED ledger — so
+     * it is the same quantity the resource-use table reports, inpatient
+     * double-count rule and all. Joined to `atrisk`, not to the whole cohort. */
+    L.push(
+      ...ledgerSqlCtes(ctx, {
+        wp,
+        window: an.costResponse.window,
+        settings: an.costResponse.settings,
+        costField: an.costResponse.costField,
+        edPlaces: DEFAULT_ED_PLACE_OF_SERVICE,
+        cohortCte: "atrisk",
+        prefix: "cst_",
+      }),
+    );
+    L.push(`cost_pt AS (   -- total cost per at-risk subject over the window`);
+    L.push(`  SELECT c.enrolid, COALESCE(SUM(e.paid), 0) AS cost`);
+    L.push(`  FROM atrisk c LEFT JOIN cst_encounters_kept e ON e.enrolid = c.enrolid`);
+    L.push(`  GROUP BY c.enrolid`);
+    L.push(`),`);
+  }
   if (isRecurrent) {
     /* The RESPONSE is a count, not an indicator. Distinct qualifying dates, so a
      * stay billed on several lines is one event — the same grain the events
@@ -218,6 +243,9 @@ function sqlRegression(ctx: SqlCtx, an: RegressionAnalysis, suffix: string): Sql
   if (isRecurrent) {
     L.push(`         -- COUNT of qualifying events in the horizon (recurrence: all_events)`);
     L.push(`         COALESCE(en.n_events, 0) AS y,`);
+  } else if (isCost) {
+    L.push(`         -- COST over the window (gamma_log response)`);
+    L.push(`         COALESCE(cp.cost, 0) AS y,`);
   } else {
     L.push(`         -- incident event INSIDE the horizon; a subject counts once`);
     L.push(`         CASE WHEN f.fu_date IS NOT NULL AND f.fu_date <= ${horizonEnd} THEN 1 ELSE 0 END AS y,`);
@@ -246,10 +274,27 @@ function sqlRegression(ctx: SqlCtx, an: RegressionAnalysis, suffix: string): Sql
   if (cciCov && cciAn) L.push(`  LEFT JOIN cci_per_pt cs ON cs.enrolid = s.enrolid`);
   if (isCount) L.push(`  LEFT JOIN ptc pt ON pt.enrolid = s.enrolid`);
   if (isRecurrent) L.push(`  LEFT JOIN ev_n en ON en.enrolid = s.enrolid`);
+  if (isCost) L.push(`  LEFT JOIN cost_pt cp ON cp.enrolid = s.enrolid`);
   L.push(`  WHERE s.arm IN ('${q(p.referenceLevel)}', '${q(p.exposedLevel)}')`);
   L.push(`),`);
   L.push(`cells AS (   -- the table the closed form is computed from`);
-  if (isRecurrent) {
+  if (isCost) {
+    /* Gamma requires a STRICTLY POSITIVE response, so zero-cost subjects cannot
+     * enter the fit. They are counted, reported, and excluded — never dropped
+     * silently and never rescued by adding a small constant, which changes the
+     * estimand. This is the second part of a two-part model; the first part
+     * (any cost at all) is a separate logistic analysis. */
+    L.push(`  SELECT SUM(CASE WHEN exposed = 1 AND y > 0 THEN y ELSE 0 END) AS a_ee,`);
+    L.push(`         SUM(CASE WHEN exposed = 1 AND y > 0 THEN 1 ELSE 0 END) AS b_en,`);
+    L.push(`         SUM(CASE WHEN exposed = 0 AND y > 0 THEN y ELSE 0 END) AS c_ue,`);
+    L.push(`         SUM(CASE WHEN exposed = 0 AND y > 0 THEN 1 ELSE 0 END) AS d_un,`);
+    L.push(`         SUM(CASE WHEN y = 0 THEN 1 ELSE 0 END) AS n_zero,`);
+    L.push(`         SUM(CASE WHEN exposed = 1 THEN 1 ELSE 0 END) AS n_exp_all,`);
+    L.push(`         SUM(CASE WHEN exposed = 0 THEN 1 ELSE 0 END) AS n_unexp_all,`);
+    // sample variances on the POSITIVE subset, for the delta-method interval
+    L.push(`         VAR_SAMP(CASE WHEN exposed = 1 AND y > 0 THEN CAST(y AS DOUBLE PRECISION) END) AS v_exp,`);
+    L.push(`         VAR_SAMP(CASE WHEN exposed = 0 AND y > 0 THEN CAST(y AS DOUBLE PRECISION) END) AS v_unexp`);
+  } else if (isRecurrent) {
     // a count response has no "non-event" cell; b/d carry SUBJECT counts so the
     // design rows can still report arm sizes
     L.push(`  SELECT SUM(CASE WHEN exposed = 1 THEN y ELSE 0 END) AS a_ee,`);
@@ -275,11 +320,27 @@ function sqlRegression(ctx: SqlCtx, an: RegressionAnalysis, suffix: string): Sql
    * chose. */
   L.push(`eff AS (`);
   L.push(`  SELECT a_ee, b_en, c_ue, d_un,`);
-  L.push(isRecurrent
+  L.push(isRecurrent || isCost
     ? `         b_en AS n_exp, d_un AS n_unexp,`
     : `         (a_ee + b_en) AS n_exp, (c_ue + d_un) AS n_unexp,`);
+  if (isCost) L.push(`         n_zero, n_exp_all, n_unexp_all, v_exp, v_unexp,`);
   if (isRecurrent) L.push(`         max_events,`);
-  if (isCount) {
+  if (isCost) {
+    /* The saturated Gamma-log model reproduces the observed arm MEANS, so its
+     * MLE of the exposure coefficient IS ln(mean_exposed / mean_reference).
+     * That is the anchor, in closed form.
+     *
+     * The interval is the DELTA METHOD on the log ratio of means, and it is
+     * labeled as such: it is NOT the fitted model's interval, which needs the
+     * Gamma dispersion parameter and is therefore SAS-primary. Reporting a
+     * delta-method interval under a model-based label would be the mislabeling
+     * this project refuses. */
+    L.push(`         CASE WHEN a_ee > 0 AND c_ue > 0 AND b_en > 0 AND d_un > 0`);
+    L.push(`              THEN LN((a_ee * 1.0 / b_en) / (c_ue * 1.0 / d_un)) END AS log_cr,`);
+    L.push(`         CASE WHEN a_ee > 0 AND c_ue > 0 AND b_en > 1 AND d_un > 1`);
+    L.push(`              THEN SQRT( v_exp / (b_en * POWER(a_ee * 1.0 / b_en, 2))`);
+    L.push(`                       + v_unexp / (d_un * POWER(c_ue * 1.0 / d_un, 2)) ) END AS se_log_cr`);
+  } else if (isCount) {
     L.push(`         pt_exp, pt_unexp,`);
     /* The Poisson closed form: a ratio of RATES, not of odds. Its standard
      * error depends only on the EVENT counts — person-time enters the point
@@ -304,6 +365,23 @@ function sqlRegression(ctx: SqlCtx, an: RegressionAnalysis, suffix: string): Sql
     `  SELECT 'design' AS component, '${term}' AS term, '${stat}' AS statistic, ${ord} AS ord,` +
     ` CAST(${expr} AS NUMERIC) AS estimate, CAST(NULL AS NUMERIC) AS ci_low, CAST(NULL AS NUMERIC) AS ci_high,` +
     ` CAST(NULL AS NUMERIC) AS se_log, CAST('observed' AS VARCHAR) AS method FROM eff`;
+  if (isCost) {
+    L.push(designRow(0, q(p.exposedLevel), "n", "n_exp_all"));
+    L.push(`  UNION ALL`);
+    L.push(designRow(1, q(p.exposedLevel), "n_positive_cost", "n_exp"));
+    L.push(`  UNION ALL`);
+    L.push(designRow(2, q(p.exposedLevel), "total_cost", "a_ee"));
+    L.push(`  UNION ALL`);
+    L.push(designRow(3, q(p.exposedLevel), "mean_cost", `${d.roundN(`a_ee * 1.0 / NULLIF(b_en, 0)`, 5)}`));
+    L.push(`  UNION ALL`);
+    L.push(designRow(4, q(p.referenceLevel), "n", "n_unexp_all"));
+    L.push(`  UNION ALL`);
+    L.push(designRow(5, q(p.referenceLevel), "n_positive_cost", "n_unexp"));
+    L.push(`  UNION ALL`);
+    L.push(designRow(6, q(p.referenceLevel), "total_cost", "c_ue"));
+    L.push(`  UNION ALL`);
+    L.push(designRow(7, q(p.referenceLevel), "mean_cost", `${d.roundN(`c_ue * 1.0 / NULLIF(d_un, 0)`, 5)}`));
+  } else {
   L.push(designRow(0, q(p.exposedLevel), "n", "n_exp"));
   L.push(`  UNION ALL`);
   L.push(designRow(1, q(p.exposedLevel), "events", "a_ee"));
@@ -323,11 +401,35 @@ function sqlRegression(ctx: SqlCtx, an: RegressionAnalysis, suffix: string): Sql
     L.push(`  UNION ALL`);
     L.push(designRow(7, q(p.referenceLevel), "rate_per_1000py", `ROUND(CAST(c_ue * 1000.0 * ${Y} / NULLIF(pt_unexp, 0) AS NUMERIC), 5)`));
   }
+  }
   // 2. the crude effect, closed form, in BOTH twins
   const crude = (ord: number, stat: string, est: string, lo: string, hi: string, se: string) =>
     `  SELECT 'crude', '${q(stratLabel(gvLabel))}', '${stat}', ${ord},` +
     ` ${est}, ${lo}, ${hi}, ${se}, CAST('closed_form_2x2' AS VARCHAR) FROM eff`;
-  if (isCount) {
+  if (isCost) {
+    L.push(`  UNION ALL`);
+    L.push(crude(10, "cost_ratio",
+      d.roundN(`EXP(log_cr)`, 5),
+      d.roundN(`EXP(log_cr - 1.96 * se_log_cr)`, 5),
+      d.roundN(`EXP(log_cr + 1.96 * se_log_cr)`, 5),
+      d.roundN(`se_log_cr`, 5)).replace("'closed_form_2x2'", "'delta_method_ratio_of_means'"));
+    L.push(`  UNION ALL`);
+    L.push(crude(11, "mean_cost_difference",
+      d.roundN(`a_ee * 1.0 / NULLIF(b_en, 0) - c_ue * 1.0 / NULLIF(d_un, 0)`, 5),
+      `CAST(NULL AS NUMERIC)`, `CAST(NULL AS NUMERIC)`, `CAST(NULL AS NUMERIC)`)
+      .replace("'closed_form_2x2'", "'difference_of_means'"));
+    /* ZERO-COST SUBJECTS. Gamma needs y > 0, so these cannot enter the fit.
+     * Reported as a row rather than dropped: how many were excluded, and from
+     * what, is part of the result. */
+    L.push(`  UNION ALL`);
+    L.push(
+      `  SELECT 'diagnostic', 'zero_cost', 'subjects_excluded_from_fit', 14,` +
+        ` CAST(n_zero AS NUMERIC), CAST(NULL AS NUMERIC), CAST(NULL AS NUMERIC), CAST(NULL AS NUMERIC),` +
+        ` CAST(CASE WHEN n_zero > 0` +
+        ` THEN 'EXCLUDED from the gamma fit: a gamma response must be strictly positive. This is the SECOND part of a two-part model; the first part (any cost at all) is a separate logistic analysis'` +
+        ` ELSE 'no zero-cost subjects, so the gamma fit uses everyone' END AS VARCHAR) FROM eff`,
+    );
+  } else if (isCount) {
     L.push(`  UNION ALL`);
     L.push(crude(10, "rate_ratio",
       d.roundN(`EXP(log_rr)`, 5),
@@ -433,8 +535,16 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
   const cciAn = indexAnalysisFor(spec, cciCov?.analysisId);
   const cciScore = cciCov && cciAn ? comorbidityScoreSasSteps(ctx, { an: cciAn, num, cohT, evOf: ctx.evOf }) : null;
   const isCountS = an.family === "poisson" || an.family === "negative_binomial";
+  const isCostS = an.family === "gamma_log";
+  const glmDist = an.family === "negative_binomial" ? "negbin" : an.family === "gamma_log" ? "gamma" : "poisson";
+  const costLedger = isCostS && an.costResponse
+    ? ledgerSasSteps(ctx, {
+        wp: "", num: `${num}c`, cohT: `work._${num}_atrisk`, epiT: ctx.tbl("050_epi"),
+        window: an.costResponse.window, settings: an.costResponse.settings,
+        costField: an.costResponse.costField, edPlaces: DEFAULT_ED_PLACE_OF_SERVICE,
+      })
+    : null;
   const isRecurrentS = (an.recurrence ?? "first_only") === "all_events";
-  const nbDist = an.family === "negative_binomial" ? "negbin" : "poisson";
   const censorS = an.personTimeRule ? censorPlan(spec, an.personTimeRule) : null;
   const YS = ctx.daysPerYearLit;
   const indexListIdS = spec.indexEvent.codeListId;
@@ -458,7 +568,7 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
         referenceLevel: p.referenceLevel, exposedLevel: p.exposedLevel, terms: modelTerms,
         settingFilter: setting.stamped, effectStatistic: adjStatistic(an.family),
         offset: censorS ? { applied: censorS.applied, dataCut: censorS.dataCut } : null,
-        responseKind: isRecurrentS ? "count" : "indicator",
+        responseKind: isCostS ? "cost" : isRecurrentS ? "count" : "indicator",
       }),
     )} */`,
     ``,
@@ -515,6 +625,8 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
     ``,
     ...levelCheck(`work._${num}_atrisk`, "at-risk subjects"),
     ``,
+    ...(isCostS ? [`/* (no first-event lookup: the response is a cost total, not an event) */`, ``] : []),
+    ...(isCostS ? [] : [
     `/*-------------------- first incident event inside the horizon ---------------*/`,
     `proc sql;`,
     `  create table work._${num}_fu as`,
@@ -528,6 +640,24 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
     `  group by a.enrolid;`,
     `quit;`,
     ``,
+    ]),
+    ...(costLedger
+      ? [
+          `/*-------------------- COST response, via the shared ledger -------------------`,
+          `  The same encounter rules the resource-use table uses, including the`,
+          `  inpatient double count: an admission's stay-level total is taken and its`,
+          `  own service lines are dropped. */`,
+          ...costLedger.lines,
+          `proc sql;`,
+          `  create table work._${num}_cost as`,
+          `  select a.enrolid, coalesce(sum(e.paid), 0) as cost`,
+          `  from work._${num}_atrisk as a`,
+          `  left join ${costLedger.encounters} as e on e.enrolid = a.enrolid`,
+          `  group by a.enrolid;`,
+          `quit;`,
+          ``,
+        ]
+      : []),
     ...(isRecurrentS
       ? [
           `/*-------------------- recurrent events per subject --------------------------*/`,
@@ -583,19 +713,22 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
     `         (case when a.arm = '${sq(p.exposedLevel)}' then 1 else 0 end) as exposed,`,
     ...(isRecurrentS
       ? [`         coalesce(n.n_events, 0) as y,   /* COUNT (recurrence: all_events) */`]
-      : [`         (case when f.enrolid is not null then 1 else 0 end) as y,`]),
+      : isCostS
+        ? [`         coalesce(cst.cost, 0) as y,     /* COST (gamma_log response) */`]
+        : [`         (case when f.enrolid is not null then 1 else 0 end) as y,`]),
     `         (year(a.index_date) - b.dobyr) as age_val,`,
     `         (case when b.sex = '1' then 1 else 0 end) as sex_male${cciScore ? "," : ""}`,
     ...(cciScore ? [`         coalesce(s.score, 0) as cci_val${isCountS ? "," : ""}`] : []),
     ...(isCountS ? [`         coalesce(pt.person_days, 0) as person_days`] : []),
     `  from work._${num}_atrisk as a`,
-    `  left join work._${num}_fu as f on f.enrolid = a.enrolid`,
+    ...(isCostS ? [] : [`  left join work._${num}_fu as f on f.enrolid = a.enrolid`]),
     `  left join (select enrolid, min(dobyr) as dobyr, min(sex) as sex`,
     `             from ${enrT} group by enrolid) as b`,
     `    on b.enrolid = a.enrolid`,
     ...(cciScore ? [`  left join ${cciScore.scoreTable} as s on s.enrolid = a.enrolid`] : []),
     ...(isCountS ? [`  left join work._${num}_pt as pt on pt.enrolid = a.enrolid`] : []),
     ...(isRecurrentS ? [`  left join work._${num}_evn as n on n.enrolid = a.enrolid`] : []),
+    ...(isCostS ? [`  left join work._${num}_cost as cst on cst.enrolid = a.enrolid`] : []),
     `  ;`,
     `quit;`,
     ``,
@@ -606,7 +739,21 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
     `----------------------------------------------------------------------------*/`,
     `proc sql;`,
     `  create table work._${num}_cells as`,
-    ...(isRecurrentS
+    ...(isCostS
+      ? [
+          `  /* gamma needs y > 0, so zero-cost subjects are COUNTED and EXCLUDED,`,
+          `     never dropped silently and never rescued with a small constant. */`,
+          `  select sum(case when exposed = 1 and y > 0 then y else 0 end) as a_ee,`,
+          `         sum(case when exposed = 1 and y > 0 then 1 else 0 end) as b_en,`,
+          `         sum(case when exposed = 0 and y > 0 then y else 0 end) as c_ue,`,
+          `         sum(case when exposed = 0 and y > 0 then 1 else 0 end) as d_un,`,
+          `         sum(case when y = 0 then 1 else 0 end) as n_zero,`,
+          `         sum(case when exposed = 1 then 1 else 0 end) as n_exp_all,`,
+          `         sum(case when exposed = 0 then 1 else 0 end) as n_unexp_all,`,
+          `         var(case when exposed = 1 and y > 0 then y else . end) as v_exp,`,
+          `         var(case when exposed = 0 and y > 0 then y else . end) as v_unexp`,
+        ]
+      : isRecurrentS
       ? [
           `  /* a COUNT response has no "non-event" cell: a_ee sums counts, and`,
           `     b_en / d_un carry SUBJECT counts so the design rows still report`,
@@ -634,10 +781,22 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
     ``,
     `data work._${num}_eff;`,
     `  set work._${num}_cells;`,
-    ...(isRecurrentS
+    ...(isRecurrentS || isCostS
       ? [`  n_exp   = b_en;`, `  n_unexp = d_un;`]
       : [`  n_exp   = a_ee + b_en;`, `  n_unexp = c_ue + d_un;`]),
-    ...(isCountS
+    ...(isCostS
+      ? [
+          `  /* The saturated gamma-log model reproduces the observed arm MEANS, so`,
+          `     its MLE of the exposure coefficient IS ln(mean_exposed/mean_ref).`,
+          `     The interval below is the DELTA METHOD on that ratio - NOT the fitted`,
+          `     model's interval, which needs the gamma dispersion parameter. */`,
+          `  if a_ee > 0 and c_ue > 0 and b_en > 0 and d_un > 0 then`,
+          `    log_cr = log((a_ee / b_en) / (c_ue / d_un));`,
+          `  if a_ee > 0 and c_ue > 0 and b_en > 1 and d_un > 1 then`,
+          `    se_log_cr = sqrt( v_exp / (b_en * (a_ee/b_en)**2)`,
+          `                    + v_unexp / (d_un * (c_ue/d_un)**2) );`,
+        ]
+      : isCountS
       ? [
           `  /* the Poisson closed form: a ratio of RATES. Person-time enters the`,
           `     point estimate; the standard error depends only on event counts. */`,
@@ -676,7 +835,7 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
           ``,
           `ods output ParameterEstimates = work._${num}_anchor_pe;`,
           `proc genmod data=work._${num}_subj;`,
-          `  model y = exposed / dist=${nbDist} link=log offset=log_pt;`,
+          `  model y = exposed / dist=${glmDist} link=log${isCostS ? "" : " offset=log_pt"};`,
           `run;`,
         ]
       : [
@@ -688,9 +847,9 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
     ``,
     `data work._${num}_anchor;`,
     `  merge work._${num}_anchor_pe (where=(upcase(Variable) = 'EXPOSED') rename=(Estimate = fitted_log_or))`,
-    `        work._${num}_eff (keep=${isCountS ? "log_rr" : "log_or"});`,
+    `        work._${num}_eff (keep=${isCostS ? "log_cr" : isCountS ? "log_rr" : "log_or"});`,
     `  length anchor_verdict $48;`,
-    ...(isCountS ? [`  log_or = log_rr;`] : []),
+    ...(isCostS ? [`  log_or = log_cr;`] : isCountS ? [`  log_or = log_rr;`] : []),
     `  _gap = abs(fitted_log_or - log_or);`,
     `  if log_or = . then anchor_verdict = 'NOT CHECKABLE (a zero cell)';`,
     `  else if _gap < 1e-6 then anchor_verdict = 'PASS: saturated MLE = closed form';`,
@@ -710,7 +869,7 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
       ? [
           `ods output ParameterEstimates = work._${num}_adj_pe;`,
           `proc genmod data=work._${num}_subj;`,
-          `  model y = exposed${p.covariates.length > 0 ? " " + p.covariates.map(sasVar).join(" ") : ""} / dist=${nbDist} link=log offset=log_pt;`,
+          `  model y = exposed${p.covariates.length > 0 ? " " + p.covariates.map(sasVar).join(" ") : ""} / dist=${glmDist} link=log${isCostS ? "" : " offset=log_pt"};`,
           `run;`,
         ]
       : [

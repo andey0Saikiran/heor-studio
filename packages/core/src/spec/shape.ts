@@ -282,6 +282,16 @@ function checkAnalysis(p: Problems, v: unknown, path: string): void {
       needStr(p, v, "groupVarId", path, { nonEmpty: true });
       if (v.personTimeRule !== undefined) checkPersonTimeRule(p, v.personTimeRule, `${path}.personTimeRule`);
       if (v.recurrence !== undefined) needEnum(p, v, "recurrence", path, RECURRENCE);
+      if (v.costResponse !== undefined) {
+        const cp = `${path}.costResponse`;
+        if (!isObj(v.costResponse)) p.push(cp, `expected {window, settings, costField}, got ${typeOf(v.costResponse)}`);
+        else {
+          checkWindow(p, v.costResponse.window, `${cp}.window`);
+          needEnum(p, v.costResponse, "costField", cp, COST_FIELDS);
+          if (!Array.isArray(v.costResponse.settings)) p.push(`${cp}.settings`, "expected an array of care settings");
+          else v.costResponse.settings.forEach((x, j) => need(p, `${cp}.settings[${j}]`, LEDGER_SETTINGS.has(x as string), `expected one of [${[...LEDGER_SETTINGS].join(", ")}], got ${JSON.stringify(x)}`));
+        }
+      }
       if (!Array.isArray(v.covariateIds)) p.push(`${path}.covariateIds`, `expected an array of baseline ids, got ${typeOf(v.covariateIds)}`);
       else v.covariateIds.forEach((x, j) => need(p, `${path}.covariateIds[${j}]`, isStr(x), `expected a baseline id string, got ${typeOf(x)}`));
       break;

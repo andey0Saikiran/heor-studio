@@ -171,6 +171,22 @@ const MUTATIONS: Mutation[] = [
     apply: (t) => t.replace(/round\(t_stat \/ sqrt\(var_t\)/, "round(t_stat / (var_t)"),
   },
   {
+    /* Zero-cost subjects swept into the gamma fit. A gamma response must be
+     * strictly positive, so this either fails at the site or — worse, if the
+     * site's data has a floor — quietly changes which subjects the estimate
+     * describes. */
+    name: "SQL gamma model stops excluding zero-cost subjects",
+    kind: "regression", lang: "sql", pathMatch: /glm_a_glm_cost/,
+    apply: (t) => t.replace(/SUM\(CASE WHEN exposed = 1 AND y > 0 THEN y ELSE 0 END\) AS a_ee/, "SUM(CASE WHEN exposed = 1 THEN y ELSE 0 END) AS a_ee"),
+  },
+  {
+    /* The cost ratio built from TOTALS rather than MEANS. With unequal arm
+     * sizes those differ, and the result is still a plausible-looking ratio. */
+    name: "SAS cost ratio divides arm TOTALS instead of arm means",
+    kind: "regression", lang: "sas", pathMatch: /glm_a_glm_cost/,
+    apply: (t) => t.replace(/log\(\(a_ee \/ b_en\) \/ \(c_ue \/ d_un\)\)/, "log(a_ee / c_ue)"),
+  },
+  {
     /* The recurrent response collapses back to an indicator: every subject with
      * two events silently becomes a subject with one, and the rate drops by an
      * amount nothing in the output explains. */

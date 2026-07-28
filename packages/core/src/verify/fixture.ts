@@ -618,6 +618,43 @@ export const EXPECTED = {
     maxEventsPerSubject: 1,
     dispersionVerdict: "DEGENERATE",
   },
+  /* Gamma-log cost model, hand-derived.
+   *
+   * Cost window is day 1..365 — EXCLUDING the index date, because the index
+   * fill IS the exposure and counting it would put the treatment's own price on
+   * both sides of the comparison. Costs come through the shared ledger, so
+   * P04's stay contributes its $10,000 admission total and not the $17,000 a
+   * double count would give.
+   *
+   *   DRUG_X (reference)  P02 600, P03 300, P04 10000, P05 5000  -> mean 3975
+   *   DRUG_Y (exposed)    P07 200, P08 1500, P09 0, P10 0        -> mean 850
+   *                                                                 over the 2
+   *                                                                 POSITIVE ones
+   *
+   * P09 and P10 have no post-index claims at all, so their cost is ZERO — the
+   * condition a gamma response cannot take. They are counted and excluded, and
+   * the program says so.
+   *
+   *   cost ratio = 850/3975 = 34/159 = 0.21384
+   *   ln(ratio)  = -1.54254
+   *   delta-method SE on the log ratio of means = 0.95555
+   *   95% CI     = (0.03286, 1.39143)
+   *   mean cost difference = 850 - 3975 = -3125
+   *
+   * NOTE: the SE and the upper bound here were CORRECTED against execution — a
+   * long-division slip in the hand derivation gave 0.95554 and 1.39141. The
+   * derivation was re-done independently and agrees with these values. */
+  regressionGamma: {
+    rowCount: 14, // 8 design + 2 crude + 1 diagnostic + 3 adjusted
+    design: {
+      exposed: { n: 4, nPositive: 2, totalCost: 1700, meanCost: 850 },
+      reference: { n: 4, nPositive: 4, totalCost: 15900, meanCost: 3975 },
+    },
+    costRatio: { estimate: 0.21384, ciLow: 0.03286, ciHigh: 1.39143, seLog: 0.95555 },
+    meanCostDifference: -3125,
+    logCr: -1.54254,
+    zeroCostExcluded: 2,
+  },
   /* SMD balance, DRUG_X (reference) vs DRUG_Y, over the 10-patient cohort.
    *   ages X = 40,45,50,55,60 -> mean 50, sample variance 62.5
    *   ages Y = 45,50,55,60,65 -> mean 55, sample variance 62.5
@@ -939,6 +976,28 @@ export const GOLD_A_SPEC: StudySpec = {
       personTimeRule: { start: "index", censorAt: ["disenrollment", "study_end", "max_followup"], maxFollowupDays: 365 },
       groupVarId: "g_arm",
       covariateIds: ["b_age", "b_sex", "b_cci"],
+    },
+    /* GAMMA-LOG cost model on the same at-risk set.
+     *
+     * The cost window starts at day 1, EXCLUDING the index date: the index fill
+     * is the exposure itself, so counting it as follow-up cost would put the
+     * treatment's own price on both sides of the comparison. It also means
+     * subjects whose only claim was the index fill have ZERO cost — which is
+     * the condition a gamma model cannot fit, and therefore the one worth
+     * exercising. */
+    {
+      id: "a_glm_cost", label: "Follow-up cost, gamma-log", kind: "regression", enabled: true,
+      family: "gamma_log",
+      outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "outpatient", diagnosisPosition: "any" },
+      washout: { start: -365, end: 0, includesIndex: true },
+      horizonDays: 365,
+      costResponse: {
+        window: { start: 1, end: 365, includesIndex: false },
+        settings: ["inpatient", "ed", "outpatient", "pharmacy"],
+        costField: "paytot",
+      },
+      groupVarId: "g_arm",
+      covariateIds: ["b_age", "b_sex"],
     },
     /* Covariate balance between the exposure arms. Age is deliberately
      * IMBALANCED (SMD -0.63246, |SMD| > 0.1) and sex is deliberately BALANCED

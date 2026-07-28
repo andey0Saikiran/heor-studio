@@ -63,6 +63,13 @@ export interface LedgerInput {
   settings: LedgerSetting[];
   costField: "paytot" | "netpay";
   edPlaces: string[];
+  /** CTE the ledger reads its members from. Defaults to defining `cohort`
+   *  itself; a caller that already has a cohort (or a narrower at-risk set)
+   *  passes its name and the ledger joins to that instead. */
+  cohortCte?: string;
+  /** prefix for every emitted CTE name, so the ledger can coexist with another
+   *  chain in one WITH clause (rate-core also defines `cohort`, `ae`, ...). */
+  prefix?: string;
 }
 
 /** Day offsets, resolved. An unbounded window is refused at readiness, so both
@@ -93,16 +100,18 @@ export function ledgerSqlCtes(ctx: SqlCtx, i: LedgerInput): string[] {
   const want = (s: LedgerSetting) => chosen.includes(s);
   const cost = i.costField;
 
+  const p = i.prefix ?? "";
+  const coh = i.cohortCte ?? `${p}cohort`;
   const L: string[] = [];
-  L.push(`WITH cohort AS (SELECT enrolid, index_date FROM ${i.wp}_cohort),`);
+  if (!i.cohortCte) L.push(`WITH ${coh} AS (SELECT enrolid, index_date FROM ${i.wp}_cohort),`);
 
   /* Observed days: the window intersected with enrollment. Every rate below
    * divides by this, so a member observed for half the window does not look
    * like a light user of care — they look like what they are. */
-  L.push(`obs AS (   -- per-member observed days = window INTERSECT enrollment`);
+  L.push(`${p}obs AS (   -- per-member observed days = window INTERSECT enrollment`);
   L.push(`  SELECT c.enrolid,`);
   L.push(`         COALESCE(SUM(GREATEST(0, ${d.daysBetween(`LEAST(${winHi}, ep.episode_end)`, `GREATEST(${winLo}, ep.episode_start)`)} + 1)), 0) AS observed_days`);
-  L.push(`  FROM cohort c`);
+  L.push(`  FROM ${coh} c`);
   L.push(`  LEFT JOIN ${i.wp}_enroll_episodes ep`);
   L.push(`    ON ep.enrolid = c.enrolid`);
   L.push(`   AND ep.episode_start <= ${winHi}`);
@@ -116,22 +125,22 @@ export function ledgerSqlCtes(ctx: SqlCtx, i: LedgerInput): string[] {
     /* Stay-level records carry the stay's TOTAL payment. Their own service
      * lines are therefore excluded below — not because the lines are wrong, but
      * because they are already inside this number. */
-    L.push(`led_ip_adm AS (   -- inpatient ADMISSIONS: one encounter per stay, dated at admission`);
+    L.push(`${p}led_ip_adm AS (   -- inpatient ADMISSIONS: one encounter per stay, dated at admission`);
     L.push(`  SELECT c.enrolid, 'IP' AS setting, i.admdate AS service_date,`);
     L.push(`         COALESCE(CAST(i.caseid AS VARCHAR), 'ADM' || CAST(i.admdate AS VARCHAR)) AS enc_id,`);
     L.push(`         COALESCE(i.${cost}, 0) AS paid`);
-    L.push(`  FROM cohort c`);
+    L.push(`  FROM ${coh} c`);
     L.push(`  JOIN ${ctx.t("inpatient_admissions")} i ON i.enrolid = c.enrolid`);
     L.push(`   AND i.admdate >= ${winLo} AND i.admdate <= ${winHi}`);
     L.push(`),`);
-    L.push(`led_ip_orphan AS (   -- inpatient SERVICE LINES with no admission record`);
+    L.push(`${p}led_ip_orphan AS (   -- inpatient SERVICE LINES with no admission record`);
     L.push(`  -- Kept only when nothing matches: by CASEID where the line has one,`);
     L.push(`  -- by admission date where it does not. Dropping these outright would`);
     L.push(`  -- silently lose stays that span a year-file boundary.`);
     L.push(`  SELECT c.enrolid, 'IP' AS setting, s.admdate AS service_date,`);
     L.push(`         COALESCE(CAST(s.caseid AS VARCHAR), 'ADM' || CAST(s.admdate AS VARCHAR)) AS enc_id,`);
     L.push(`         COALESCE(s.${cost}, 0) AS paid`);
-    L.push(`  FROM cohort c`);
+    L.push(`  FROM ${coh} c`);
     L.push(`  JOIN ${ctx.t("inpatient_services")} s ON s.enrolid = c.enrolid`);
     L.push(`   AND s.admdate >= ${winLo} AND s.admdate <= ${winHi}`);
     L.push(`  WHERE NOT EXISTS (`);
@@ -141,7 +150,7 @@ export function ledgerSqlCtes(ctx: SqlCtx, i: LedgerInput): string[] {
     L.push(`          OR (s.caseid IS NULL     AND i2.admdate = s.admdate) )`);
     L.push(`  )`);
     L.push(`),`);
-    parts.push("led_ip_adm", "led_ip_orphan");
+    parts.push(`${p}led_ip_adm`, `${p}led_ip_orphan`);
   }
 
   if (want("ed") || want("outpatient")) {
@@ -149,49 +158,49 @@ export function ledgerSqlCtes(ctx: SqlCtx, i: LedgerInput): string[] {
     const cls = want("ed")
       ? `CASE WHEN CAST(o.stdplac AS VARCHAR) IN (${edList}) THEN 'ED' ELSE 'OP' END`
       : `'OP'`;
-    L.push(`led_amb AS (   -- ambulatory lines; ONE encounter per member per service date per class`);
+    L.push(`${p}led_amb AS (   -- ambulatory lines; ONE encounter per member per service date per class`);
     if (want("ed")) L.push(`  -- MarketScan has no ED family: the ED is carved out by place of service (${i.edPlaces.join(", ")}).`);
     L.push(`  SELECT c.enrolid, ${cls} AS setting, o.svcdate AS service_date,`);
     L.push(`         CAST(o.svcdate AS VARCHAR) AS enc_id,`);
     L.push(`         COALESCE(o.${cost}, 0) AS paid`);
-    L.push(`  FROM cohort c`);
+    L.push(`  FROM ${coh} c`);
     L.push(`  JOIN ${ctx.t("outpatient_services")} o ON o.enrolid = c.enrolid`);
     L.push(`   AND o.svcdate >= ${winLo} AND o.svcdate <= ${winHi}`);
     L.push(`),`);
-    parts.push("led_amb");
+    parts.push(`${p}led_amb`);
   }
 
   if (want("pharmacy")) {
-    L.push(`led_rx AS (   -- pharmacy FILLS; the key includes the NDC, so two different`);
+    L.push(`${p}led_rx AS (   -- pharmacy FILLS; the key includes the NDC, so two different`);
     L.push(`  -- products dispensed on one day are two fills, not one visit`);
     L.push(`  SELECT c.enrolid, 'RX' AS setting, r.svcdate AS service_date,`);
     L.push(`         CAST(r.svcdate AS VARCHAR) || ':' || CAST(r.ndcnum AS VARCHAR) AS enc_id,`);
     L.push(`         COALESCE(r.${cost}, 0) AS paid`);
-    L.push(`  FROM cohort c`);
+    L.push(`  FROM ${coh} c`);
     L.push(`  JOIN ${ctx.t("drug_claims")} r ON r.enrolid = c.enrolid`);
     L.push(`   AND r.svcdate >= ${winLo} AND r.svcdate <= ${winHi}`);
     L.push(`),`);
-    parts.push("led_rx");
+    parts.push(`${p}led_rx`);
   }
 
-  L.push(`ledger AS (`);
-  parts.forEach((p, n) => {
-    L.push(`  ${n === 0 ? "  " : "UNION ALL "}SELECT enrolid, setting, service_date, enc_id, paid FROM ${p}`);
+  L.push(`${p}ledger AS (`);
+  parts.forEach((pt, n) => {
+    L.push(`  ${n === 0 ? "  " : "UNION ALL "}SELECT enrolid, setting, service_date, enc_id, paid FROM ${pt}`);
   });
   L.push(`),`);
   // Lines collapse to encounters here: same member, same class, same key.
-  L.push(`encounters AS (`);
+  L.push(`${p}encounters AS (`);
   L.push(`  SELECT enrolid, setting, enc_id, MIN(service_date) AS encounter_date, SUM(paid) AS paid`);
-  L.push(`  FROM ledger`);
+  L.push(`  FROM ${p}ledger`);
   L.push(`  GROUP BY enrolid, setting, enc_id`);
   L.push(`),`);
   // Filter the ambulatory split down to the settings actually requested.
   if (want("ed") && !want("outpatient")) {
-    L.push(`encounters_kept AS (SELECT * FROM encounters WHERE setting <> 'OP'),`);
+    L.push(`${p}encounters_kept AS (SELECT * FROM ${p}encounters WHERE setting <> 'OP'),`);
   } else if (want("outpatient") && !want("ed")) {
-    L.push(`encounters_kept AS (SELECT * FROM encounters WHERE setting <> 'ED'),`);
+    L.push(`${p}encounters_kept AS (SELECT * FROM ${p}encounters WHERE setting <> 'ED'),`);
   } else {
-    L.push(`encounters_kept AS (SELECT * FROM encounters),`);
+    L.push(`${p}encounters_kept AS (SELECT * FROM ${p}encounters),`);
   }
   return L;
 }

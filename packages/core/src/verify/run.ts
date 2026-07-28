@@ -1045,6 +1045,69 @@ export async function verifyGoldA(): Promise<VerificationResult> {
       detail: diag?.method ?? "no diagnostic row",
     });
 
+    /* ---- GAMMA-LOG cost model ----
+     * The response comes through the SHARED ledger, so the model's costs are
+     * the resource-use table's costs — including the inpatient double-count
+     * rule. And the zero-cost subjects are the methodological point: a gamma
+     * response must be strictly positive. */
+    const rgm = EXPECTED.regressionGamma;
+    const G_T = "tz_study_glm_a_glm_cost";
+    eq(
+      `gamma-log rows = ${rgm.rowCount} (8 design + 2 crude + 1 diagnostic + 3 adjusted)`,
+      await scalar<number>(db, `SELECT count(*)::int FROM ${G_T}`),
+      rgm.rowCount,
+    );
+    const gRow = async (component: string, term: string, statistic: string) =>
+      (
+        await rows<{ estimate: number | null; ci_low: number | null; ci_high: number | null; se_log: number | null; method: string }>(
+          db,
+          `SELECT estimate::float8, ci_low::float8, ci_high::float8, se_log::float8, method
+             FROM ${G_T} WHERE component = '${component}' AND term = '${term}' AND statistic = '${statistic}'`,
+        )
+      )[0];
+    for (const [arm, want] of [["DRUG_Y", rgm.design.exposed], ["DRUG_X", rgm.design.reference]] as const) {
+      eq(`gamma ${arm}: subjects = ${want.n}`, Number((await gRow("design", arm, "n"))?.estimate), want.n);
+      eq(`gamma ${arm}: with POSITIVE cost = ${want.nPositive}`, Number((await gRow("design", arm, "n_positive_cost"))?.estimate), want.nPositive);
+      approx(`gamma ${arm}: total cost = ${want.totalCost}`, Number((await gRow("design", arm, "total_cost"))?.estimate), want.totalCost, 0.01);
+      approx(`gamma ${arm}: mean cost = ${want.meanCost}`, Number((await gRow("design", arm, "mean_cost"))?.estimate), want.meanCost, 0.01);
+    }
+    /* The ledger's inpatient rule reaching the MODEL, not just the cost table:
+     * P04's stay contributes its $10,000 admission total. A double-counting
+     * ledger would put DRUG_X's total at 22,900 instead of 15,900. */
+    checks.push({
+      name: "gamma: the model's costs come through the ledger (P04's stay is $10,000, not $17,000)",
+      status: Math.abs(Number((await gRow("design", "DRUG_X", "total_cost"))?.estimate) - rgm.design.reference.totalCost) < 0.01 ? "pass" : "fail",
+      detail: `DRUG_X total ${(await gRow("design", "DRUG_X", "total_cost"))?.estimate} = 600 + 300 + 10000 + 5000`,
+    });
+    const cr = await gRow("crude", "Index drug", "cost_ratio");
+    approx("gamma cost ratio = 34/159 (hand-computed from the arm means)", Number(cr?.estimate), rgm.costRatio.estimate, 0.00001);
+    approx(`gamma cost-ratio CI low = ${rgm.costRatio.ciLow}`, Number(cr?.ci_low), rgm.costRatio.ciLow, 0.00001);
+    approx(`gamma cost-ratio CI high = ${rgm.costRatio.ciHigh}`, Number(cr?.ci_high), rgm.costRatio.ciHigh, 0.00001);
+    approx("gamma delta-method SE on the log ratio", Number(cr?.se_log), rgm.costRatio.seLog, 0.00001);
+    /* The interval is the DELTA METHOD, not the fitted model's — labelling it
+     * as the model's would be the mislabeling this project refuses. */
+    checks.push({
+      name: "gamma: the crude interval is labeled delta_method_ratio_of_means, NOT the fitted model's",
+      status: cr?.method === "delta_method_ratio_of_means" ? "pass" : "fail",
+      detail: `method "${cr?.method}"`,
+    });
+    approx("gamma mean cost difference = -3125", Number((await gRow("crude", "Index drug", "mean_cost_difference"))?.estimate), rgm.meanCostDifference, 0.01);
+    checks.push({
+      name: "gamma: the saturated anchor value is ln(34/159) — what the SAS MLE must reproduce",
+      status: Math.abs(Math.log(Number(cr?.estimate)) - rgm.logCr) < 0.0001 ? "pass" : "fail",
+      detail: `ln(${cr?.estimate}) = ${Math.log(Number(cr?.estimate)).toFixed(5)}`,
+    });
+    /* ZERO COST. P09 and P10 have no post-index claims; a gamma response cannot
+     * take them. Counted and reported, never dropped silently and never rescued
+     * by adding a constant. */
+    const zc = await gRow("diagnostic", "zero_cost", "subjects_excluded_from_fit");
+    eq("gamma: zero-cost subjects excluded from the fit = 2 (P09, P10)", Number(zc?.estimate), rgm.zeroCostExcluded);
+    checks.push({
+      name: "gamma: the exclusion is REPORTED, and named as the second part of a two-part model",
+      status: (zc?.method ?? "").includes("two-part") ? "pass" : "fail",
+      detail: zc?.method ?? "no diagnostic row",
+    });
+
     /* ---- Table 1 comorbidity-index row (executed) ----
      * The row is scored by the SAME shared engine as the index analysis and the
      * balance table, so this asserts the wiring rather than the arithmetic:
