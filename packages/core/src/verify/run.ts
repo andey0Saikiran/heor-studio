@@ -15,6 +15,7 @@ import { mutationChecks } from "./mutation";
 import { sasStructureChecks } from "./sas-lint";
 import { emitSas } from "../emitters/sas";
 import { GOLD_A_SPEC, GOLD_A_OPTS, EXPECTED } from "./fixture";
+import { GOLD_B_SPEC, GOLD_B_OPTS, EXPECTED_B, fixtureBSeedSql } from "./fixture-b";
 import { EMITTABLE_ANALYSIS_KINDS } from "../spec/types";
 import type { StudySpec, EmitOptions } from "../index";
 
@@ -381,6 +382,83 @@ export async function verifyAscertainmentWindow(): Promise<Check[]> {
 /** Full Gold Case A verification: execute + assert the hand-computed spine
  *  ground truth + invariants. (Descriptive-epi value checks activate once the
  *  incidence module lands in Step 4.) */
+/**
+ * Gold Case B — recurrent events and overdispersion, in its own PGlite.
+ *
+ * Its whole reason to exist is a condition Gold Case A cannot produce: on A no
+ * at-risk subject has more than one qualifying event, so the response is
+ * Bernoulli, its variance is necessarily below its mean, and the negative
+ * binomial dispersion parameter is not identified. B is seeded so it IS.
+ *
+ * A separate seed rather than an append, because an extra indexed patient in A
+ * would move attrition, the at-risk count, the 2425 person-days and every rate,
+ * prevalence, SMD and regression estimate at once.
+ */
+export async function verifyGoldB(): Promise<Check[]> {
+  const { db, ok, steps } = await seedAndRun(GOLD_B_SPEC, GOLD_B_OPTS, fixtureBSeedSql());
+  const out: Check[] = [];
+  if (!ok) {
+    return [{
+      name: "Gold Case B executes",
+      status: "fail",
+      detail: steps.filter((x) => !x.ok).map((x) => `${x.path}: ${x.error}`).join(" | "),
+    }];
+  }
+  const eq = (name: string, got: number | undefined, want: number) =>
+    out.push({ name, status: got === want ? "pass" : "fail", detail: `expected ${want}, got ${got}` });
+  const approx = (name: string, got: number, want: number, tol: number) =>
+    out.push({ name, status: Math.abs(got - want) <= tol ? "pass" : "fail", detail: `expected ${want}±${tol}, got ${got}` });
+
+  eq("B: cohort N = 8", await scalar<number>(db, "SELECT count(*)::int FROM tz_b_cohort"), EXPECTED_B.cohortN);
+  const row = async (component: string, term: string, statistic: string) =>
+    (
+      await rows<{ estimate: number | null; ci_low: number | null; ci_high: number | null; se_log: number | null; method: string }>(
+        db,
+        `SELECT estimate::float8, ci_low::float8, ci_high::float8, se_log::float8, method
+           FROM tz_b_glm WHERE component = '${component}' AND term = '${term}' AND statistic = '${statistic}'`,
+      )
+    )[0];
+  for (const [arm, want] of [["DRUG_Y", EXPECTED_B.design.exposed], ["DRUG_X", EXPECTED_B.design.reference]] as const) {
+    eq(`B ${arm}: subjects = ${want.n}`, Number((await row("design", arm, "n"))?.estimate), want.n);
+    eq(`B ${arm}: RECURRENT event count = ${want.events}`, Number((await row("design", arm, "events"))?.estimate), want.events);
+    eq(`B ${arm}: person-days = ${EXPECTED_B.personDaysPerArm}`, Number((await row("design", arm, "person_days"))?.estimate), EXPECTED_B.personDaysPerArm);
+    approx(`B ${arm}: rate = ${want.ratePer1000py}/1000PY`, Number((await row("design", arm, "rate_per_1000py"))?.estimate), want.ratePer1000py, 0.00001);
+  }
+  const rr = await row("crude", "Index drug", "rate_ratio");
+  approx("B: rate ratio = 2.0 EXACTLY (equal person-time cancels)", Number(rr?.estimate), EXPECTED_B.rateRatio.estimate, 0.00001);
+  approx(`B: RR CI low = ${EXPECTED_B.rateRatio.ciLow}`, Number(rr?.ci_low), EXPECTED_B.rateRatio.ciLow, 0.00001);
+  approx(`B: RR CI high = ${EXPECTED_B.rateRatio.ciHigh}`, Number(rr?.ci_high), EXPECTED_B.rateRatio.ciHigh, 0.00001);
+  approx("B: SE(log RR) = sqrt(0.375)", Number(rr?.se_log), EXPECTED_B.rateRatio.seLog, 0.00001);
+  approx("B: rate difference = 1000.68493/1000PY", Number((await row("crude", "Index drug", "rate_difference_per_1000py"))?.estimate), EXPECTED_B.rateDifference, 0.00001);
+  out.push({
+    name: "B: the saturated anchor value is ln(2)",
+    status: Math.abs(Math.log(Number(rr?.estimate)) - EXPECTED_B.logRr) < 0.0001 ? "pass" : "fail",
+    detail: `ln(${rr?.estimate}) = ${Math.log(Number(rr?.estimate)).toFixed(7)}`,
+  });
+
+  /* THE POINT OF THIS CASE. On Gold A the ratio is 0.71 and the program reports
+   * the dispersion parameter as unidentified; here it is 3.62 and the program
+   * says NB is warranted. Same emitter, opposite verdicts, both from data. */
+  const vm = await row("diagnostic", "overdispersion", "variance_to_mean_ratio");
+  approx("B: variance-to-mean ratio = 3.61905 (counts 1,1,2,0,0,0,1,7)", Number(vm?.estimate), EXPECTED_B.varianceToMeanRatio, 0.00001);
+  out.push({
+    name: "B: the program declares OVERDISPERSION, so negative binomial is warranted",
+    status: (vm?.method ?? "").startsWith("OVERDISPERSED") ? "pass" : "fail",
+    detail: vm?.method ?? "no diagnostic row",
+  });
+  const mx = await row("diagnostic", "overdispersion", "max_events_per_subject");
+  eq("B: max events per subject = 7 (the recurrence Gold A lacks)", Number(mx?.estimate), EXPECTED_B.maxEventsPerSubject);
+  out.push({
+    name: "B: dispersion is ESTIMABLE here, unlike Gold Case A",
+    status: (mx?.method ?? "") === "dispersion is estimable" ? "pass" : "fail",
+    detail: mx?.method ?? "no diagnostic row",
+  });
+  // parity for B's own emission, not just A's
+  out.push(...sasSqlParityChecks(GOLD_B_SPEC, GOLD_B_OPTS));
+  out.push(...sasStructureChecks(emitSas(GOLD_B_SPEC, GOLD_B_OPTS)));
+  return out;
+}
+
 export async function verifyGoldA(): Promise<VerificationResult> {
   const { db, steps, ok } = await seedAndRun(GOLD_A_SPEC, GOLD_A_OPTS);
   const checks: Check[] = [];
@@ -903,7 +981,7 @@ export async function verifyGoldA(): Promise<VerificationResult> {
     const rn = EXPECTED.regressionNegBin;
     const NB_T = "tz_study_glm_a_glm_nb";
     eq(
-      `negative-binomial rows = ${rn.rowCount} (8 design + 2 crude + 1 diagnostic + 4 adjusted)`,
+      `negative-binomial rows = ${rn.rowCount} (8 design + 2 crude + 2 diagnostic + 4 adjusted)`,
       await scalar<number>(db, `SELECT count(*)::int FROM ${NB_T}`),
       rn.rowCount,
     );
@@ -949,6 +1027,16 @@ export async function verifyGoldA(): Promise<VerificationResult> {
      * The program reports that rather than printing a dispersion estimate.
      * When Gold Case B adds real recurrence this assertion changes — which is
      * the point of asserting it. */
+    /* The closed-form dispersion statistic, executed. On THIS fixture it is
+     * below 1 — Gold Case B is the seed where it exceeds 1 and the same emitter
+     * reaches the opposite verdict. */
+    const vmA = await nbRow("diagnostic", "overdispersion", "variance_to_mean_ratio");
+    approx("negbin: variance-to-mean ratio = 0.71429 (below 1, so NOT overdispersed)", Number(vmA?.estimate), rn.varianceToMeanRatio, 0.00001);
+    checks.push({
+      name: "negbin: the program declares NOT overdispersed on this fixture",
+      status: (vmA?.method ?? "").startsWith("NOT overdispersed") ? "pass" : "fail",
+      detail: vmA?.method ?? "no diagnostic row",
+    });
     const diag = await nbRow("diagnostic", "overdispersion", "max_events_per_subject");
     eq("negbin: max events per subject = 1 on this fixture", Number(diag?.estimate), rn.maxEventsPerSubject);
     checks.push({

@@ -30,9 +30,14 @@ export interface ExecResult {
  * ignore diagnostic result sets. Stops recording after the first hard failure
  * but keeps the db so the caller can inspect what did build.
  */
-export async function seedAndRun(spec: StudySpec, opts: EmitOptions): Promise<ExecResult> {
+export async function seedAndRun(spec: StudySpec, opts: EmitOptions, seedSql?: string): Promise<ExecResult> {
+  /* A fresh PGlite per call, so gold cases are fully isolated: Gold Case B has
+   * its own seed and cannot perturb a single pinned value in Gold Case A. That
+   * isolation is why new fixtures are separate SEEDS rather than appends — an
+   * extra indexed patient in A would move attrition, the at-risk count, the
+   * 2425 person-days and every rate, prevalence and SMD at once. */
   const db = new PGlite();
-  await db.exec(fixtureSeedSql());
+  await db.exec(seedSql ?? fixtureSeedSql());
 
   const files = emitSql(spec, "postgres", opts).sort((a, b) => a.path.localeCompare(b.path));
   const steps: ExecStep[] = [];

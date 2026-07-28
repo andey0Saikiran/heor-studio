@@ -223,10 +223,17 @@ function sqlRegression(ctx: SqlCtx, an: RegressionAnalysis, suffix: string): Sql
     L.push(`         CASE WHEN f.fu_date IS NOT NULL AND f.fu_date <= ${horizonEnd} THEN 1 ELSE 0 END AS y,`);
   }
   L.push(`         CAST(${d.year("s.index_date")} - dm.dobyr AS NUMERIC) AS age_val,`);
-  L.push(`         CASE WHEN dm.sex = '1' THEN 1.0 ELSE 0.0 END AS sex_male${cciCov && cciAn ? `,` : ``}`);
-  if (cciCov && cciAn) L.push(`         CAST(COALESCE(cs.score, 0) AS NUMERIC) AS cci_val${isCount ? `,` : ``}`);
+  /* Trailing commas built from the ACTUAL tail, not from one optional column.
+   * The previous form put the comma on sex_male only when a comorbidity
+   * covariate existed, so a count model WITHOUT one emitted
+   * "... AS sex_male CAST(...) AS person_days" and failed to parse. Gold Case B
+   * has no comorbidity covariate and caught it on its first run. */
+  const tail: string[] = [];
+  if (cciCov && cciAn) tail.push(`         CAST(COALESCE(cs.score, 0) AS NUMERIC) AS cci_val`);
   // the model's OFFSET: log person-time. A count model without it fits counts.
-  if (isCount) L.push(`         CAST(COALESCE(pt.person_days, 0) AS NUMERIC) AS person_days`);
+  if (isCount) tail.push(`         CAST(COALESCE(pt.person_days, 0) AS NUMERIC) AS person_days`);
+  L.push(`         CASE WHEN dm.sex = '1' THEN 1.0 ELSE 0.0 END AS sex_male${tail.length > 0 ? `,` : ``}`);
+  tail.forEach((line, i) => L.push(`${line}${i < tail.length - 1 ? `,` : ``}`));
   L.push(`  FROM (SELECT a.enrolid, a.index_date, ${armExpr} AS arm FROM atrisk a`);
   L.push(`        JOIN ${wp}_cohort ch ON ch.enrolid = a.enrolid`);
   if (viaNdc) {
@@ -353,6 +360,20 @@ function sqlRegression(ctx: SqlCtx, an: RegressionAnalysis, suffix: string): Sql
    * identified and the fit collapses to Poisson. A model that printed a
    * dispersion estimate anyway would look like it had measured something. */
   if (an.family === "negative_binomial") {
+    /* VARIANCE-TO-MEAN RATIO — the closed-form statistic that says whether NB
+     * is warranted at all. Poisson assumes it is 1; above 1 is overdispersion
+     * (NB earns its extra parameter), at or below 1 the NB fit has nothing to
+     * estimate. Both twins compute it, so it is executed rather than asserted. */
+    L.push(`  UNION ALL`);
+    L.push(
+      `  SELECT 'diagnostic', 'overdispersion', 'variance_to_mean_ratio', 14,` +
+        ` ${d.roundN(`(SELECT VAR_SAMP(CAST(y AS DOUBLE PRECISION)) FROM subj) / NULLIF((SELECT AVG(CAST(y AS DOUBLE PRECISION)) FROM subj), 0)`, 5)},` +
+        ` CAST(NULL AS NUMERIC), CAST(NULL AS NUMERIC), CAST(NULL AS NUMERIC),` +
+        ` CAST(CASE WHEN (SELECT VAR_SAMP(CAST(y AS DOUBLE PRECISION)) FROM subj)` +
+        ` > (SELECT AVG(CAST(y AS DOUBLE PRECISION)) FROM subj)` +
+        ` THEN 'OVERDISPERSED: NB warranted over Poisson'` +
+        ` ELSE 'NOT overdispersed: the NB dispersion parameter adds nothing' END AS VARCHAR) FROM eff`,
+    );
     L.push(`  UNION ALL`);
     L.push(
       `  SELECT 'diagnostic', 'overdispersion', 'max_events_per_subject', 15,` +
@@ -705,9 +726,20 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
     `title;`,
     ``,
     `/*-------------------- assemble the result table -----------------------------*/`,
+    ...(an.family === "negative_binomial"
+      ? [
+          `/* the closed-form dispersion diagnostic, from the analytic dataset */`,
+          `proc sql;`,
+          `  create table work._${num}_disp as`,
+          `  select var(y) as _var_y, mean(y) as _mean_y from work._${num}_subj;`,
+          `quit;`,
+          ``,
+        ]
+      : []),
     `data ${outT};`,
     `  set work._${num}_eff;`,
-    `  length measure $20 component $10 term $40 statistic $16 method $24;`,
+    ...(an.family === "negative_binomial" ? [`  if _n_ = 1 then set work._${num}_disp;`] : []),
+    `  length measure $20 component $10 term $40 statistic $24 method $60;`,
     `  measure = "${MEASURE}";`,
     `  /* design */`,
     `  component='design'; term="${sq(p.exposedLevel)}";    statistic='n';      ord=0; estimate=n_exp;   method='observed'; ci_low=.; ci_high=.; se_log=.; output;`,
@@ -775,6 +807,12 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
           `     mean: the dispersion parameter is not identified and the fit reduces`,
           `     to Poisson. Printing a dispersion estimate anyway would look like a`,
           `     measurement. */`,
+          `  component='diagnostic'; term='overdispersion'; statistic='variance_to_mean_ratio'; ord=14;`,
+          `  if _mean_y > 0 then estimate = round(_var_y / _mean_y, 0.00001); else estimate = .;`,
+          `  ci_low=.; ci_high=.; se_log=.;`,
+          `  if _var_y > _mean_y then method = 'OVERDISPERSED: NB warranted over Poisson';`,
+          `  else method = 'NOT overdispersed: the NB dispersion parameter adds nothing';`,
+          `  output;`,
           `  component='diagnostic'; term='overdispersion'; statistic='max_events_per_subject'; ord=15;`,
           `  estimate = max_events; ci_low=.; ci_high=.; se_log=.;`,
           `  if max_events <= 1 then method = 'DEGENERATE: dispersion NOT identified';`,

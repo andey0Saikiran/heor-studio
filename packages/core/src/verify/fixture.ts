@@ -23,7 +23,7 @@ import type { StudySpec, EmitOptions } from "../index";
  *  compares them as text ('0','1','2'); dates are true DATE. Extra columns are
  *  harmless — PGlite ignores columns the SQL does not touch; the danger is a
  *  MISSING column, so we err generous. */
-const DDL = `
+export const FIXTURE_DDL = `
 DROP TABLE IF EXISTS ccaet_all;
 CREATE TABLE ccaet_all (
   enrolid BIGINT, dtstart DATE, dtend DATE, rx VARCHAR, drugcovg VARCHAR,
@@ -203,7 +203,7 @@ function q(v: string | number): string {
 
 /** Full seed SQL: DDL + inserts. Run once per PGlite instance before the emitted SQL. */
 export function fixtureSeedSql(): string {
-  const lines: string[] = [DDL];
+  const lines: string[] = [FIXTURE_DDL];
 
   const enrollVals = ENROLL.map(
     ([id, s, e, dob, sex, reg, plan]) =>
@@ -601,7 +601,11 @@ export const EXPECTED = {
    * max events per subject = 1, so dispersion is NOT identified — asserted, so
    * the day Gold Case B adds recurrence this check changes and says so. */
   regressionNegBin: {
-    rowCount: 15, // 8 design + 2 crude + 1 diagnostic + 4 adjusted
+    rowCount: 16, // 8 design + 2 crude + 2 diagnostic + 4 adjusted
+    /* counts [1,1,0,0,1,0,0,0]: mean 0.375, sample variance 0.267857,
+     * ratio 0.71429 — BELOW 1, so NB has nothing to estimate here. Gold Case B
+     * is the seed where this exceeds 1. */
+    varianceToMeanRatio: 0.71429,
     personDaysPerArm: 1460,
     personDaysTotal: 2920,
     design: {
