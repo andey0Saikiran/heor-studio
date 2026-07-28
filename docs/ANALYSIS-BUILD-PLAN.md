@@ -5,7 +5,7 @@ analyses, 1 sequencer, and 2 adversarial reviewers (a MarketScan methodologist a
 a code-truth reviewer reading the actual repo). Both reviewers' corrections are
 folded in below and marked **[CORRECTION]**._
 
-**Status: 7 done, 3 partial, 59 to build.**
+**Status: 16 done, 4 partial (updated 2026-07-28 — see docs/STATUS.md).**
 
 ---
 
@@ -24,7 +24,7 @@ Ranked by how many analyses each unlocks:
 | Outcome & covariate ascertainment layer | L | ~22 |
 | Closed-form distribution constants (Φ, z, χ², t) | S | ~18 |
 | Claim-line ledger spine | XL | ~16 |
-| KM life-table primitive | L | ~15 |
+| KM life-table primitive | L | ~15 | **DONE** — `emitters/km-core.ts` |
 | Continuous-summary result shape | M | ~14 |
 | Regression family table + ONE GLM emitter | M | ~10 |
 | Interval-algebra kit (merge / clip / gap) | L | ~8 |
@@ -119,6 +119,10 @@ Stated up front so no one has to discover it later.
   signal is `DSTATUS` on I/S/F, it captures in-hospital death only, and it is masked
   from data year 2016. The gate ships *before* any survival module, so the tool cannot
   be asked for OS while OS is unbuildable.
+  **DONE (`1218719`, before the module in `749ec54`).** `SurvivalAnalysis.endpoint` is
+  a discriminated union, so the refusal keys on a type rather than on wording; four
+  guards in `verify/guards.ts` assert both halves — the death endpoint is refused,
+  and the claims-event twin of the same spec stays ready.
 - **Every p-value and exact interval is permanently outside execution verification.**
   No SAS runs in CI and PGlite has no inverse CDF. They are SAS-primary, labeled, and
   covered by presence/absence tests — never by a number the harness checked.
@@ -209,3 +213,34 @@ recomputed from its own data, PASS/FAIL printed).
 **Still refused after this**: `negative_binomial` (a dispersion parameter with no
 closed form and therefore no anchor), `gamma_log` (needs the ledger's
 per-subject totals as the response), `ols` (needs a continuous response).
+
+> **SUPERSEDED.** All five families shipped (Waves 3.1–3.4). The negative-binomial
+> refusal above was wrong on its own terms and is corrected in `docs/STATUS.md`:
+> at saturation the NB MLE equals the Poisson MLE equals ln(rate ratio), so the
+> anchor holds for the point estimate — dispersion affects the standard errors
+> only. The real blocker was the fixture, and Gold Case B removed it.
+
+---
+
+## Wave 6 landed: survival
+
+The KM primitive and the survival module shipped (`749ec54`). Two things the plan
+did not anticipate, both recorded in `docs/STATUS.md`:
+
+1. **Survival has the SMALLEST SAS-primary carve-out of any family**, not a large
+   one. The plan grouped "log-rank statistic" with regression coefficients as
+   permanently unverifiable. That was wrong: the log-rank STATISTIC is closed form
+   and executes in both twins. Only its tail probability needs a CDF — and even the
+   α = 0.05 DECISION does not, because for 1 df the critical value is the z² this
+   repo already pins.
+2. **A per-event-time life table cannot survive small-cell suppression**, because
+   nearly every row is one patient's event date. That is the correct outcome rather
+   than a defect, and it makes S(t) at fixed horizons the releasable form of a
+   curve. The life table now sits behind an explicit opt-in.
+
+**Still unbuilt in this family**: the Cox model (the partial-likelihood MLE has no
+closed form, so unlike KM it cannot be anchored — the log-rank statistic IS its
+score test at β = 0, which is the relationship a Cox module should be checked
+against), competing-risks CIF, and the Brookmeyer-Crowley interval on the median
+(derivable from the band already computed, simply not built — and the emitted
+program says so rather than shipping a median with an invented interval).

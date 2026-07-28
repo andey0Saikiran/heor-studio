@@ -321,6 +321,91 @@ The statistic now follows the family and is stamped and asserted.
 
 Overdispersion is an emitted limitation, not a silent assumption.
 
+### Survival: Kaplan-Meier + log-rank (Wave 6.0/6.1) — the 16th, and the family with the smallest SAS carve-out
+
+**The mortality refusal shipped first, in its own commit**, before the module it
+governs — as `docs/ANALYSIS-BUILD-PLAN.md` promised. MarketScan's only native
+death signal is `DSTATUS`: a *discharge* status, so in-hospital death only, and
+masked from data year 2016. An "overall survival" curve on it is really "time to
+in-hospital death before 2016, with every other death censored" — and censoring
+by death is exactly the informative censoring Kaplan-Meier assumes away, biasing
+survival **upward**. `endpoint` is a discriminated union, not a string, so the
+refusal keys on a **type** and cannot be evaded by relabelling the analysis.
+
+**This family inverts the usual split.** In the regression family every fitted
+coefficient is SAS-primary because IRLS has no SQL counterpart. Here the
+product-limit estimator, Greenwood's variance, both interval forms, the median
+**and the log-rank statistic** are all closed form — so all of them are executed
+in both twins. Exactly one column is SAS-primary: the p-value.
+
+And that gap is narrowed rather than accepted. A **decision** at α = 0.05 needs
+no CDF — for 1 df the critical value is z², already pinned repo-wide as 3.8416 —
+so the SQL states the decision, labels it a critical-value comparison, and says
+out loud that the exact quantile is 3.841459 and a statistic between the two
+would be called significant here and not by SAS.
+
+**The anchor.** The SAS twin does not run `PROC LIFETEST` and report it. It
+computes the same closed form the SQL does, runs LIFETEST *beside* it, and
+prints a row-by-row PASS/FAIL. Unlike a GLM's MLE the estimator has a closed
+form, so the procedure can be **checked** rather than trusted.
+
+Hand-derived before execution, and matched exactly:
+
+| t | n at risk | S(t) | Greenwood sum | se |
+|---|---|---|---|---|
+| 100 | 8 | 7/8 | 1/56 | 0.11693 |
+| 200 | 7 | 3/4 | 1/24 | 0.15309 |
+| 300 | 6 | 5/8 | 3/40 = 0.075 | 0.17116 |
+
+**The cross-module check.** Nobody is censored before the last event, so
+1 − S(365) = 1 − 5/8 = **0.375** — the cumulative-incidence module's 3/8, reached
+by a completely different algorithm. Two modules, one number, now asserted
+rather than left as a coincidence a reader might notice.
+
+**The boundary.** The reference arm's curve lands on **exactly one half** at day
+200 — the boundary the median's `S(t) ≤ 0.5` is evaluated at, planted there on
+purpose. SQL has no product aggregate, so S is accumulated as `exp(sum(ln))` and
+an exact ½ can land either side by a few ulps; `MEDIAN_EPS` is what makes the two
+languages agree there, not a fudge for imprecision. The exposed arm never reaches
+½, so its median is legitimately NULL — and the row **says NOT REACHED** rather
+than being omitted, because an absent row reads as a computation that failed.
+
+Log-rank (accumulated for the exposed arm): O = 1, E = 73/42, V = 1265/1764,
+χ² = **961/1265 = 0.75968**, below 3.8416. The Peto one-step HR = 0.35728 points
+the same way as the logistic module's OR = 1/3 on the same data — and is labeled
+`peto_one_step`, not "hazard ratio", because it is the first Newton step toward
+the Cox MLE and is biased away from the null at large effects.
+
+Two more analyses cover the edges: a **linear** interval whose upper limit
+computes to 1.104 and must be clamped (the whole argument for `log_log`), and an
+endpoint that **never occurs** — empty life table, S(t) = 1, NULL median, and
+every log-rank term NULL *together*, because "0 observed" beside a NULL
+expectation reads as a result rather than an absence.
+
+**A disclosure finding worth stating plainly.** The KM life table is the most
+disclosive table this project produces: nearly every row carries `n_event = 1`,
+which is one patient's event date to the day. At the default threshold of 11 the
+whole component masks — and that is the correct answer, not a defect. The
+releasable form of a survival curve is S(t) at a handful of fixed horizons, where
+`n_risk` is a group rather than an individual. The life table now sits behind an
+explicit `emitLifeTable` opt-in.
+
+*Five harness gaps this module exposed, all fixed:* `sas-lint` counted a
+procedure name inside a `TITLE` **string** as a procedure; it did not know
+`outsurv=` creates a dataset; the results contract identified a row by two
+labels, which a time-indexed table is not (it grew a nullable third column); the
+CI-constant profile counted `1.96` and `3.8416` inside **prose**, so a module's
+pinned profile depended on how its captions were worded; and the interval was
+computed once per row shape, so the z count moved with spec options and could not
+be pinned at all.
+
+*And one in my own check.* `logrank_p_null_in_sql` looked for any
+`CAST(NULL AS NUMERIC)` near the `p_value` label — which a **populated** estimate
+still satisfies, because the `ci_low`/`ci_high` beside it are NULL either way.
+The mutation that fills the p-value in with 0.05 left the check green. It is now
+anchored on the estimate slot itself. The check read like a contract and proved
+almost nothing.
+
 ### OLS (Wave 3.4) — the 15th, and the regression family table is complete
 
 logistic, poisson, negative_binomial, gamma_log, ols — **nothing in the family
