@@ -633,6 +633,78 @@ const MUTATIONS: Mutation[] = [
     kind: "competing_risks", lang: "sql",
     apply: (t) => t.replace(/GREATEST\(0\.0, cif_(\d+) - 1\.96/g, "(cif_$1 - 1.96"),
   },
+  /* ---- fine_gray ---------------------------------------------------------- *
+   * The first is the mutation this whole module is defined against: delete the
+   * one predicate that retains competing-event subjects and you have a
+   * cause-specific Cox model. It converges, it prints a hazard ratio, and it
+   * answers a different question. */
+  {
+    name: "SQL Fine-Gray stops retaining competing-event subjects (silently becomes Cox)",
+    kind: "fine_gray", lang: "sql",
+    apply: (t) => t.replace(/WHERE x\.t >= e\.t OR x\.cause >= 2/, "WHERE x.t >= e.t"),
+  },
+  {
+    /* G built on the EVENTS instead of on censoring. One predicate. The weights
+     * come out wrong in a direction nobody would question, because the curve is
+     * still monotone in [0,1] and the estimates still look like hazard ratios. */
+    name: "SAS builds G on the EVENTS instead of the censoring distribution",
+    kind: "fine_gray", lang: "sas",
+    apply: (t) => t.replace(
+      /sum\(case when x\.t = c\.t and x\.cause = 0 then 1 else 0 end\) as d/,
+      "sum(case when x.t = c.t and x.cause > 0 then 1 else 0 end) as d"),
+  },
+  {
+    // the weight inverted: G(t_j)/G(t) instead of G(t)/G(t_j), so retained
+    // subjects gain influence over time instead of losing it
+    name: "SQL inverts the IPCW weight ratio",
+    kind: "fine_gray", lang: "sql",
+    apply: (t) => t.replace(
+      /ELSE COALESCE\(\(SELECT g\.g FROM fgg g WHERE g\.t <= e\.t ORDER BY g\.t DESC LIMIT 1\), 1\.0\)\n\s*\/ NULLIF\(COALESCE\(\(SELECT g\.g FROM fgg g WHERE g\.t <= x\.t ORDER BY g\.t DESC LIMIT 1\), 1\.0\), 0\)/,
+      "ELSE COALESCE((SELECT g.g FROM fgg g WHERE g.t <= x.t ORDER BY g.t DESC LIMIT 1), 1.0)\n                 / NULLIF(COALESCE((SELECT g.g FROM fgg g WHERE g.t <= e.t ORDER BY g.t DESC LIMIT 1), 1.0), 0)"),
+  },
+  {
+    /* THE DIAGNOSTIC THAT TELLS A READER WHICH MODEL THEY HAVE, corrupted back
+     * to the definition that was actually wrong here first: "weight = 1" is not
+     * "still at risk", because a retained subject also has weight 1 until G
+     * drops. Gold Case D caught this the first time as a real defect. */
+    name: "SQL infers cause-specific membership from the weight instead of the at-risk flag",
+    kind: "fine_gray", lang: "sql",
+    apply: (t) => t.replace(/SUM\(m\.at_risk\) AS n_cause_specific/, "SUM(CASE WHEN m.w = 1.0 THEN 1 ELSE 0 END) AS n_cause_specific"),
+  },
+  {
+    name: "SAS drops eventcode= so PROC PHREG fits a cause-specific Cox model instead",
+    kind: "fine_gray", lang: "sas",
+    apply: (t) => t.replace(/ \/ eventcode=1 risklimits;/, " / risklimits;"),
+  },
+  {
+    name: "SAS deletes the subdistribution-vs-cause-specific self-check",
+    kind: "fine_gray", lang: "sas",
+    apply: (t) => t.replace(/if wn_total > n_cs_total \+ 1e-9 then/, "if 1 then"),
+  },
+  {
+    name: "SAS deletes the U(beta_hat) = 0 check on the weighted risk sets",
+    kind: "fine_gray", lang: "sas",
+    apply: (t) => t.replace(
+      /u_at_bhat = u_at_bhat \+ d1 - d \* \(wn1 \* _r\) \/ \(\(wn - wn1\) \+ wn1 \* _r\);/,
+      "u_at_bhat = 0;"),
+  },
+  {
+    /* The separation guard removed from the one-step. With every event in one
+     * arm the score is at its extreme, and the step is a large FINITE number
+     * standing in for an infinite estimate — which reads as an overwhelming
+     * effect rather than as no estimate at all. Gold Case D is exactly that
+     * data. */
+    name: "SQL one-step drops its complete-separation guard",
+    kind: "fine_gray", lang: "sql",
+    apply: (t) => t.replace(/CASE WHEN d1_exposed > 0 AND d1_exposed < d_total THEN ROUND\(/g, "CASE WHEN 1 = 1 THEN ROUND("),
+  },
+  {
+    name: "SQL reports the one-step as the FITTED subdistribution coefficient",
+    kind: "fine_gray", lang: "sql",
+    apply: (t) => t.replace(
+      /(CAST\('adjusted' AS VARCHAR\) AS component,[\s\S]{0,260}?CAST\(\d+ AS INT\) AS ord,\s*\n\s*)CAST\(NULL AS NUMERIC\) AS estimate/g,
+      "$1ROUND(CAST(EXP(score_u0 / NULLIF(information0, 0)) AS NUMERIC), 5) AS estimate"),
+  },
 ];
 
 interface Program {

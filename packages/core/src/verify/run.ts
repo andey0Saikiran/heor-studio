@@ -18,6 +18,7 @@ import { GOLD_A_SPEC, GOLD_A_OPTS, EXPECTED } from "./fixture";
 import { GOLD_B_SPEC, GOLD_B_OPTS, EXPECTED_B, fixtureBSeedSql } from "./fixture-b";
 import { GOLD_C_SPEC, GOLD_C_OPTS, EXPECTED_C, fixtureCSeedSql } from "./fixture-c";
 import { GOLD_D_SPEC, GOLD_D_OPTS, EXPECTED_D, fixtureDSeedSql } from "./fixture-d";
+import { GOLD_E_SPEC, GOLD_E_OPTS, EXPECTED_E, fixtureESeedSql } from "./fixture-e";
 import { EMITTABLE_ANALYSIS_KINDS } from "../spec/types";
 import type { StudySpec, EmitOptions } from "../index";
 
@@ -699,9 +700,122 @@ export async function verifyGoldD(): Promise<Check[]> {
     detail: `naive sum ${diag?.estimate} vs total event probability ${EXPECTED_D.identity.oneMinusSurv}`,
   });
 
+  /* ---- Fine-Gray on Gold D: COMPLETE SEPARATION, and the retained subject ---- *
+   * Every cause-1 event on Gold D is in arm X, so the maximum likelihood
+   * estimate is INFINITE. The one-step and the closed form must both return
+   * NULL rather than the large finite number that would read as a very strong
+   * effect. And the risk-set totals show what the model is actually doing:
+   * 11 weighted against 10 cause-specific, the difference being P2, retained
+   * after its competing event. */
+  const fgD = async (statistic: string) =>
+    (
+      await rows<{ estimate: number | null; se: number | null; method: string }>(
+        db,
+        `SELECT estimate::float8, se::float8, method FROM tz_d_fgray WHERE statistic = '${statistic}'`,
+      )
+    )[0];
+  eq("D: subdistribution denominator = 11 (6 + 5)", Number((await fgD("subdistribution_risk_total"))?.estimate), 11);
+  eq("D: cause-specific denominator = 10 (6 + 4)", Number((await fgD("cause_specific_risk_total"))?.estimate), 10);
+  const retD = await fgD("retained_by_subdistribution");
+  eq("D: exactly ONE subject-time retained by the subdistribution risk set", Number(retD?.estimate), 1);
+  out.push({
+    name: "D: the program names the retained contribution as the difference from Cox",
+    status: /RETAINED/.test(retD?.method ?? "") ? "pass" : "fail",
+    detail: (retD?.method ?? "no row").slice(0, 100),
+  });
+  const oneD = await fgD("subdistribution_hr_one_step");
+  out.push({
+    name: "D: with every event in one arm the one-step is NOT ESTIMABLE, not a large number",
+    status: oneD?.estimate === null && /NOT ESTIMABLE/.test(oneD?.method ?? "") ? "pass" : "fail",
+    detail: `estimate=${oneD?.estimate}, method="${(oneD?.method ?? "").slice(0, 80)}"`,
+  });
+  const anchorD = await fgD("closed_form_subdistribution_hr");
+  out.push({
+    name: "D: and the closed form refuses too, naming complete separation",
+    status: anchorD?.estimate === null && /complete separation/.test(anchorD?.method ?? "") ? "pass" : "fail",
+    detail: (anchorD?.method ?? "no row").slice(0, 100),
+  });
+
   // parity for D's own emission, not just A's
   out.push(...sasSqlParityChecks(GOLD_D_SPEC, GOLD_D_OPTS));
   out.push(...sasStructureChecks(emitSas(GOLD_D_SPEC, GOLD_D_OPTS)));
+  return out;
+}
+
+/**
+ * Gold Case E — fractional inverse-probability-of-censoring weights.
+ *
+ * Gold Case D exercises the Fine-Gray RISK SET (a competing-event subject is
+ * retained where Cox would drop them) but not its WEIGHTS: nobody in D is
+ * censored before the last event of interest, so G is 1 throughout and every
+ * weight is exactly 1. The weight expression could be deleted and D would not
+ * move. Here one subject disenrolls between the competing event and the second
+ * event of interest, so G drops to 2/3 and the retained subject enters the
+ * later risk set at that weight.
+ */
+export async function verifyGoldE(): Promise<Check[]> {
+  const { db, ok, steps } = await seedAndRun(GOLD_E_SPEC, GOLD_E_OPTS, fixtureESeedSql());
+  const out: Check[] = [];
+  if (!ok) {
+    return [{
+      name: "Gold Case E executes",
+      status: "fail",
+      detail: steps.filter((x) => !x.ok).map((x) => `${x.path}: ${x.error}`).join(" | "),
+    }];
+  }
+  const eq = (name: string, got: number | null | undefined, want: number) =>
+    out.push({ name, status: got === want ? "pass" : "fail", detail: `expected ${want}, got ${got}` });
+  const approx = (name: string, got: number, want: number, tol: number) =>
+    out.push({ name, status: Math.abs(got - want) <= tol ? "pass" : "fail", detail: `expected ${want}±${tol}, got ${got}` });
+
+  eq("E: cohort N = 5", await scalar<number>(db, "SELECT count(*)::int FROM tz_e_cohort"), EXPECTED_E.cohortN);
+  const r = async (statistic: string) =>
+    (
+      await rows<{ estimate: number | null; se: number | null; ci_low: number | null; ci_high: number | null; method: string }>(
+        db,
+        `SELECT estimate::float8, se::float8, ci_low::float8, ci_high::float8, method FROM tz_e_fgray WHERE statistic = '${statistic}'`,
+      )
+    )[0];
+
+  eq("E: 2 event times for the cause of interest", Number((await r("event_times"))?.estimate), EXPECTED_E.eventTimes);
+  eq("E: 1 of the 2 events is in the exposed arm (so the MLE is FINITE)", Number((await r("events_exposed"))?.estimate), EXPECTED_E.eventsExposed);
+
+  /* THE WEIGHT. 5 at day 100 plus 8/3 at day 400 = 23/3 = 7.66667, against a
+   * cause-specific 5 + 2 = 7. The retained subject contributes exactly 2/3 —
+   * NOT 1, which is what every earlier fixture would have produced. */
+  approx("E: subdistribution denominator = 5 + 8/3 = 7.66667",
+    Number((await r("subdistribution_risk_total"))?.estimate), EXPECTED_E.subdistributionRiskTotal, 0.00001);
+  eq("E: cause-specific denominator = 7 (5 + 2)", Number((await r("cause_specific_risk_total"))?.estimate), EXPECTED_E.causeSpecificRiskTotal);
+  approx("E: the retained subject enters at weight 2/3, NOT 1 — G dropped to 2/3 at day 300",
+    Number((await r("retained_by_subdistribution"))?.estimate), EXPECTED_E.retained, 0.00001);
+
+  approx("E: score U(0) = 1/40", Number((await r("score_u0"))?.estimate), EXPECTED_E.scoreU0, 0.00001);
+  approx("E: information I(0) = 759/1600", Number((await r("information_0"))?.estimate), EXPECTED_E.information0, 0.00001);
+  approx("E: partial logL(0) = -(ln 5 + ln(8/3))", Number((await r("partial_loglik_0"))?.estimate), EXPECTED_E.partialLogLik0, 0.00001);
+  approx("E: -2 logL(0) = 5.18053", Number((await r("minus_2_loglik_0"))?.estimate), EXPECTED_E.minusTwoLogLik0, 0.00001);
+  approx("E: score chi-square = 1/759", Number((await r("score_chi_square"))?.estimate), EXPECTED_E.scoreChiSquare, 0.00001);
+  eq("E: does NOT reject at alpha 0.05", Number((await r("reject_at_0.05"))?.estimate), EXPECTED_E.reject);
+
+  const one = await r("subdistribution_hr_one_step");
+  approx("E: one-step subdistribution HR = exp(40/759) = 1.05411", Number(one?.estimate), EXPECTED_E.oneStepHr, 0.00001);
+  approx("E: one-step se = 1/sqrt(759/1600) = 1.45191", Number(one?.se), EXPECTED_E.oneStepSe, 0.00001);
+  out.push({
+    name: "E: the one-step IS estimable here, unlike Gold Case D",
+    status: one?.estimate !== null && /FIRST NEWTON STEP/.test(one?.method ?? "") ? "pass" : "fail",
+    detail: (one?.method ?? "no row").slice(0, 80),
+  });
+
+  /* The anchor's NOT-APPLICABLE branch: the weighted shares are 3/5 and 3/8. */
+  const share = await r("weighted_exposed_share");
+  out.push({
+    name: "E: the weighted exposed share VARIES (3/5 then 3/8), so no closed form",
+    status: share?.estimate === null && /VARIES/.test(share?.method ?? "") ? "pass" : "fail",
+    detail: `estimate=${share?.estimate}, method="${(share?.method ?? "").slice(0, 60)}"`,
+  });
+  approx("E: exposed share of EVENTS q = 1/2", Number((await r("event_share_exposed"))?.estimate), EXPECTED_E.eventShareExposed, 0.00001);
+
+  out.push(...sasSqlParityChecks(GOLD_E_SPEC, GOLD_E_OPTS));
+  out.push(...sasStructureChecks(emitSas(GOLD_E_SPEC, GOLD_E_OPTS)));
   return out;
 }
 
@@ -1722,6 +1836,77 @@ export async function verifyGoldA(): Promise<VerificationResult> {
       status: scorePv?.estimate === null && /sas_proc_phreg/.test(scorePv?.method ?? "") ? "pass" : "fail",
       detail: scorePv?.method ?? "no row",
     });
+
+    /* ---- Fine-Gray: THE REDUCTION TO COX ---- *
+     * Gold A's competing cause never occurs, so the modified risk set has
+     * nothing extra to hold and every weight is 1. The subdistribution model
+     * must therefore become Cox IDENTICALLY — the same numbers, not similar
+     * ones. That equality needs TWO modules to state, which is why it is the
+     * strongest check available on the weighting machinery: a wrong G, a
+     * mis-built risk set or a dropped weight all break it, and none of them is
+     * visible from inside either module alone. */
+    const fgx = EXPECTED.fineGray;
+    const FG_T = "tz_study_fgray";
+    eq(`fine-gray rows = ${fgx.rowCount}`, await scalar<number>(db, `SELECT count(*)::int FROM ${FG_T}`), fgx.rowCount);
+    const fgRow = async (statistic: string) =>
+      (
+        await rows<{ estimate: number | null; se: number | null; ci_low: number | null; ci_high: number | null; method: string }>(
+          db,
+          `SELECT estimate::float8, se::float8, ci_low::float8, ci_high::float8, method FROM ${FG_T} WHERE statistic = '${statistic}'`,
+        )
+      )[0];
+
+    approx("fine-gray: score U(0) = -31/42", Number((await fgRow("score_u0"))?.estimate), fgx.scoreU0, 0.00001);
+    approx("fine-gray: information I(0) = 1265/1764", Number((await fgRow("information_0"))?.estimate), fgx.information0, 0.00001);
+    approx("fine-gray: partial logL(0) = -5.81711", Number((await fgRow("partial_loglik_0"))?.estimate), fgx.partialLogLik0, 0.00001);
+    approx("fine-gray: score chi-square = 0.75968", Number((await fgRow("score_chi_square"))?.estimate), fgx.scoreChiSquare, 0.00001);
+    approx("fine-gray: one-step HR = 0.35728", Number((await fgRow("subdistribution_hr_one_step"))?.estimate), fgx.oneStepHr, 0.00001);
+
+    /* The cross-module equalities, stated against the COX table rather than
+     * against a constant — so a change to either module surfaces as a
+     * disagreement between two live numbers. */
+    for (const [stat, coxStat, label] of [
+      ["score_u0", "score_u0", "score"],
+      ["information_0", "information_0", "information"],
+      ["partial_loglik_0", "partial_loglik_0", "null log-likelihood"],
+      ["score_chi_square", "score_chi_square", "score chi-square"],
+    ] as const) {
+      const fgv = Number((await fgRow(stat))?.estimate);
+      const coxv = Number(
+        (await rows<{ estimate: number | null }>(db, `SELECT estimate::float8 FROM ${X_T} WHERE statistic = '${coxStat}'`))[0]?.estimate,
+      );
+      checks.push({
+        name: `fine-gray: with NOTHING competing, the ${label} EQUALS the Cox module's`,
+        status: Math.abs(fgv - coxv) < 1e-9 ? "pass" : "fail",
+        detail: `fine-gray ${fgv} vs cox ${coxv}`,
+      });
+    }
+    const fgOne = Number((await fgRow("subdistribution_hr_one_step"))?.estimate);
+    const coxOne = Number(
+      (await rows<{ estimate: number | null }>(db, `SELECT estimate::float8 FROM ${X_T} WHERE statistic = 'hazard_ratio_one_step'`))[0]?.estimate,
+    );
+    checks.push({
+      name: "fine-gray: and so does the one-step estimate",
+      status: Math.abs(fgOne - coxOne) < 1e-9 ? "pass" : "fail",
+      detail: `fine-gray ${fgOne} vs cox ${coxOne}`,
+    });
+
+    /* THE ROWS THAT SAY WHY. With nothing retained the two denominators are
+     * the same 21 = 8 + 7 + 6, and the program says plainly that this is a Cox
+     * model by another name — which on THIS fixture is the correct verdict and
+     * not a defect. */
+    eq("fine-gray: subdistribution denominator = 21", Number((await fgRow("subdistribution_risk_total"))?.estimate), fgx.subdistributionRiskTotal);
+    eq("fine-gray: cause-specific denominator = 21, the SAME", Number((await fgRow("cause_specific_risk_total"))?.estimate), fgx.causeSpecificRiskTotal);
+    const ret = await fgRow("retained_by_subdistribution");
+    eq("fine-gray: nothing was retained, because nothing competed", Number(ret?.estimate), fgx.retained);
+    checks.push({
+      name: "fine-gray: the program SAYS this is a Cox model by another name here",
+      status: /Cox model by another name/.test(ret?.method ?? "") ? "pass" : "fail",
+      detail: (ret?.method ?? "no row").slice(0, 100),
+    });
+
+    const fgFitted = await rows<{ n: number }>(db, `SELECT count(*)::int AS n FROM ${FG_T} WHERE component = 'adjusted' AND estimate IS NOT NULL`);
+    eq("fine-gray: every fitted coefficient is NULL in SQL", Number(fgFitted[0]?.n), 0);
 
     /* ---- Table 1 comorbidity-index row (executed) ----
      * The row is scored by the SAME shared engine as the index analysis and the

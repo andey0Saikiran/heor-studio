@@ -433,6 +433,34 @@ export interface CompetingRisksAnalysis extends AnalysisCommon {
 }
 
 /**
+ * Fine-Gray subdistribution hazard model.
+ *
+ * The one thing that differs from Cox is the RISK SET: a subject who fails from
+ * a competing cause STAYS in it, at a weight that decays as censoring
+ * accumulates. That is what makes the coefficient an effect on the CUMULATIVE
+ * INCIDENCE rather than on the rate among survivors — the two answer different
+ * questions and routinely point in different directions.
+ *
+ * Structurally it IS a Cox model, so it takes exactly the Cox carve-out: beta
+ * is SAS-primary, everything around it is closed form and executed. See
+ * emitters/finegray-core.ts, including the reduction that makes it checkable —
+ * with no competing events this collapses to Cox identically.
+ *
+ * Ref: Fine & Gray JASA 1999;94:496; Austin & Fine Stat Med 2017;36:4391.
+ */
+export interface FineGrayAnalysis extends AnalysisCommon {
+  kind: "fine_gray";
+  /** the event of interest — the cause whose cumulative incidence is modelled */
+  endpoint: SurvivalEndpoint;
+  /** at least one competing cause; with none this is just a Cox model */
+  competingEvents: CompetingEvent[];
+  washout: RelativeWindow;
+  personTimeRule: PersonTimeRule;
+  groupVarId: string;
+  covariateIds: string[];
+}
+
+/**
  * Cox proportional hazards.
  *
  * The one family whose coefficient genuinely needs Newton — and, it turns out,
@@ -709,6 +737,7 @@ export type Analysis =
   | SurvivalAnalysis
   | CoxAnalysis
   | CompetingRisksAnalysis
+  | FineGrayAnalysis
   | StatisticalEngineAnalysis
   | FutureAnalysisStub;
 
@@ -737,6 +766,7 @@ export const EMITTABLE_ANALYSIS_KINDS: ReadonlySet<AnalysisKind> = new Set<Analy
   "survival",
   "cox",
   "competing_risks",
+  "fine_gray",
 ]);
 
 export type DescriptiveAnalysis =
@@ -1263,6 +1293,40 @@ export function validateAnalyses(spec: StudySpec): string[] {
           problems.push(`${w}: personTimeRule.censorAt must include "outcome" — the CIF clock stops at whichever cause occurs first.`);
         if (a.horizonDays.length === 0) problems.push(`${w}: horizonDays[] is empty.`);
         for (const h of a.horizonDays) if (h <= 0) problems.push(`${w}: horizonDays entry ${h} must be positive.`);
+        break;
+      }
+      case "fine_gray": {
+        /* The FOURTH time-to-event kind, and the same constant. */
+        if (a.endpoint.kind === "death") {
+          problems.push(`${w}: ${MORTALITY_REFUSAL} (a competing cause read from a claims code list belongs in competingEvents[])`);
+          break;
+        }
+        requireCodeList(a.endpoint.outcomeDefinition.codeListId, `${w} endpoint`);
+        if (a.competingEvents.length === 0)
+          problems.push(
+            `${w}: no competing events declared. The subdistribution risk set differs from the cause-specific one ONLY by the competing-event subjects it retains — with none, this model IS a Cox model, and calling it Fine-Gray claims an adjustment it is not making.`,
+          );
+        const seenFg = new Set<string>();
+        for (const ce of a.competingEvents) {
+          if (seenFg.has(ce.id)) problems.push(`${w}: duplicate competing event id "${ce.id}".`);
+          seenFg.add(ce.id);
+          requireCodeList(ce.outcomeDefinition.codeListId, `${w} competing event "${ce.id}"`);
+          if (ce.outcomeDefinition.codeListId === a.endpoint.outcomeDefinition.codeListId)
+            problems.push(
+              `${w}: competing event "${ce.id}" uses the SAME code list as the endpoint. The causes must be mutually exclusive — sharing a list puts every subject in the risk set twice, once at full weight and once weighted, and the fit would converge on a denominator that counts people who are still at risk as though they had also already failed.`,
+            );
+        }
+        if (!a.personTimeRule.censorAt.includes("outcome"))
+          problems.push(`${w}: personTimeRule.censorAt must include "outcome" — the clock stops at whichever cause occurs first.`);
+        const gvF = groupVars.find((g) => g.id === a.groupVarId);
+        if (!gvF) problems.push(`${w}: groupVarId "${a.groupVarId}" is not in groupVars[].`);
+        else {
+          if (gvF.levels.length !== 2)
+            problems.push(`${w}: exposure "${gvF.id}" has ${gvF.levels.length} levels — the closed forms this model is checked against are the two-group ones, so exactly 2 are required.`);
+          if (!gvF.referenceLevel)
+            problems.push(`${w}: exposure "${gvF.id}" has no referenceLevel — without one the direction of the subdistribution hazard ratio is arbitrary.`);
+        }
+        a.covariateIds.forEach((b) => requireBaseline(b, `${w} covariate`));
         break;
       }
       case "statistical_engine": {

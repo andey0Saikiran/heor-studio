@@ -26,6 +26,7 @@ import { regressionModule } from "./regression";
 import { survivalModule } from "./survival";
 import { coxModule } from "./cox";
 import { competingRisksModule } from "./competing_risks";
+import { fineGrayModule } from "./fine_gray";
 
 export const ANALYSIS_MODULES: Partial<Record<Analysis["kind"], AnalysisModule<never>>> = {
   incidence_rate: incidenceModule as AnalysisModule<never>,
@@ -41,6 +42,7 @@ export const ANALYSIS_MODULES: Partial<Record<Analysis["kind"], AnalysisModule<n
   survival: survivalModule as AnalysisModule<never>,
   cox: coxModule as AnalysisModule<never>,
   competing_risks: competingRisksModule as AnalysisModule<never>,
+  fine_gray: fineGrayModule as AnalysisModule<never>,
 };
 
 /* Readiness (spec/types.ts EMITTABLE_ANALYSIS_KINDS) blocks enabled analyses

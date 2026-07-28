@@ -27,6 +27,7 @@ import type {
   Stratifier,
   CoxAnalysis,
   CompetingRisksAnalysis,
+  FineGrayAnalysis,
   SurvivalAnalysis,
   TrendSpec,
 } from "../spec/types";
@@ -1377,5 +1378,95 @@ export function competingRisksParity(
     estimator: "aalen_johansen",
     variance: "delta_method_closed_form",
     sasPrimary: "none",
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ *  Fine-Gray subdistribution hazard
+ * ------------------------------------------------------------------ */
+
+export interface FineGrayParity {
+  id: string;
+  causes: Array<{ code: number; codeListId: string }>;
+  washout: { start: number | "anytime_before"; end: number | "anytime_after"; includesIndex: boolean };
+  censorTerms: string[];
+  dataCut: string | null;
+  settingFilter: string;
+  referenceLevel: string;
+  exposedLevel: string;
+  terms: string[];
+  /** the one thing that distinguishes this from Cox */
+  riskSet: "subdistribution_ipcw_weighted";
+  weights: "kaplan_meier_of_censoring";
+  nullLoglik: "closed_form";
+  score: "closed_form";
+  information: "closed_form";
+  oneStep: "first_newton_step";
+  fittedCoefficient: "sas_primary";
+  selfChecks: ["null_minus_2_loglik", "score_at_beta_hat_is_zero", "subdistribution_actually_fitted"];
+}
+
+export function fineGrayLimitations(
+  an: FineGrayAnalysis, listSystem: CodeSystem, covLabels: string[], droppedCovs: string[], spec?: StudySpec,
+): string[] {
+  const out: string[] = [];
+  const od = survivalOutcome(an);
+  if (od) {
+    const note = outcomeSettingPlan(od, listSystem).note;
+    if (note) out.push(note);
+    if (od.minClaims > 1)
+      out.push(`endpoint minClaims=${od.minClaims} is NOT yet enforced - any single qualifying claim counts, so the failure time is the FIRST claim's date`);
+  }
+  if (an.personTimeRule.censorAt.includes("death")) out.push(DEATH_CENSOR_NOTE);
+  if (spec && !dataCutLimit(spec)) out.push(NO_DATA_CUT_NOTE);
+  for (const d of droppedCovs)
+    out.push(`covariate "${d}" is NOT in the fitted model - only age, sex and a comorbidity_index referencing an ENABLED index analysis are derivable from the cohort spine today`);
+  if (covLabels.length === 0)
+    out.push(`no covariates resolved, so the "adjusted" model is the unadjusted one`);
+  /* The assumption, and it is stronger here than in a Cox model. */
+  out.push(`PROPORTIONAL SUBDISTRIBUTION HAZARDS IS ASSUMED AND NOT TESTED, and this assumption is HARDER to justify than the Cox one it resembles: the subdistribution hazard is not a rate among people who could still have the event, so its constancy over time has no simple clinical reading. Nothing here tests it`);
+  out.push(`the CENSORING distribution is assumed INDEPENDENT of exposure. The weights are G(t)/G(t_j) from a single pooled Kaplan-Meier, so if one arm is followed longer or lost more often the weights are wrong for both. A stratified or covariate-dependent G is not emitted`);
+  out.push(`NO time-varying covariates and NO stratified baseline subdistribution hazard`);
+  out.push(`this model answers a DIFFERENT question from a cause-specific Cox model on the same data, and the two routinely disagree in magnitude and occasionally in DIRECTION. Neither is wrong; reporting one while discussing the other is`);
+  return out;
+}
+
+export const FINE_GRAY_METHOD_NOTES = [
+  `the RISK SET is what makes this Fine-Gray rather than Cox: a subject who fails from a COMPETING cause STAYS in the denominator, weighted by G(t)/G(t_j) with G the Kaplan-Meier of the CENSORING distribution. Every other piece of arithmetic is the Cox one`,
+  `treating censoring as the event - which is how G is built - is the classic error everywhere else in this bundle and is exactly right here. It is a different quantity, and the two differ by one predicate`,
+  `the coefficient is an effect on the CUMULATIVE INCIDENCE, not on the rate among survivors. A cause-specific Cox model on the same data estimates the etiologic effect and routinely gives a different number`,
+  `SAS-PRIMARY: the coefficient only. The null partial log-likelihood, the score, the information, the score test and the one-step estimator are all closed form and computed in BOTH twins`,
+  `THE REDUCTION that makes this checkable: with NO competing events the modified risk set has nothing extra to hold, every weight is 1, and this model becomes Cox IDENTICALLY - the same numbers, not similar ones`,
+  `SELF-CHECK, in the SAS twin: whether a SUBDISTRIBUTION model was fitted at all. Without eventcode= on the MODEL statement PROC PHREG fits a cause-specific Cox model - cleanly, convergently, and answering a different question. That is the single most likely way for this analysis to be silently wrong, so the program compares its own two risk-set totals and says when they are indistinguishable`,
+  `SELF-CHECK: U(beta_hat) = 0 on the weighted risk sets, and PHREG's null -2 LOG L against the closed form - the same two the Cox module runs`,
+  `COMPLETE SEPARATION (every event of interest in one arm) makes the estimate INFINITE. The one-step and the closed form both return NULL rather than the large finite number that would read as a very strong effect`,
+];
+
+export function fineGrayParity(
+  an: FineGrayAnalysis,
+  consumed: {
+    censorTerms: string[]; dataCut: string | null; settingFilter: string;
+    referenceLevel: string; exposedLevel: string; terms: string[];
+    causes: Array<{ code: number; codeListId: string }>;
+  },
+): FineGrayParity {
+  return {
+    id: an.id,
+    causes: consumed.causes,
+    washout: { start: an.washout.start, end: an.washout.end, includesIndex: an.washout.includesIndex },
+    censorTerms: consumed.censorTerms,
+    dataCut: consumed.dataCut,
+    settingFilter: consumed.settingFilter,
+    referenceLevel: consumed.referenceLevel,
+    exposedLevel: consumed.exposedLevel,
+    terms: consumed.terms,
+    riskSet: "subdistribution_ipcw_weighted",
+    weights: "kaplan_meier_of_censoring",
+    nullLoglik: "closed_form",
+    score: "closed_form",
+    information: "closed_form",
+    oneStep: "first_newton_step",
+    fittedCoefficient: "sas_primary",
+    selfChecks: ["null_minus_2_loglik", "score_at_beta_hat_is_zero", "subdistribution_actually_fitted"],
   };
 }

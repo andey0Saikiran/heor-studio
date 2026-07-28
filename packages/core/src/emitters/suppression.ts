@@ -231,6 +231,17 @@ export const SUPPRESSION_SHAPES: Record<string, SuppressionShape> = {
     keepCols: ["ord", "method"],
     tieBreakCol: "time_days",
   },
+  fine_gray: {
+    /* The same shape as cox — the design rows carry the counts everything else
+     * is computed from, and an estimate fitted on a handful of events is as
+     * identifying as those counts. */
+    labelCols: ["measure", "component", "term", "statistic"],
+    groupCols: ["measure", "component"],
+    countCol: "estimate",
+    maskCols: ["estimate", "se", "ci_low", "ci_high"],
+    keepCols: ["ord", "method"],
+    tieBreakCol: "statistic",
+  },
   competing_risks: {
     /* The life-table rows are per-event-time and therefore per-patient, exactly
      * as the survival module's are; the horizon rows are not. Grouping by

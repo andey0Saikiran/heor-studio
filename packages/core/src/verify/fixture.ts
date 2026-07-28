@@ -548,6 +548,24 @@ export const EXPECTED = {
     biasInterest365: 0,      // EXACTLY zero, not approximately
     identitySum: 0.375,
   },
+  /* ---------------- Fine-Gray, the REDUCTION branch ---------------- *
+   * Gold A's competing cause never occurs, so every one of these must EQUAL
+   * the Cox value above. They are listed separately rather than referenced so
+   * that a change to either module shows up as a disagreement between two
+   * pinned numbers rather than as one number quietly following the other. */
+  fineGray: {
+    rowCount: 20, // 6 design + 7 score + 1 one-step + 3 anchor + 3 adjusted
+    scoreU0: -0.7381,        // = the Cox score, and the log-rank numerator
+    information0: 0.71712,   // = the Cox information
+    partialLogLik0: -5.81711,
+    scoreChiSquare: 0.75968,
+    oneStepHr: 0.35728,
+    /* nothing was retained, because nothing competed: the subdistribution and
+     * cause-specific denominators are the SAME 21 = 8 + 7 + 6 */
+    subdistributionRiskTotal: 21,
+    causeSpecificRiskTotal: 21,
+    retained: 0,
+  },
   cox: {
     rowCount: 19, // 4 design + 8 score + 1 one-step + 3 anchor + 3 adjusted
     eventTimes: 3,
@@ -1297,6 +1315,33 @@ export const GOLD_A_SPEC: StudySpec = {
       horizonDays: [180, 365],
       emitNaiveComparison: true,
       emitLifeTable: true,
+    },
+    /* FINE-GRAY on the same endpoint and the same competing cause as a_cif.
+     *
+     * Gold A's competing cause never occurs, which makes this the REDUCTION
+     * case: the modified risk set has nothing extra to hold, every weight is 1,
+     * and the subdistribution model must become Cox IDENTICALLY. Not similar —
+     * the same score, the same information, the same null log-likelihood, the
+     * same one-step estimate as a_cox produces on the same data.
+     *
+     * That is the strongest available check on the weighting machinery, and it
+     * needs two modules to make: a weighting bug, a wrong G, or a risk set that
+     * retained the wrong people all break the equality, and none of them is
+     * visible from inside either module alone. */
+    {
+      id: "a_fg", label: "Fine-Gray subdistribution model, X vs Y", kind: "fine_gray", enabled: true,
+      endpoint: {
+        kind: "claims_event",
+        outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "outpatient", diagnosisPosition: "any" },
+      },
+      competingEvents: [{
+        id: "cr_liver", label: "Severe liver disease",
+        outcomeDefinition: { codeListId: "cci_mliv_dx", minClaims: 1, setting: "any", diagnosisPosition: "any" },
+      }],
+      washout: { start: -365, end: 0, includesIndex: true },
+      personTimeRule: { start: "index", censorAt: ["outcome", "disenrollment", "study_end", "max_followup"], maxFollowupDays: 365 },
+      groupVarId: "g_arm",
+      covariateIds: ["b_age", "b_sex"],
     },
     /* COX on the same endpoint as a_km. Gold A has NO tied event times, which
      * makes it the case that pins two identities the tie fixture cannot:

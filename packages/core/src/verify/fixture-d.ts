@@ -150,6 +150,20 @@ export const GOLD_D_SPEC: StudySpec = {
   comparisons: [],
   analyses: [
     { id: "d_attrition", label: "Attrition", kind: "attrition", enabled: true },
+    /* FINE-GRAY on the same causes — the COMPLETE SEPARATION case.
+     * Every cause-1 event here is in arm X, so the maximum likelihood estimate
+     * is infinite and the closed forms must return NULL rather than the large
+     * finite number that would read as a very strong effect. Gold Case E is
+     * the informative-fit companion. */
+    {
+      id: "d_fg", label: "Fine-Gray, complete separation", kind: "fine_gray", enabled: true,
+      endpoint: { kind: "claims_event", outcomeDefinition: D_OUTCOME },
+      competingEvents: [{ id: "cr_malignancy", label: "Lung malignancy", outcomeDefinition: D_COMPETING_OUTCOME }],
+      washout: D_WASHOUT,
+      personTimeRule: D_CLOCK,
+      groupVarId: "g_arm",
+      covariateIds: ["b_age"],
+    },
     {
       id: "d_cif", label: "Cumulative incidence of AE with a competing risk", kind: "competing_risks", enabled: true,
       endpoint: { kind: "claims_event", outcomeDefinition: D_OUTCOME },

@@ -1,5 +1,5 @@
 /* Verification entry — run: npm run verify -w @heor-studio/core */
-import { verifyGoldA, verifyDaysPerYearChoice, verifySettingFilterControl, verifySuppression, verifyWashoutToggle, verifyAscertainmentWindow, verifyDataCutReachesBothTwins, verifyGoldB, verifyGoldC, verifyGoldD } from "./run";
+import { verifyGoldA, verifyDaysPerYearChoice, verifySettingFilterControl, verifySuppression, verifyWashoutToggle, verifyAscertainmentWindow, verifyDataCutReachesBothTwins, verifyGoldB, verifyGoldC, verifyGoldD, verifyGoldE } from "./run";
 import { fingerprintCoverageChecks, coverageGuardSelfTest, standardPopulationChecks } from "./coverage";
 import { verifySilenceGuards } from "./guards";
 
@@ -12,6 +12,7 @@ async function main() {
   const gb = await verifyGoldB();
   const gc = await verifyGoldC();
   const gd = await verifyGoldD();
+  const ge = await verifyGoldE();
   const wt = await verifyWashoutToggle();
   const sup = await verifySuppression();
   const sg = verifySilenceGuards();
@@ -53,6 +54,9 @@ async function main() {
   console.log("\n=== Gold Case D (competing risks, separate seed) ===");
   for (const c of gd) console.log(`  ${c.status === "pass" ? "PASS" : "FAIL"}  ${c.name} — ${c.detail}`);
 
+  console.log("\n=== Gold Case E (fractional IPCW weights, separate seed) ===");
+  for (const c of ge) console.log(`  ${c.status === "pass" ? "PASS" : "FAIL"}  ${c.name} — ${c.detail}`);
+
   console.log("\n=== prevalent-case washout (incidence <-> prevalence toggle) ===");
   for (const c of wt) console.log(`  ${c.status === "pass" ? "PASS" : "FAIL"}  ${c.name} — ${c.detail}`);
 
@@ -70,11 +74,12 @@ async function main() {
   const gbOk = gb.every((c) => c.status === "pass");
   const gcOk = gc.every((c) => c.status === "pass");
   const gdOk = gd.every((c) => c.status === "pass");
+  const geOk = ge.every((c) => c.status === "pass");
   const wtOk = wt.every((c) => c.status === "pass");
   const supOk = sup.every((c) => c.status === "pass");
   const sgOk = sg.every((c) => c.status === "pass");
-  console.log(`\nGold Case A: ${r.status.toUpperCase()}${dpyOk ? "" : "  (daysPerYear regression FAILED)"}${sfcOk ? "" : "  (setting-filter control FAILED)"}${covOk ? "" : "  (coverage guard FAILED)"}${awOk ? "" : "  (ascertainment window FAILED)"}${dcOk ? "" : "  (data cut FAILED)"}${gbOk ? "" : "  (Gold Case B FAILED)"}${gcOk ? "" : "  (Gold Case C FAILED)"}${gdOk ? "" : "  (Gold Case D FAILED)"}${wtOk ? "" : "  (washout toggle FAILED)"}${supOk ? "" : "  (suppression FAILED)"}${sgOk ? "" : "  (silence guards FAILED)"}`);
-  process.exit(r.status === "passed" && dpyOk && sfcOk && covOk && awOk && dcOk && gbOk && gcOk && gdOk && wtOk && supOk && sgOk ? 0 : 1);
+  console.log(`\nGold Case A: ${r.status.toUpperCase()}${dpyOk ? "" : "  (daysPerYear regression FAILED)"}${sfcOk ? "" : "  (setting-filter control FAILED)"}${covOk ? "" : "  (coverage guard FAILED)"}${awOk ? "" : "  (ascertainment window FAILED)"}${dcOk ? "" : "  (data cut FAILED)"}${gbOk ? "" : "  (Gold Case B FAILED)"}${gcOk ? "" : "  (Gold Case C FAILED)"}${gdOk ? "" : "  (Gold Case D FAILED)"}${geOk ? "" : "  (Gold Case E FAILED)"}${wtOk ? "" : "  (washout toggle FAILED)"}${supOk ? "" : "  (suppression FAILED)"}${sgOk ? "" : "  (silence guards FAILED)"}`);
+  process.exit(r.status === "passed" && dpyOk && sfcOk && covOk && awOk && dcOk && gbOk && gcOk && gdOk && geOk && wtOk && supOk && sgOk ? 0 : 1);
 }
 
 main().catch((e) => { console.error("crashed:", e); process.exit(1); });

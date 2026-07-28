@@ -792,6 +792,7 @@ const ANALYSIS_KIND_LABELS: Record<AnalysisKind, string> = {
   survival: "Survival (Kaplan-Meier / log-rank)",
   cox: "Cox proportional hazards",
   competing_risks: "Cumulative incidence with competing risks",
+  fine_gray: "Fine-Gray subdistribution hazard model",
   statistical_engine: "Statistical comparison",
   future_stub: "Planned (not generated yet)",
 };

@@ -524,6 +524,69 @@ function sqlFingerprint(kind: string, raw: string): Fingerprint {
       put(fp, "censor_bounds", censorBoundsSql(sql));
       break;
     }
+    case "fine_gray": {
+      put(fp, "causes", (sql.match(/SELECT enrolid, event_date, (\d+) AS cause/g) ?? [])
+        .map((m) => (/(\d+) AS cause/.exec(m) ?? [])[1]).join(","));
+      put(fp, "exposed_level", grab(sql, [/WHEN arm = '([^']+)' THEN 1 ELSE 0 END AS exposed/i]));
+      put(fp, "arm_levels", (sql.match(/arm IN \('([^']+)', '([^']+)'\)/i) ?? []).slice(1).join(","));
+      /* G IS THE CENSORING KM. Building it on the EVENTS instead is one
+       * predicate away and would produce weights that are wrong in a direction
+       * nobody would question — the curve is still monotone in [0,1]. */
+      put(fp, "g_is_censoring_km",
+        /SUM\(CASE WHEN x\.t = c\.t AND x\.cause = 0 THEN 1 ELSE 0 END\) AS d/i.test(sql) ? "yes" : "no");
+      put(fp, "g_times_are_censoring_times",
+        /SELECT DISTINCT t FROM \w+ WHERE cause = 0/i.test(sql) ? "yes" : "no");
+      /* THE MODIFIED RISK SET — the single CASE arm that is the whole model.
+       * Without the second predicate this is a cause-specific Cox model. */
+      put(fp, "retains_competing_subjects", /WHERE x\.t >= e\.t OR x\.cause >= 2/i.test(sql) ? "yes" : "no");
+      /* The ORDER of the ratio, not merely that both terms appear. G(t)/G(t_j)
+       * inverted to G(t_j)/G(t) makes retained subjects GAIN influence over
+       * time instead of losing it — and a check that only asserted both
+       * subqueries exist passed the inversion, because both still do. */
+      put(fp, "weight_is_g_ratio",
+        /CASE WHEN x\.t >= e\.t THEN 1\.0/i.test(sql) &&
+        /ELSE COALESCE\(\(SELECT g\.g FROM \w*fgg g WHERE g\.t <= e\.t[\s\S]{0,140}?\/ NULLIF\(COALESCE\(\(SELECT g\.g FROM \w*fgg g WHERE g\.t <= x\.t/i.test(sql)
+          ? "yes" : "no");
+      put(fp, "score_uses_weighted_totals",
+        /SUM\(d1\) - SUM\(d \* wn1 \/ NULLIF\(wn, 0\)\) AS score_u0/i.test(sql) ? "yes" : "no");
+      put(fp, "information_uses_weighted_share",
+        /SUM\(d \* \(wn1 \/ NULLIF\(wn, 0\)\) \* \(1 - wn1 \/ NULLIF\(wn, 0\)\)\) AS information0/i.test(sql) ? "yes" : "no");
+      put(fp, "null_loglik_uses_weighted_n", /-SUM\(d \* LN\(NULLIF\(wn, 0\)\)\) AS loglik0/i.test(sql) ? "yes" : "no");
+      /* The cause-specific total emitted BESIDE the weighted one, so a reader
+       * (and the harness) can see whether anything was actually retained. */
+      /* The cause-specific total must come from an EXPLICIT at-risk flag, not
+       * from "weight = 1" — those are different predicates whenever G has not
+       * dropped, and the loose one made the retained diagnostic report zero on
+       * a fixture where a subject was genuinely retained. */
+      put(fp, "emits_cause_specific_comparison",
+        /SUM\(m\.at_risk\) AS n_cause_specific/i.test(sql) &&
+        /CASE WHEN x\.t >= e\.t THEN 1 ELSE 0 END AS at_risk/i.test(sql) ? "yes" : "no");
+      /* SEPARATION guards on BOTH the one-step and the anchor. A large finite
+       * number standing in for an infinite estimate reads as a very strong
+       * effect. */
+      /* The FACT at each site, not an occurrence count. SQL inlines the guard
+       * into all four one-step columns; the SAS twin hoists it into _finite and
+       * uses it twice. Both are correct and the counts are 5 and 2 — the same
+       * structural-divergence trap the statistical constants at the top of this
+       * file are exempted from. */
+      /* Dialect-agnostic: Postgres rounds via ROUND(CAST(x AS NUMERIC), n) and
+       * Snowflake via ROUND(x, n), so a pattern anchored on the CAST passed on
+       * the executed twin and failed the Snowflake one — which is the check
+       * doing its job on my regex rather than on the emitter. */
+      put(fp, "separation_guards_one_step",
+        /CASE WHEN d1_exposed > 0 AND d1_exposed < d_total THEN ROUND\(\s*(?:CAST\(\s*)?EXP\(/i.test(sql) ? "yes" : "no");
+      put(fp, "separation_guards_anchor",
+        /AND c\.d1_exposed > 0 AND c\.d1_exposed < c\.d_total/i.test(sql) ? "yes" : "no");
+      put(fp, "anchor_requires_constant_proportion", /ABS\(p_max - p_min\) < 1e-12/i.test(sql) ? "yes" : "no");
+      put(fp, "model_terms", [...sql.matchAll(/CAST\('adjusted' AS VARCHAR\) AS component, CAST\('([^']*)' AS VARCHAR\) AS term/g)].map((m) => m[1]).join(","));
+      put(fp, "censor_bounds", censorBoundsSql(sql));
+      {
+        const adjusted = [...sql.matchAll(/CAST\('adjusted' AS VARCHAR\) AS component,[\s\S]{0,260}?CAST\(\d+ AS INT\) AS ord,\s*\n\s*(\S+[^\n]*?) AS estimate/g)];
+        put(fp, "fg_fit_null_in_sql",
+          adjusted.length > 0 && adjusted.every((m) => m[1] === "CAST(NULL AS NUMERIC)") ? "yes" : "no");
+      }
+      break;
+    }
     case "comorbidity_index": {
       /* The index IS its weights and its hierarchy. A dropped supersession or a
        * shifted weight produces a score that is wrong by a plausible amount on
@@ -853,6 +916,54 @@ function sasFingerprint(kind: string, rawSas: string, setup: string): Fingerprin
       put(fp, "cif_anchor_present",
         /proc lifetest data=work\.\w+ plots=none;/i.test(sas) && /eventcode=1/i.test(sas) &&
         /cif_anchor_verdict = 'PASS: closed form = PROC LIFETEST CIF'/i.test(rawSas) ? "yes" : "no");
+      break;
+    }
+    case "fine_gray": {
+      put(fp, "causes", (sas.match(/select e\.enrolid, e\.svcdate, (\d+) as cause/gi) ?? [])
+        .map((m) => (/(\d+) as cause/i.exec(m) ?? [])[1]).join(","));
+      put(fp, "exposed_level", grab(sas, [/exposed = \(arm = "([^"]+)"\)/i]));
+      put(fp, "arm_levels", (sas.match(/arm not in \("([^"]+)", "([^"]+)"\)/i) ?? []).slice(1).join(","));
+      put(fp, "g_is_censoring_km",
+        /sum\(case when x\.t = c\.t and x\.cause = 0 then 1 else 0 end\) as d/i.test(sas) ? "yes" : "no");
+      put(fp, "g_times_are_censoring_times",
+        /select distinct t from work\.\w+ where cause = 0/i.test(sas) ? "yes" : "no");
+      put(fp, "retains_competing_subjects", /where x\.t >= e\.t or x\.cause >= 2/i.test(sas) ? "yes" : "no");
+      put(fp, "weight_is_g_ratio",
+        /case when x\.t >= e\.t then 1/i.test(sas) &&
+        /where t <= e\.t\)\), 1\)[\s\S]{0,200}?\/ coalesce[\s\S]{0,200}?where t <= x\.t\)\), 1\)/i.test(sas)
+          ? "yes" : "no");
+      put(fp, "score_uses_weighted_totals", /sum\(d1\) - sum\(d \* wn1 \/ wn\) as score_u0/i.test(sas) ? "yes" : "no");
+      put(fp, "information_uses_weighted_share",
+        /sum\(d \* \(wn1 \/ wn\) \* \(1 - wn1 \/ wn\)\) as information0/i.test(sas) ? "yes" : "no");
+      put(fp, "null_loglik_uses_weighted_n", /-sum\(d \* log\(wn\)\) as loglik0/i.test(sas) ? "yes" : "no");
+      put(fp, "emits_cause_specific_comparison",
+        /sum\(m\.at_risk\) as n_cause_specific/i.test(sas) &&
+        /case when x\.t >= e\.t then 1 else 0 end as at_risk/i.test(sas) ? "yes" : "no");
+      put(fp, "separation_guards_one_step",
+        /_finite = \(d1_exposed > 0 and d1_exposed < d_total\);/i.test(sas) &&
+        /if _finite and information0 > 0 then do;/i.test(sas) ? "yes" : "no");
+      put(fp, "separation_guards_anchor",
+        /and d1_exposed > 0 and d1_exposed < d_total then do;/i.test(sas) ? "yes" : "no");
+      put(fp, "anchor_requires_constant_proportion", /abs\(p_max - p_min\) < 1e-12/i.test(sas) ? "yes" : "no");
+      put(fp, "model_terms", (sas.match(/term="([^"]*)"; ord=4\d+; output;/g) ?? []).map((m) => (/term="([^"]*)"/.exec(m) ?? [])[1]).join(","));
+      put(fp, "censor_bounds", censorBoundsSas(sas));
+      /* Language-local. eventcode= is scraped FROM THE MODEL STATEMENT: without
+       * it PROC PHREG fits a cause-specific Cox model, cleanly and
+       * convergently, answering a different question. */
+      put(fp, "fg_fit_in_sas",
+        /proc phreg data=work\.\w+;/i.test(sas) && /model t\*cause\(0\) = [^;]*eventcode=1/i.test(sas) ? "yes" : "no");
+      put(fp, "fg_null_loglik_check",
+        /abs\(closed_form_m2ll - phreg_m2ll\) < 1e-6/i.test(sas) ? "yes" : "no");
+      put(fp, "fg_score_zero_check",
+        /u_at_bhat = u_at_bhat \+ d1 - d \* \(wn1 \* _r\) \/ \(\(wn - wn1\) \+ wn1 \* _r\)/i.test(sas) ? "yes" : "no");
+      /* Anchored on the SELF-CHECK's own verdict assignment. The same
+       * comparison appears again in the result assembly, so a bare test for it
+       * found the assembly copy and stayed green while the check itself had
+       * been reduced to `if 1 then`. Fourth time in this repo that a
+       * single-occurrence pattern has hidden a partial corruption. */
+      put(fp, "fg_subdistribution_check",
+        /if wn_total > n_cs_total \+ 1e-9 then\s*\n\s*subdist_verdict = 'PASS: the risk sets are genuinely subdistribution/i.test(sas) &&
+        /Cox model by another name/i.test(rawSas) ? "yes" : "no");
       break;
     }
     case "comorbidity_index": {
@@ -1342,6 +1453,12 @@ const EXPECTED_CONSTANTS: Record<string, Record<"sql" | "sas", ConstantProfileSp
     sql: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
     sas: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
   },
+  fine_gray: {
+    /* Identical to cox, and for the same reasons: z twice in the one-step
+     * interval, z^2 once in the score test's alpha = 0.05 decision. */
+    sql: { z: 2, z2_half: 0, z2: 1, z2_quarter: 0 },
+    sas: { z: 2, z2_half: 0, z2: 1, z2_quarter: 0 },
+  },
   competing_risks: {
     /* z = 4: both bounds of the delta-method Wald interval, for each of the two
      *        causes. No z^2 anywhere — nothing here estimates a proportion by
@@ -1479,6 +1596,11 @@ export const LANGUAGE_LOCAL_KEYS: Record<string, { language: "sql" | "sas"; must
   cox_fit_in_sas: { language: "sas", must: "yes", means: "PROC PHREG fits the model, with ties=breslow stated explicitly rather than left to the default" },
   cox_null_loglik_check: { language: "sas", must: "yes", means: "PHREG's null -2 LOG L is checked against the closed-form partial log-likelihood" },
   cox_score_zero_check: { language: "sas", must: "yes", means: "U(beta_hat) = 0 is verified — the fitted coefficient is checked against the equation that defines it" },
+  fg_fit_null_in_sql: { language: "sql", must: "yes", means: "the fitted subdistribution coefficient is NULL in SQL, not approximated by the one-step estimate above it" },
+  fg_fit_in_sas: { language: "sas", must: "yes", means: "PROC PHREG fits with eventcode= — without it it fits a cause-specific Cox model, cleanly, answering a different question" },
+  fg_null_loglik_check: { language: "sas", must: "yes", means: "PHREG's null -2 LOG L is checked against the closed-form partial log-likelihood" },
+  fg_score_zero_check: { language: "sas", must: "yes", means: "U(beta_hat) = 0 is verified on the WEIGHTED risk sets" },
+  fg_subdistribution_check: { language: "sas", must: "yes", means: "the program checks whether a subdistribution model was actually fitted, by comparing its own two risk-set totals" },
   cif_anchor_present: { language: "sas", must: "yes", means: "PROC LIFETEST with eventcode= is run beside the closed-form CIF and compared to it, with a verdict printed" },
   cox_anchor_check: { language: "sas", must: "yes", means: "the constant-proportion closed form is checked, and says NOT APPLICABLE rather than passing vacuously when it does not apply" },
 };

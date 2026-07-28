@@ -460,6 +460,65 @@ export function verifySilenceGuards(): Check[] {
     );
   }
 
+  /* 3f-quinquies. Fine-Gray readiness.
+   *
+   * The interesting gate is the third: with NO competing event the
+   * subdistribution risk set is the cause-specific one, so the model IS a Cox
+   * model — and calling it Fine-Gray claims an adjustment it is not making.
+   * That refusal has to exist because the analysis would otherwise run
+   * perfectly, converge, and print a number the analyst would report as a
+   * subdistribution hazard ratio. */
+  {
+    const base: StudySpec = JSON.parse(JSON.stringify(GOLD_A_SPEC));
+    const fgAnalysis = (over: Record<string, unknown>) => ({
+      id: "guard_fg", label: "guard fg", kind: "fine_gray", enabled: true,
+      endpoint: { kind: "claims_event", outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "outpatient", diagnosisPosition: "any" } },
+      competingEvents: [{ id: "c1", label: "Competing", outcomeDefinition: { codeListId: "cci_mliv_dx", minClaims: 1, setting: "any", diagnosisPosition: "any" } }],
+      washout: { start: -365, end: 0, includesIndex: true },
+      personTimeRule: { start: "index", censorAt: ["outcome", "disenrollment", "study_end", "max_followup"], maxFollowupDays: 365 },
+      groupVarId: "g_arm", covariateIds: [],
+      ...over,
+    });
+
+    const deadFg: StudySpec = JSON.parse(JSON.stringify(base));
+    deadFg.analyses.push(fgAnalysis({ endpoint: { kind: "death", source: "dstatus" } }) as never);
+    const rdf = specReadiness(deadFg);
+    push(
+      "guard: a DEATH endpoint on a FINE-GRAY model is refused too, from the same constant",
+      rdf.problems.some((p) => p.includes("guard_fg") && p.includes("DSTATUS")),
+      rdf.problems.find((p) => p.includes("guard_fg"))?.slice(0, 90) ?? "fine_gray accepted a mortality endpoint",
+    );
+
+    const noCompFg: StudySpec = JSON.parse(JSON.stringify(base));
+    noCompFg.analyses.push(fgAnalysis({ competingEvents: [] }) as never);
+    const rnf = specReadiness(noCompFg);
+    const noCompMsg = rnf.problems.find((p) => p.includes("guard_fg"));
+    push(
+      "guard: fine_gray with NO competing event is refused — it would BE a Cox model",
+      !!noCompMsg && noCompMsg.includes("this model IS a Cox model"),
+      noCompMsg?.slice(0, 120) ?? "accepted",
+    );
+
+    const sharedFg: StudySpec = JSON.parse(JSON.stringify(base));
+    sharedFg.analyses.push(fgAnalysis({
+      competingEvents: [{ id: "c1", label: "Competing", outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "any", diagnosisPosition: "any" } }],
+    }) as never);
+    const rsf = specReadiness(sharedFg);
+    push(
+      "guard: a fine_gray competing cause sharing the endpoint's code list is refused",
+      rsf.problems.some((p) => p.includes("guard_fg") && p.includes("SAME code list")),
+      rsf.problems.find((p) => p.includes("guard_fg"))?.slice(0, 110) ?? "accepted a shared code list",
+    );
+
+    const okFg: StudySpec = JSON.parse(JSON.stringify(base));
+    okFg.analyses.push(fgAnalysis({}) as never);
+    push(
+      "guard: a well-formed fine_gray analysis is NOT refused",
+      !specReadiness(okFg).problems.some((p) => p.includes("guard_fg")),
+      specReadiness(okFg).problems.filter((p) => p.includes("guard_fg")).join("; ") || "no problems",
+    );
+  }
+
   /* 3g. Reproducibility provenance. "Identical spec in, identical code out" is
      only auditable against a generator VERSION and a spec identity — otherwise
      a reviewer re-running a study a year later cannot tell a legitimate emitter
