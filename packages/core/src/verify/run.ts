@@ -1108,6 +1108,49 @@ export async function verifyGoldA(): Promise<VerificationResult> {
       detail: zc?.method ?? "no diagnostic row",
     });
 
+    /* ---- OLS on a continuous response ----
+     * The one family whose STANDARD ERROR is closed form too, so both halves of
+     * the saturated result are executed rather than deferred to SAS. */
+    const ro = EXPECTED.regressionOls;
+    const O_T = "tz_study_glm_a_glm_ols";
+    eq(
+      `ols rows = ${ro.rowCount} (6 design + 1 crude + 1 diagnostic + 3 adjusted)`,
+      await scalar<number>(db, `SELECT count(*)::int FROM ${O_T}`),
+      ro.rowCount,
+    );
+    const oRow = async (component: string, term: string, statistic: string) =>
+      (
+        await rows<{ estimate: number | null; ci_low: number | null; ci_high: number | null; se_log: number | null; method: string }>(
+          db,
+          `SELECT estimate::float8, ci_low::float8, ci_high::float8, se_log::float8, method
+             FROM ${O_T} WHERE component = '${component}' AND term = '${term}' AND statistic = '${statistic}'`,
+        )
+      )[0];
+    for (const [arm, want] of [["DRUG_Y", ro.design.exposed], ["DRUG_X", ro.design.reference]] as const) {
+      eq(`ols ${arm}: n = ${want.n}`, Number((await oRow("design", arm, "n"))?.estimate), want.n);
+      approx(`ols ${arm}: mean = ${want.mean}`, Number((await oRow("design", arm, "mean"))?.estimate), want.mean, 0.00001);
+      approx(`ols ${arm}: sd = ${want.sd}`, Number((await oRow("design", arm, "sd"))?.estimate), want.sd, 0.00001);
+    }
+    const md = await oRow("crude", "Index drug", "mean_difference");
+    approx("ols mean difference = -1.75 EXACTLY (the saturated coefficient)", Number(md?.estimate), ro.meanDifference.estimate, 0.00001);
+    approx("ols pooled SE = 0.47871 (closed form, unlike every other family)", Number(md?.se_log), ro.meanDifference.se, 0.00001);
+    approx(`ols CI low = ${ro.meanDifference.ciLow}`, Number(md?.ci_low), ro.meanDifference.ciLow, 0.00001);
+    approx(`ols CI high = ${ro.meanDifference.ciHigh}`, Number(md?.ci_high), ro.meanDifference.ciHigh, 0.00001);
+    /* One arm has ZERO variance. The pooled estimator has to fall back on the
+     * other arm rather than divide by nothing — an edge case worth pinning. */
+    checks.push({
+      name: "ols: a zero-variance arm does not break the pooled standard error",
+      status: Number((await oRow("design", "DRUG_Y", "sd"))?.estimate) === 0 && Number(md?.se_log) > 0 ? "pass" : "fail",
+      detail: `DRUG_Y sd = 0, pooled SE = ${md?.se_log} (falls back on DRUG_X's variance)`,
+    });
+    checks.push({
+      name: "ols: the interval is labeled a NORMAL approximation, not the model's own",
+      status: md?.method === "wald_normal_approx_pooled_sd" ? "pass" : "fail",
+      detail: `method "${md?.method}"`,
+    });
+    const rdf = await oRow("diagnostic", "interval", "residual_df");
+    eq("ols: residual df = 6, so the exact interval is t(6)", Number(rdf?.estimate), ro.residualDf);
+
     /* ---- Table 1 comorbidity-index row (executed) ----
      * The row is scored by the SAME shared engine as the index analysis and the
      * balance table, so this asserts the wiring rather than the arithmetic:

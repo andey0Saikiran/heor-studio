@@ -282,6 +282,14 @@ function checkAnalysis(p: Problems, v: unknown, path: string): void {
       needStr(p, v, "groupVarId", path, { nonEmpty: true });
       if (v.personTimeRule !== undefined) checkPersonTimeRule(p, v.personTimeRule, `${path}.personTimeRule`);
       if (v.recurrence !== undefined) needEnum(p, v, "recurrence", path, RECURRENCE);
+      if (v.continuousResponse !== undefined) {
+        const rp = `${path}.continuousResponse`;
+        if (!isObj(v.continuousResponse)) p.push(rp, `expected {source, comorbidityIndexAnalysisId}, got ${typeOf(v.continuousResponse)}`);
+        else {
+          need(p, `${rp}.source`, v.continuousResponse.source === "comorbidity_index", `expected "comorbidity_index", got ${JSON.stringify(v.continuousResponse.source)}`);
+          needStr(p, v.continuousResponse, "comorbidityIndexAnalysisId", rp, { nonEmpty: true });
+        }
+      }
       if (v.costResponse !== undefined) {
         const cp = `${path}.costResponse`;
         if (!isObj(v.costResponse)) p.push(cp, `expected {window, settings, costField}, got ${typeOf(v.costResponse)}`);

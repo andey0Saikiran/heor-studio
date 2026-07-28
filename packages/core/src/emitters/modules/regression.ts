@@ -61,6 +61,7 @@ const ADJ_METHOD_BY_FAMILY: Record<string, string> = {
   poisson: "sas_proc_genmod",
   negative_binomial: "sas_proc_genmod_negbin",
   gamma_log: "sas_proc_genmod_gamma",
+  ols: "sas_proc_glm",
 };
 const adjMethod = (family: string) => ADJ_METHOD_BY_FAMILY[family] ?? "sas_primary";
 /** The effect a family's exponentiated coefficient IS. Labelling a Poisson
@@ -71,6 +72,7 @@ const ADJ_STATISTIC_BY_FAMILY: Record<string, string> = {
   poisson: "rate_ratio",
   negative_binomial: "rate_ratio",
   gamma_log: "cost_ratio",
+  ols: "mean_difference",
 };
 const adjStatistic = (family: string) => ADJ_STATISTIC_BY_FAMILY[family] ?? "effect";
 
@@ -118,6 +120,8 @@ function sqlRegression(ctx: SqlCtx, an: RegressionAnalysis, suffix: string): Sql
   const horizonEnd = d.offset("s.index_date", an.horizonDays);
   const isCount = an.family === "poisson" || an.family === "negative_binomial";
   const isCost = an.family === "gamma_log";
+  const isOls = an.family === "ols";
+  const respAn = isOls ? indexAnalysisFor(spec, an.continuousResponse?.comorbidityIndexAnalysisId) : null;
   const isRecurrent = (an.recurrence ?? "first_only") === "all_events";
   const censor = an.personTimeRule ? censorPlan(spec, an.personTimeRule) : null;
   const censorFinal = censor?.atOutcome
@@ -133,7 +137,7 @@ function sqlRegression(ctx: SqlCtx, an: RegressionAnalysis, suffix: string): Sql
         referenceLevel: p.referenceLevel, exposedLevel: p.exposedLevel, terms: modelTerms,
         settingFilter: setting.stamped, effectStatistic: adjStatistic(an.family),
         offset: censor ? { applied: censor.applied, dataCut: censor.dataCut } : null,
-        responseKind: isCost ? "cost" : isRecurrent ? "count" : "indicator",
+        responseKind: isOls ? "continuous" : isCost ? "cost" : isRecurrent ? "count" : "indicator",
       }),
     )}`,
   );
@@ -203,6 +207,13 @@ function sqlRegression(ctx: SqlCtx, an: RegressionAnalysis, suffix: string): Sql
     L.push(`  FROM ptc0`);
     L.push(`),`);
   }
+  if (isOls && respAn) {
+    /* The RESPONSE is a comorbidity score, from the SHARED scorer — the same
+     * engine Table 1 and the balance table use, so this model cannot disagree
+     * with them about what a subject scored. */
+    const sc = comorbidityScoreSqlCtes(ctx, { wp, an: respAn, cohortCte: "atrisk", prefix: "resp_" });
+    L.push(...sc.lines);
+  }
   if (isCost && an.costResponse) {
     /* The RESPONSE is each subject's COST, read through the SHARED ledger — so
      * it is the same quantity the resource-use table reports, inpatient
@@ -246,6 +257,9 @@ function sqlRegression(ctx: SqlCtx, an: RegressionAnalysis, suffix: string): Sql
   } else if (isCost) {
     L.push(`         -- COST over the window (gamma_log response)`);
     L.push(`         COALESCE(cp.cost, 0) AS y,`);
+  } else if (isOls) {
+    L.push(`         -- CONTINUOUS response: the comorbidity index score`);
+    L.push(`         CAST(COALESCE(rp.score, 0) AS DOUBLE PRECISION) AS y,`);
   } else {
     L.push(`         -- incident event INSIDE the horizon; a subject counts once`);
     L.push(`         CASE WHEN f.fu_date IS NOT NULL AND f.fu_date <= ${horizonEnd} THEN 1 ELSE 0 END AS y,`);
@@ -275,10 +289,23 @@ function sqlRegression(ctx: SqlCtx, an: RegressionAnalysis, suffix: string): Sql
   if (isCount) L.push(`  LEFT JOIN ptc pt ON pt.enrolid = s.enrolid`);
   if (isRecurrent) L.push(`  LEFT JOIN ev_n en ON en.enrolid = s.enrolid`);
   if (isCost) L.push(`  LEFT JOIN cost_pt cp ON cp.enrolid = s.enrolid`);
+  if (isOls) L.push(`  LEFT JOIN resp_per_pt rp ON rp.enrolid = s.enrolid`);
   L.push(`  WHERE s.arm IN ('${q(p.referenceLevel)}', '${q(p.exposedLevel)}')`);
   L.push(`),`);
   L.push(`cells AS (   -- the table the closed form is computed from`);
-  if (isCost) {
+  if (isOls) {
+    /* Arm means and SAMPLE variances. Unlike every other family here, an OLS
+     * two-group model has BOTH a closed-form coefficient AND a closed-form
+     * standard error, so more of it is executable than anywhere else. */
+    L.push(`  SELECT SUM(CASE WHEN exposed = 1 THEN 1 ELSE 0 END) AS b_en,`);
+    L.push(`         SUM(CASE WHEN exposed = 0 THEN 1 ELSE 0 END) AS d_un,`);
+    L.push(`         SUM(CASE WHEN exposed = 1 THEN y ELSE 0 END) AS a_ee,`);
+    L.push(`         SUM(CASE WHEN exposed = 0 THEN y ELSE 0 END) AS c_ue,`);
+    L.push(`         AVG(CASE WHEN exposed = 1 THEN y END) AS m_exp,`);
+    L.push(`         AVG(CASE WHEN exposed = 0 THEN y END) AS m_unexp,`);
+    L.push(`         VAR_SAMP(CASE WHEN exposed = 1 THEN y END) AS v_exp,`);
+    L.push(`         VAR_SAMP(CASE WHEN exposed = 0 THEN y END) AS v_unexp`);
+  } else if (isCost) {
     /* Gamma requires a STRICTLY POSITIVE response, so zero-cost subjects cannot
      * enter the fit. They are counted, reported, and excluded — never dropped
      * silently and never rescued by adding a small constant, which changes the
@@ -320,12 +347,24 @@ function sqlRegression(ctx: SqlCtx, an: RegressionAnalysis, suffix: string): Sql
    * chose. */
   L.push(`eff AS (`);
   L.push(`  SELECT a_ee, b_en, c_ue, d_un,`);
-  L.push(isRecurrent || isCost
+  L.push(isRecurrent || isCost || isOls
     ? `         b_en AS n_exp, d_un AS n_unexp,`
     : `         (a_ee + b_en) AS n_exp, (c_ue + d_un) AS n_unexp,`);
   if (isCost) L.push(`         n_zero, n_exp_all, n_unexp_all, v_exp, v_unexp,`);
+  if (isOls) L.push(`         m_exp, m_unexp, v_exp, v_unexp,`);
   if (isRecurrent) L.push(`         max_events,`);
-  if (isCost) {
+  if (isOls) {
+    /* SATURATED OLS. With one binary predictor and an identity link the fitted
+     * means ARE the observed arm means, so the coefficient is exactly the
+     * difference of means and its standard error is exactly the pooled
+     * two-sample form. Both are computed here and executed. */
+    L.push(`         (m_exp - m_unexp) AS mean_diff,`);
+    L.push(`         SQRT( ((b_en - 1) * v_exp + (d_un - 1) * v_unexp)`);
+    L.push(`               / NULLIF(b_en + d_un - 2, 0) ) AS pooled_sd,`);
+    L.push(`         SQRT( ((b_en - 1) * v_exp + (d_un - 1) * v_unexp)`);
+    L.push(`               / NULLIF(b_en + d_un - 2, 0) )`);
+    L.push(`           * SQRT(1.0/NULLIF(b_en, 0) + 1.0/NULLIF(d_un, 0)) AS se_diff`);
+  } else if (isCost) {
     /* The saturated Gamma-log model reproduces the observed arm MEANS, so its
      * MLE of the exposure coefficient IS ln(mean_exposed / mean_reference).
      * That is the anchor, in closed form.
@@ -365,7 +404,19 @@ function sqlRegression(ctx: SqlCtx, an: RegressionAnalysis, suffix: string): Sql
     `  SELECT 'design' AS component, '${term}' AS term, '${stat}' AS statistic, ${ord} AS ord,` +
     ` CAST(${expr} AS NUMERIC) AS estimate, CAST(NULL AS NUMERIC) AS ci_low, CAST(NULL AS NUMERIC) AS ci_high,` +
     ` CAST(NULL AS NUMERIC) AS se_log, CAST('observed' AS VARCHAR) AS method FROM eff`;
-  if (isCost) {
+  if (isOls) {
+    L.push(designRow(0, q(p.exposedLevel), "n", "n_exp"));
+    L.push(`  UNION ALL`);
+    L.push(designRow(1, q(p.exposedLevel), "mean", d.roundN(`m_exp`, 5)));
+    L.push(`  UNION ALL`);
+    L.push(designRow(2, q(p.exposedLevel), "sd", d.roundN(`SQRT(v_exp)`, 5)));
+    L.push(`  UNION ALL`);
+    L.push(designRow(3, q(p.referenceLevel), "n", "n_unexp"));
+    L.push(`  UNION ALL`);
+    L.push(designRow(4, q(p.referenceLevel), "mean", d.roundN(`m_unexp`, 5)));
+    L.push(`  UNION ALL`);
+    L.push(designRow(5, q(p.referenceLevel), "sd", d.roundN(`SQRT(v_unexp)`, 5)));
+  } else if (isCost) {
     L.push(designRow(0, q(p.exposedLevel), "n", "n_exp_all"));
     L.push(`  UNION ALL`);
     L.push(designRow(1, q(p.exposedLevel), "n_positive_cost", "n_exp"));
@@ -406,7 +457,26 @@ function sqlRegression(ctx: SqlCtx, an: RegressionAnalysis, suffix: string): Sql
   const crude = (ord: number, stat: string, est: string, lo: string, hi: string, se: string) =>
     `  SELECT 'crude', '${q(stratLabel(gvLabel))}', '${stat}', ${ord},` +
     ` ${est}, ${lo}, ${hi}, ${se}, CAST('closed_form_2x2' AS VARCHAR) FROM eff`;
-  if (isCost) {
+  if (isOls) {
+    /* The interval is the NORMAL approximation, and it is labeled as such. The
+     * exact small-sample interval is Student's t on n-2 degrees of freedom, and
+     * the t quantile needs an inverse CDF warehouse SQL does not have — so that
+     * one is SAS-primary. At these n the difference is large (t = 2.447 vs
+     * z = 1.96 on 6 df), which is why the label matters rather than being a
+     * technicality. */
+    L.push(`  UNION ALL`);
+    L.push(crude(10, "mean_difference",
+      d.roundN(`mean_diff`, 5),
+      d.roundN(`mean_diff - 1.96 * se_diff`, 5),
+      d.roundN(`mean_diff + 1.96 * se_diff`, 5),
+      d.roundN(`se_diff`, 5)).replace("'closed_form_2x2'", "'wald_normal_approx_pooled_sd'"));
+    L.push(`  UNION ALL`);
+    L.push(
+      `  SELECT 'diagnostic', 'interval', 'residual_df', 14,` +
+        ` CAST(b_en + d_un - 2 AS NUMERIC), CAST(NULL AS NUMERIC), CAST(NULL AS NUMERIC), CAST(NULL AS NUMERIC),` +
+        ` CAST('the EXACT interval is Student t on this many df; the interval above is the normal approximation, which is too NARROW at small n' AS VARCHAR) FROM eff`,
+    );
+  } else if (isCost) {
     L.push(`  UNION ALL`);
     L.push(crude(10, "cost_ratio",
       d.roundN(`EXP(log_cr)`, 5),
@@ -536,6 +606,9 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
   const cciScore = cciCov && cciAn ? comorbidityScoreSasSteps(ctx, { an: cciAn, num, cohT, evOf: ctx.evOf }) : null;
   const isCountS = an.family === "poisson" || an.family === "negative_binomial";
   const isCostS = an.family === "gamma_log";
+  const isOlsS = an.family === "ols";
+  const respAnS = isOlsS ? indexAnalysisFor(spec, an.continuousResponse?.comorbidityIndexAnalysisId) : null;
+  const respScore = respAnS ? comorbidityScoreSasSteps(ctx, { an: respAnS, num: `${num}r`, cohT: `work._${num}_atrisk`, evOf: ctx.evOf }) : null;
   const glmDist = an.family === "negative_binomial" ? "negbin" : an.family === "gamma_log" ? "gamma" : "poisson";
   const costLedger = isCostS && an.costResponse
     ? ledgerSasSteps(ctx, {
@@ -568,7 +641,7 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
         referenceLevel: p.referenceLevel, exposedLevel: p.exposedLevel, terms: modelTerms,
         settingFilter: setting.stamped, effectStatistic: adjStatistic(an.family),
         offset: censorS ? { applied: censorS.applied, dataCut: censorS.dataCut } : null,
-        responseKind: isCostS ? "cost" : isRecurrentS ? "count" : "indicator",
+        responseKind: isOlsS ? "continuous" : isCostS ? "cost" : isRecurrentS ? "count" : "indicator",
       }),
     )} */`,
     ``,
@@ -625,8 +698,8 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
     ``,
     ...levelCheck(`work._${num}_atrisk`, "at-risk subjects"),
     ``,
-    ...(isCostS ? [`/* (no first-event lookup: the response is a cost total, not an event) */`, ``] : []),
-    ...(isCostS ? [] : [
+    ...(isCostS || isOlsS ? [`/* (no first-event lookup: the response is not an event) */`, ``] : []),
+    ...(isCostS || isOlsS ? [] : [
     `/*-------------------- first incident event inside the horizon ---------------*/`,
     `proc sql;`,
     `  create table work._${num}_fu as`,
@@ -641,6 +714,15 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
     `quit;`,
     ``,
     ]),
+    ...(respScore
+      ? [
+          `/*-------------------- CONTINUOUS response: the comorbidity score -------------`,
+          `  Scored by the SHARED engine, so this model cannot disagree with Table 1`,
+          `  or the balance table about what a subject scored. */`,
+          ...respScore.lines,
+          ...comorbidityScoreSasScore(`${num}r`, `work._${num}_atrisk`),
+        ]
+      : []),
     ...(costLedger
       ? [
           `/*-------------------- COST response, via the shared ledger -------------------`,
@@ -715,13 +797,15 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
       ? [`         coalesce(n.n_events, 0) as y,   /* COUNT (recurrence: all_events) */`]
       : isCostS
         ? [`         coalesce(cst.cost, 0) as y,     /* COST (gamma_log response) */`]
-        : [`         (case when f.enrolid is not null then 1 else 0 end) as y,`]),
+        : isOlsS
+          ? [`         coalesce(rsp.score, 0) as y,    /* CONTINUOUS response */`]
+          : [`         (case when f.enrolid is not null then 1 else 0 end) as y,`]),
     `         (year(a.index_date) - b.dobyr) as age_val,`,
     `         (case when b.sex = '1' then 1 else 0 end) as sex_male${cciScore ? "," : ""}`,
     ...(cciScore ? [`         coalesce(s.score, 0) as cci_val${isCountS ? "," : ""}`] : []),
     ...(isCountS ? [`         coalesce(pt.person_days, 0) as person_days`] : []),
     `  from work._${num}_atrisk as a`,
-    ...(isCostS ? [] : [`  left join work._${num}_fu as f on f.enrolid = a.enrolid`]),
+    ...(isCostS || isOlsS ? [] : [`  left join work._${num}_fu as f on f.enrolid = a.enrolid`]),
     `  left join (select enrolid, min(dobyr) as dobyr, min(sex) as sex`,
     `             from ${enrT} group by enrolid) as b`,
     `    on b.enrolid = a.enrolid`,
@@ -729,6 +813,7 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
     ...(isCountS ? [`  left join work._${num}_pt as pt on pt.enrolid = a.enrolid`] : []),
     ...(isRecurrentS ? [`  left join work._${num}_evn as n on n.enrolid = a.enrolid`] : []),
     ...(isCostS ? [`  left join work._${num}_cost as cst on cst.enrolid = a.enrolid`] : []),
+    ...(respScore ? [`  left join ${respScore.scoreTable} as rsp on rsp.enrolid = a.enrolid`] : []),
     `  ;`,
     `quit;`,
     ``,
@@ -739,7 +824,19 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
     `----------------------------------------------------------------------------*/`,
     `proc sql;`,
     `  create table work._${num}_cells as`,
-    ...(isCostS
+    ...(isOlsS
+      ? [
+          `  /* arm means and SAMPLE variances - the OLS closed form needs nothing else */`,
+          `  select sum(case when exposed = 1 then 1 else 0 end) as b_en,`,
+          `         sum(case when exposed = 0 then 1 else 0 end) as d_un,`,
+          `         sum(case when exposed = 1 then y else 0 end) as a_ee,`,
+          `         sum(case when exposed = 0 then y else 0 end) as c_ue,`,
+          `         mean(case when exposed = 1 then y else . end) as m_exp,`,
+          `         mean(case when exposed = 0 then y else . end) as m_unexp,`,
+          `         var(case when exposed = 1 then y else . end) as v_exp,`,
+          `         var(case when exposed = 0 then y else . end) as v_unexp`,
+        ]
+      : isCostS
       ? [
           `  /* gamma needs y > 0, so zero-cost subjects are COUNTED and EXCLUDED,`,
           `     never dropped silently and never rescued with a small constant. */`,
@@ -781,10 +878,21 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
     ``,
     `data work._${num}_eff;`,
     `  set work._${num}_cells;`,
-    ...(isRecurrentS || isCostS
+    ...(isRecurrentS || isCostS || isOlsS
       ? [`  n_exp   = b_en;`, `  n_unexp = d_un;`]
       : [`  n_exp   = a_ee + b_en;`, `  n_unexp = c_ue + d_un;`]),
-    ...(isCostS
+    ...(isOlsS
+      ? [
+          `  /* SATURATED OLS: the fitted means ARE the observed arm means, so the`,
+          `     coefficient is exactly the difference of means and its standard error`,
+          `     is exactly the pooled two-sample form. */`,
+          `  if b_en + d_un > 2 then do;`,
+          `    mean_diff = m_exp - m_unexp;`,
+          `    pooled_sd = sqrt(((b_en - 1)*v_exp + (d_un - 1)*v_unexp) / (b_en + d_un - 2));`,
+          `    se_diff   = pooled_sd * sqrt(1/b_en + 1/d_un);`,
+          `  end;`,
+        ]
+      : isCostS
       ? [
           `  /* The saturated gamma-log model reproduces the observed arm MEANS, so`,
           `     its MLE of the exposure coefficient IS ln(mean_exposed/mean_ref).`,
@@ -822,7 +930,15 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
     `  fitting machinery that does not require trusting it.`,
     `  descending: model the probability that y = 1, not y = 0.`,
     `----------------------------------------------------------------------------*/`,
-    ...(isCountS
+    ...(isOlsS
+      ? [
+          `ods output ParameterEstimates = work._${num}_anchor_pe;`,
+          `proc glm data=work._${num}_subj;`,
+          `  model y = exposed / solution;`,
+          `run;`,
+          `quit;`,
+        ]
+      : isCountS
       ? [
           `data work._${num}_subj;`,
           `  set work._${num}_subj;`,
@@ -847,9 +963,9 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
     ``,
     `data work._${num}_anchor;`,
     `  merge work._${num}_anchor_pe (where=(upcase(Variable) = 'EXPOSED') rename=(Estimate = fitted_log_or))`,
-    `        work._${num}_eff (keep=${isCostS ? "log_cr" : isCountS ? "log_rr" : "log_or"});`,
+    `        work._${num}_eff (keep=${isOlsS ? "mean_diff" : isCostS ? "log_cr" : isCountS ? "log_rr" : "log_or"});`,
     `  length anchor_verdict $48;`,
-    ...(isCostS ? [`  log_or = log_cr;`] : isCountS ? [`  log_or = log_rr;`] : []),
+    ...(isOlsS ? [`  log_or = mean_diff;`] : isCostS ? [`  log_or = log_cr;`] : isCountS ? [`  log_or = log_rr;`] : []),
     `  _gap = abs(fitted_log_or - log_or);`,
     `  if log_or = . then anchor_verdict = 'NOT CHECKABLE (a zero cell)';`,
     `  else if _gap < 1e-6 then anchor_verdict = 'PASS: saturated MLE = closed form';`,
@@ -865,7 +981,15 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
     `/*-------------------- the ADJUSTED model (SAS-primary) ----------------------*/`,
     `/* These estimates exist ONLY here: the SQL twin emits them NULL because`,
     `   fitting needs iteratively reweighted least squares. */`,
-    ...(isCountS
+    ...(isOlsS
+      ? [
+          `ods output ParameterEstimates = work._${num}_adj_pe;`,
+          `proc glm data=work._${num}_subj;`,
+          `  model y = exposed${p.covariates.length > 0 ? " " + p.covariates.map(sasVar).join(" ") : ""} / solution;`,
+          `run;`,
+          `quit;`,
+        ]
+      : isCountS
       ? [
           `ods output ParameterEstimates = work._${num}_adj_pe;`,
           `proc genmod data=work._${num}_subj;`,
@@ -901,6 +1025,30 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
     `  length measure $20 component $10 term $40 statistic $24 method $60;`,
     `  measure = "${MEASURE}";`,
     `  /* design */`,
+    ...(isOlsS
+      ? [
+          `  method='observed'; ci_low=.; ci_high=.; se_log=.;`,
+          `  component='design'; term="${sq(p.exposedLevel)}";   statistic='n';    ord=0; estimate=n_exp; output;`,
+          `  component='design'; term="${sq(p.exposedLevel)}";   statistic='mean'; ord=1; estimate=round(m_exp, 0.00001); output;`,
+          `  component='design'; term="${sq(p.exposedLevel)}";   statistic='sd';   ord=2; estimate=round(sqrt(v_exp), 0.00001); output;`,
+          `  component='design'; term="${sq(p.referenceLevel)}"; statistic='n';    ord=3; estimate=n_unexp; output;`,
+          `  component='design'; term="${sq(p.referenceLevel)}"; statistic='mean'; ord=4; estimate=round(m_unexp, 0.00001); output;`,
+          `  component='design'; term="${sq(p.referenceLevel)}"; statistic='sd';   ord=5; estimate=round(sqrt(v_unexp), 0.00001); output;`,
+          `  /* the interval is the NORMAL approximation; the exact one is Student t`,
+          `     on n-2 df, whose quantile needs an inverse CDF SQL does not have */`,
+          `  component='crude'; term="${sq(stratLabel(gvLabel))}"; statistic='mean_difference'; ord=10;`,
+          `  method='wald_normal_approx_pooled_sd';`,
+          `  estimate = round(mean_diff, 0.00001);`,
+          `  ci_low   = round(mean_diff - 1.96 * se_diff, 0.00001);`,
+          `  ci_high  = round(mean_diff + 1.96 * se_diff, 0.00001);`,
+          `  se_log   = round(se_diff, 0.00001);`,
+          `  output;`,
+          `  component='diagnostic'; term='interval'; statistic='residual_df'; ord=14;`,
+          `  estimate = b_en + d_un - 2; ci_low=.; ci_high=.; se_log=.;`,
+          `  method='exact interval is Student t on this df';`,
+          `  output;`,
+        ]
+      : [
     `  component='design'; term="${sq(p.exposedLevel)}";    statistic='n';      ord=0; estimate=n_exp;   method='observed'; ci_low=.; ci_high=.; se_log=.; output;`,
     `  component='design'; term="${sq(p.exposedLevel)}";    statistic='events'; ord=1; estimate=a_ee;    method='observed'; output;`,
     ...(isCountS
@@ -979,6 +1127,7 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
           `  output;`,
         ]
       : []),
+    ]),
     `  /* adjusted - the estimates the model above produced */`,
     `  estimate=.; ci_low=.; ci_high=.; se_log=.;`,
     `  component='adjusted'; statistic='${adjStatistic(an.family)}'; method="${adjMethod(an.family)}";`,

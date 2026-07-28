@@ -655,6 +655,31 @@ export const EXPECTED = {
     logCr: -1.54254,
     zeroCostExcluded: 2,
   },
+  /* OLS on the comorbidity score, hand-derived. The at-risk set is the same 8.
+   *
+   *   DRUG_X (reference)  P02 1, P03 2, P04 1, P05 3  -> mean 1.75, sample var 0.916667
+   *   DRUG_Y (exposed)    P07 0, P08 0, P09 0, P10 0  -> mean 0,    sample var 0
+   *
+   * OLS is the ONE family here whose standard error is also closed form:
+   *   mean difference = 0 - 1.75 = -1.75 EXACTLY
+   *   pooled var = (3*0 + 3*0.916667)/6 = 0.458333;  s_p = 0.677003
+   *   SE = s_p * sqrt(1/4 + 1/4) = 0.677003 * 0.707107 = 0.47871
+   *   normal-approx 95% CI = -1.75 +/- 1.96*0.47871 = (-2.68828, -0.81172)
+   *   residual df = 6, so the EXACT interval is t(6) = 2.447, 25% wider — which
+   *   is why the emitted label says normal approximation rather than implying
+   *   the model's own interval.
+   *
+   * DRUG_Y's variance is exactly zero, which is a real edge case: the pooled
+   * estimator must fall back on the other arm rather than divide by nothing. */
+  regressionOls: {
+    rowCount: 11, // 6 design + 1 crude + 1 diagnostic + 3 adjusted
+    design: {
+      exposed: { n: 4, mean: 0, sd: 0 },
+      reference: { n: 4, mean: 1.75, sd: 0.95743 },
+    },
+    meanDifference: { estimate: -1.75, ciLow: -2.68828, ciHigh: -0.81172, se: 0.47871 },
+    residualDf: 6,
+  },
   /* SMD balance, DRUG_X (reference) vs DRUG_Y, over the 10-patient cohort.
    *   ages X = 40,45,50,55,60 -> mean 50, sample variance 62.5
    *   ages Y = 45,50,55,60,65 -> mean 55, sample variance 62.5
@@ -996,6 +1021,22 @@ export const GOLD_A_SPEC: StudySpec = {
         settings: ["inpatient", "ed", "outpatient", "pharmacy"],
         costField: "paytot",
       },
+      groupVarId: "g_arm",
+      covariateIds: ["b_age", "b_sex"],
+    },
+    /* OLS on a continuous response — the comorbidity score, from the SAME
+     * shared scorer Table 1 and the balance table use.
+     *
+     * OLS is the one family where BOTH the coefficient and its standard error
+     * are closed form, so more of it is executed than of any other. Only the
+     * p-value and the exact t interval stay SAS-primary. */
+    {
+      id: "a_glm_ols", label: "Baseline comorbidity by arm (OLS)", kind: "regression", enabled: true,
+      family: "ols",
+      outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "outpatient", diagnosisPosition: "any" },
+      washout: { start: -365, end: 0, includesIndex: true },
+      horizonDays: 365,
+      continuousResponse: { source: "comorbidity_index", comorbidityIndexAnalysisId: "a_cci" },
       groupVarId: "g_arm",
       covariateIds: ["b_age", "b_sex"],
     },

@@ -171,6 +171,23 @@ const MUTATIONS: Mutation[] = [
     apply: (t) => t.replace(/round\(t_stat \/ sqrt\(var_t\)/, "round(t_stat / (var_t)"),
   },
   {
+    /* The pooled SE loses its weighting: with unequal arm variances this is a
+     * different, wrong standard error that still looks like one.
+     * /g because the emitter writes the pooled variance TWICE (once for the SD
+     * row, once inside the SE); replacing one occurrence leaves the other
+     * matching and the mutation reads as not-caught — the same
+     * partial-replacement trap the D3 spine mutation fell into. */
+    name: "SQL OLS pooled SE drops the degrees-of-freedom weighting",
+    kind: "regression", lang: "sql", pathMatch: /glm_a_glm_ols/,
+    apply: (t) => t.replace(/\(\(b_en - 1\) \* v_exp \+ \(d_un - 1\) \* v_unexp\)/g, "(v_exp + v_unexp)"),
+  },
+  {
+    // The coefficient becomes the difference of TOTALS rather than means.
+    name: "SAS OLS coefficient uses arm totals instead of arm means",
+    kind: "regression", lang: "sas", pathMatch: /glm_a_glm_ols/,
+    apply: (t) => t.replace(/mean_diff = m_exp - m_unexp;/, "mean_diff = a_ee - c_ue;"),
+  },
+  {
     /* Zero-cost subjects swept into the gamma fit. A gamma response must be
      * strictly positive, so this either fails at the site or — worse, if the
      * site's data has a floor — quietly changes which subjects the estimate

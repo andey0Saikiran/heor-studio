@@ -359,6 +359,10 @@ export interface RegressionAnalysis extends AnalysisCommon {
    *  dispersion parameter is not identified and the model collapses to Poisson.
    *  NB therefore requires "all_events". */
   recurrence?: Recurrence;
+  /** REQUIRED for ols: where the continuous response comes from. Only a
+   *  comorbidity-index score is derivable today; other sources are refused by
+   *  name rather than silently modelled as zero. */
+  continuousResponse?: { source: "comorbidity_index"; comorbidityIndexAnalysisId: string };
   /** REQUIRED for gamma_log: where the per-subject COST response comes from.
    *  Read through the shared claim-line ledger, so the model's response is the
    *  same quantity the resource-use table reports — including the inpatient
@@ -939,12 +943,18 @@ export function validateAnalyses(spec: StudySpec): string[] {
          * construct and would otherwise produce a complete-looking model of the
          * wrong thing. */
         const COUNT_FAMILIES = ["poisson", "negative_binomial"];
-        if (!["logistic", "poisson", "negative_binomial", "gamma_log"].includes(a.family))
-          problems.push(
-            `${w}: regression family "${a.family}" is not emitted yet — "logistic", "poisson", "negative_binomial" and "gamma_log" are built. ` +
-              `An OLS model needs a continuous response this emitter does not construct. ` +
-              `Disable the analysis to keep it visible as planned work.`
-          );
+        if (a.family === "ols") {
+          if (!a.continuousResponse)
+            problems.push(`${w}: an ols regression requires continuousResponse — without it there is no response to model.`);
+          else {
+            const src = a.continuousResponse.comorbidityIndexAnalysisId;
+            if (!spec.analyses.some((x) => x.id === src && x.kind === "comorbidity_index" && x.enabled))
+              problems.push(`${w}: continuousResponse names "${src}", which is not an ENABLED comorbidity_index analysis.`);
+            if (a.covariateIds.some((c) => findBaseline(spec, c)?.comorbidityIndexAnalysisId === src))
+              problems.push(`${w}: the comorbidity index is both the RESPONSE and a covariate — the model would regress a variable on itself.`);
+          }
+          if (a.personTimeRule) problems.push(`${w}: an ols model takes no person-time offset.`);
+        }
         if (a.family === "gamma_log") {
           if (!a.costResponse)
             problems.push(`${w}: a gamma_log regression requires costResponse — without it there is no continuous response to model.`);

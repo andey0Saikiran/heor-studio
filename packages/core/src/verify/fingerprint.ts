@@ -320,6 +320,14 @@ function sqlFingerprint(kind: string, raw: string): Fingerprint {
       /* A COUNT response has no "non-event" cell: a_ee is the SUM of counts,
        * not a tally of subjects. Checking it against the indicator algebra
        * would fail a correct program. */
+      /* OLS: BOTH the coefficient and its SE are closed form here, which is
+       * true of no other family, so both are fingerprinted. */
+      if (/COALESCE\(rp\.score, 0\) AS DOUBLE PRECISION\) AS y/i.test(sql)) {
+        put(fp, "ols_diff_of_means", /\(m_exp - m_unexp\) AS mean_diff/i.test(sql) ? "yes" : "no");
+        put(fp, "ols_pooled_se",
+          /\(\(b_en - 1\) \* v_exp \+ \(d_un - 1\) \* v_unexp\)/i.test(sql) && /1\.0\/NULLIF\(b_en, 0\) \+ 1\.0\/NULLIF\(d_un, 0\)/i.test(sql) ? "yes" : "no");
+        put(fp, "ols_interval_is_normal_approx", /'wald_normal_approx_pooled_sd'/i.test(sql) ? "yes" : "no");
+      }
       if (/COALESCE\(cp\.cost, 0\) AS y/i.test(sql)) {
         put(fp, "cell_a", /SUM\(CASE WHEN exposed = 1 AND y > 0 THEN y ELSE 0 END\) AS a_ee/i.test(sql) ? "yes" : "no");
         put(fp, "cell_d", /SUM\(CASE WHEN exposed = 0 AND y > 0 THEN 1 ELSE 0 END\) AS d_un/i.test(sql) ? "yes" : "no");
@@ -535,6 +543,12 @@ function sasFingerprint(kind: string, rawSas: string, setup: string): Fingerprin
       }
       put(fp, "exposed_level", grab(sas, [/when a\.arm = '([^']+)' then 1/i]));
       put(fp, "arm_levels", (sas.match(/in \('([^']+)', '([^']+)'\)/i) ?? []).slice(1).join(","));
+      if (/coalesce\(rsp\.score, 0\) as y/i.test(sas)) {
+        put(fp, "ols_diff_of_means", /mean_diff = m_exp - m_unexp;/i.test(sas) ? "yes" : "no");
+        put(fp, "ols_pooled_se",
+          /\(\(b_en - 1\)\*v_exp \+ \(d_un - 1\)\*v_unexp\) \/ \(b_en \+ d_un - 2\)/i.test(sas) && /sqrt\(1\/b_en \+ 1\/d_un\)/i.test(sas) ? "yes" : "no");
+        put(fp, "ols_interval_is_normal_approx", /wald_normal_approx_pooled_sd/i.test(sas) ? "yes" : "no");
+      }
       if (/coalesce\(cst\.cost, 0\) as y/i.test(sas)) {
         put(fp, "cell_a", /sum\(case when exposed = 1 and y > 0 then y else 0 end\) as a_ee/i.test(sas) ? "yes" : "no");
         put(fp, "cell_d", /sum\(case when exposed = 0 and y > 0 then 1 else 0 end\) as d_un/i.test(sas) ? "yes" : "no");
@@ -562,8 +576,8 @@ function sasFingerprint(kind: string, rawSas: string, setup: string): Fingerprin
       /* SAS-PRIMARY (language-local), plus the ANCHOR. The saturated model and
        * the self-check are what make the fitted estimates trustworthy at all;
        * losing either leaves a column of numbers nothing ever validated. */
-      // logistic fits with PROC LOGISTIC, poisson with PROC GENMOD
-      put(fp, "adjusted_fitted_in_sas", /proc (logistic|genmod)/i.test(sas) && /_adj_pe/i.test(sas) ? "yes" : "no");
+      // logistic -> PROC LOGISTIC, count/cost -> PROC GENMOD, ols -> PROC GLM
+      put(fp, "adjusted_fitted_in_sas", /proc (logistic|genmod|glm)/i.test(sas) && /_adj_pe/i.test(sas) ? "yes" : "no");
       put(fp, "saturated_anchor_present",
         /model y = exposed\s*(;|\/)/i.test(sas) && /anchor_verdict/i.test(sas) ? "yes" : "no");
       break;
@@ -826,8 +840,9 @@ export function expectedFromStamp(kind: string, stamp: Record<string, unknown>):
        * that matters is costResponse's. Expecting a horizon in the code would
        * fail a correct gamma program. */
       const isCostStamp = stamp.responseKind === "cost";
+      const isOlsStamp = stamp.responseKind === "continuous";
       const h = num(stamp.horizonDays);
-      if (h && !isCostStamp) exp.horizon_days = h;
+      if (h && !isCostStamp && !isOlsStamp) exp.horizon_days = h;
       if (typeof stamp.exposedLevel === "string") exp.exposed_level = stamp.exposedLevel;
       if (typeof stamp.referenceLevel === "string" && typeof stamp.exposedLevel === "string")
         exp.arm_levels = `${stamp.referenceLevel},${stamp.exposedLevel}`;
@@ -847,9 +862,17 @@ export function expectedFromStamp(kind: string, stamp: Record<string, unknown>):
        * code has to actually be those things — but WHICH closed form depends on
        * the family. An offset in the stamp means a rate model, and a rate model
        * must not be checked against the odds-ratio algebra. */
-      if (typeof stamp.responseKind === "string" && !isCostStamp)
+      if (typeof stamp.responseKind === "string" && !isCostStamp && !isOlsStamp)
         exp.response_is_count = stamp.responseKind === "count" ? "yes" : "no";
       if (stamp.crudeEffect === "closed_form_2x2") {
+        if (isOlsStamp) {
+          /* OLS is the one family whose STANDARD ERROR is closed form too, so
+           * the stamp requires both halves of the saturated result. */
+          exp.ols_diff_of_means = "yes";
+          exp.ols_pooled_se = "yes";
+          exp.ols_interval_is_normal_approx = "yes";
+          break;
+        }
         exp.cell_a = "yes";
         exp.cell_d = "yes";
         if (isCostStamp) {
