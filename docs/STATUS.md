@@ -1,7 +1,8 @@
 # HEOR Studio — Status & Roadmap
 
 _Snapshot of what exists vs what's left. Last updated 2026-07-28 (after Analysis Waves
-1.6 and 2 — calendar trend and the claim-line ledger; **525 harness checks**). See
+1.6, 2 and 2.1 — calendar trend, the claim-line ledger, and the comorbidity-index
+engine; **561 harness checks**). See
 `docs/NIGHT-REPORT-2026-07-26.md` for the overnight build and **`docs/PENDING.md`
 for the audited, authoritative roadmap** — a 9-agent audit found 151 pending items
 and corrected several claims previously made here)._
@@ -43,7 +44,7 @@ Everything below is committed and pushed unless noted.
 - **Outcome care-setting filter** applied in both twins (shared `outcomeSettingPlan`), with a planted inpatient negative control.
 - **Honest labeling:** unimplemented options (Clopper-Pearson, Wald, KM, competing risk, minClaims>1, dx-position) → computed-with-closest-method + visible `REVIEW` note in both languages.
 
-### Verification harness (the "machine-verified" engine) — **525 passing checks**
+### Verification harness (the "machine-verified" engine) — **561 passing checks**
 _(the figure once quoted as 207 was miscounted — a live run printed 206. Waves 0-4 took it to 308.)_
 - PGlite (real Postgres-16 wasm) executes the **actual emitted SQL** against a 12-patient synthetic MarketScan fixture with hand-computed ground truth.
 - **Gold Case A passes:** spine 12→11→10; incidence 3/8/2425/451.86/Byar CI + 6 stratum rows; point prevalence 4/10 + 7 strata; period prevalence 3/10 + 6 strata; cumulative incidence 3/8 = 0.375 Wilson (0.13684, 0.69426) + strata; plus zero-denominator and horizon-bound edge cases.
@@ -130,7 +131,7 @@ Each has a real prerequisite — deliberately left for an awake session (see NIG
 
 ## Analysis Waves 1.6 + 2 (2026-07-28) — 8 analyses now verified
 
-**Score: 9 of 69 done, 3 partial.** Harness: **525 checks, 0 failing** (was 396).
+**Score: 10 of 69 done, 3 partial.** Harness: **561 checks, 0 failing** (was 396).
 
 ### Calendar trend (`4758e5a`) — the 7th analysis
 Cochran-Armitage over calendar buckets. The statistic **z is closed form, computed
@@ -185,23 +186,31 @@ encounters over 10 members, $18,600 total, mean $1,860 vs median $350.
 added; all 440 previously-pinned checks still passed on the fixture change ALONE,
 before any module existed to read it.
 
-### Not shipped tonight, and why
+### Comorbidity index (`e3df312`) — the 9th, and a refusal at its centre
 
-**Charlson comorbidity index.** The build plan puts it early because it is
-simultaneously a Table 1 row, an SMD covariate and a regression adjustment. It is
-NOT shipped because the weights could not be cross-source verified: Wikipedia
-renders "uncontrolled diabetes" at weight 3, while the Deyo/Quan administrative
-implementations score *diabetes with chronic complications* at 2. That is exactly
-the class of plausible-but-wrong constant this project exists to prevent, and the
-same discipline that produced `STANDARD_POPULATIONS_PENDING` applies: refuse with
-a citation rather than substitute.
+Shipped as a general weighted-index **engine**, not a Charlson module. The
+scoring — ascertain in a lookback, apply a hierarchy so a severe condition's
+weight REPLACES its milder form, sum — is identical across every index and is
+where the errors live. The weights and codes are published research.
 
-To transcribe and sum-check before building: **Quan H, et al. Med Care
-2005;43(11):1130-9** (ICD-10 coding algorithms) and **Deyo RA, et al. J Clin
-Epidemiol 1992;45(6):613-9** (the 17-category adaptation and its weights).
+**The weights are NOT bundled**, because the sources disagree: a general survey
+puts "uncontrolled diabetes" at 3, while the Deyo/Quan administrative
+implementations score *diabetes with chronic complications* at 2. Bundling either
+would be a plausible-looking constant shifting every adjusted estimate
+downstream, invisibly. Same discipline as `STANDARD_POPULATIONS_PENDING`: refuse
+with a citation.
 
-Note also that the ICD-10 code sets themselves run to hundreds of codes and
-belong to the analyst, not to the emitter — `CodeList` already carries per-code
-`source`/`verified` flags for exactly this reason. The right shape is a general
-weighted-index engine whose conditions, weights and hierarchy (`supersedes`) come
-from the reviewed spec, with Charlson as one verified template.
+To transcribe and sum-check: **Quan H, et al. Med Care 2005;43(11):1130-9**
+(ICD-10 algorithms) and **Deyo RA, et al. J Clin Epidemiol 1992;45(6):613-9**
+(the 17-category adaptation and its weights).
+
+`supersedes` is declared per condition, so Charlson, Elixhauser or a bespoke
+index all run on one emitter. A superseded condition still reports its
+**prevalence** — only its weight is withheld. Verified with both hierarchy
+directions planted: P03 (diabetes uncomplicated + complicated) scores 2 not 3;
+P05 (liver mild + severe) scores 3 not 4; cohort mean 1.1, and the failure
+signature (1.3, the flat sum) is pinned beside it.
+
+**Still open:** wiring the per-patient score into Table 1, the SMD balance table
+and regression adjustment needs cohort-spine work — that is what unblocks the
+three families the build plan names.
