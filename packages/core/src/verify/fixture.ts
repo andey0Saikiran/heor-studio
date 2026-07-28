@@ -519,9 +519,17 @@ export const EXPECTED = {
    * Sex: X has sex 1,2,1,2,1 -> 3/5 male = 0.6; Y has 1,2,1,2,1 -> 3/5 male = 0.6
    *   (P06=1, P07=2, P08=1, P09=2, P10=1), so p_ref = p_oth and SMD(sex) = 0. */
   balance: {
-    rowCount: 2,
+    rowCount: 3,
     age: { nRef: 5, nOth: 5, valueRef: 50, valueOth: 55, smd: -0.63246, imbalanced: 1 },
     sex: { nRef: 5, nOth: 5, valueRef: 0.6, valueOth: 0.6, smd: 0, imbalanced: 0 },
+    /* Comorbidity index, X vs Y, from the SAME scores the index analysis
+     * reports (P01..P05 = 1,1,2,1,3; P06..P10 = 3,0,0,0,0):
+     *   X mean 8/5 = 1.6, sample variance 3.2/4 = 0.8
+     *   Y mean 3/5 = 0.6, sample variance 7.2/4 = 1.8
+     *   SMD = (1.6 - 0.6) / sqrt((0.8 + 1.8)/2) = 1 / sqrt(1.3) = 0.87706
+     * Strongly imbalanced, which is the point: an unadjusted comparison of
+     * these arms would be confounded by baseline comorbidity. */
+    cci: { nRef: 5, nOth: 5, valueRef: 1.6, valueOth: 0.6, smd: 0.87706, imbalanced: 1 },
   },
 } as const;
 
@@ -578,6 +586,11 @@ export const GOLD_A_SPEC: StudySpec = {
     { id: "b_region", label: "Region", kind: "region", dataType: "categorical" },
     { id: "b_plan", label: "Plan type", kind: "plan_type", dataType: "categorical" },
     { id: "b_year", label: "Index year", kind: "year", dataType: "categorical" },
+    /* Derived from the a_cci index analysis, referenced by id so there is ONE
+     * definition of the index in this spec. Table 1 and the balance table both
+     * score it through the SHARED scorer, so they cannot disagree with the
+     * index analysis about what P03 or P05 scored. */
+    { id: "b_cci", label: "Comorbidity index", kind: "comorbidity_index", comorbidityIndexAnalysisId: "a_cci", dataType: "continuous" },
   ],
   outcomes: [],
   /* Exposure arms for the balance table: the index code list holds both drugs,
@@ -774,7 +787,7 @@ export const GOLD_A_SPEC: StudySpec = {
     {
       id: "a_balance", label: "Baseline balance, X vs Y", kind: "statistical_engine", enabled: true,
       comparisonIds: [],
-      smdBalance: { groupVarId: "g_arm", covariateIds: ["b_age", "b_sex"], imbalanceThreshold: 0.1, reportWeighted: false },
+      smdBalance: { groupVarId: "g_arm", covariateIds: ["b_age", "b_sex", "b_cci"], imbalanceThreshold: 0.1, reportWeighted: false },
       multiplicity: { method: "none", alpha: 0.05, appliesToRoles: ["primary"] },
     },
   ],

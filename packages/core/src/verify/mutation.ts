@@ -166,6 +166,22 @@ const MUTATIONS: Mutation[] = [
     apply: (t) => t.replace(/round\(t_stat \/ sqrt\(var_t\)/, "round(t_stat / (var_t)"),
   },
   {
+    /* THE EXACT BUG the axis-vs-measure keying prevents: a second CONTINUOUS
+     * covariate reading age's moments. The balance table then reports age's SMD
+     * twice, once labelled "Comorbidity index", and every number in it is a
+     * real number correctly computed from the wrong variable. */
+    name: "SAS balance reads AGE's moments for the comorbidity index",
+    kind: "smd_balance", lang: "sas",
+    apply: (t) => t.replace(/value_ref = round\(cci_m_ref/, "value_ref = round(age_m_ref"),
+  },
+  {
+    // The balance table stops applying the hierarchy while the index analysis
+    // keeps applying it: two comorbidity means for one cohort.
+    name: "SQL balance scores the comorbidity index WITHOUT the hierarchy",
+    kind: "smd_balance", lang: "sql",
+    apply: (t) => t.replace(/THEN 0 ELSE cd\.weight END AS weight_applied/, "THEN cd.weight ELSE cd.weight END AS weight_applied"),
+  },
+  {
     /* THE INPATIENT DOUBLE COUNT. Breaking the CASEID match lets a stay's own
      * service lines back in alongside the admission total that already contains
      * them — on the fixture, $15,000 becomes $22,000, and every number in the

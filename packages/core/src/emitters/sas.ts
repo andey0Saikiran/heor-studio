@@ -40,6 +40,7 @@ import {
 } from "./sas-base";
 import type { Ctx, ListKind, PulledList, SiteNaming } from "./sas-base";
 import { moduleAnalyses } from "./modules/registry";
+import { comorbidityScoreSasScore, comorbidityScoreSasSteps, indexAnalysisFor } from "./comorbidity";
 import { suppressionPolicy, suppressionSasFor, type SuppressionTarget } from "./suppression";
 import { ascertainmentWindow } from "./parity";
 
@@ -1592,6 +1593,37 @@ function baselineProgram(ctx: Ctx): GeneratedFile | null {
           `title "Table 1 - ${label} (baseline flag)";`,
           `proc freq data=work._070_flag_${flag};`,
           `  tables ${flag} / missing;`,
+          `run;`,
+          ``
+        );
+        break;
+      }
+      case "comorbidity_index": {
+        const idxAn = indexAnalysisFor(spec, b.comorbidityIndexAnalysisId);
+        if (!idxAn) {
+          lines.push(
+            `/* ${label}: comorbidityIndexAnalysisId "${cmt(b.comorbidityIndexAnalysisId ?? "(unset)")}" does not`,
+            `   name an enabled comorbidity_index analysis - resolve in the HEOR`,
+            `   Studio workbench and regenerate. */`,
+            ``
+          );
+          break;
+        }
+        /* Same shared scorer as the SQL twin, the index analysis and the
+         * balance table (emitters/comorbidity.ts). The work-table stem is
+         * per-characteristic so several indices can coexist in one Table 1. */
+        const stem = `070${sasName(b.id).toLowerCase()}`;
+        const sc = comorbidityScoreSasSteps(ctx, { an: idxAn, num: stem, cohT, evOf: ctx.evOf });
+        lines.push(
+          `/* ${label}: comorbidity index "${cmt(idxAn.indexName)}" - weights and`,
+          `   hierarchy come from the reviewed spec, scored by the shared engine so`,
+          `   this row cannot disagree with the index analysis or the balance table. */`,
+          ...sc.lines,
+          ...comorbidityScoreSasScore(stem, cohT),
+          `/* PCTLDEF=5 reproduces the SQL twin's PERCENTILE_CONT at p = 0.5 */`,
+          `title "Table 1 - ${label} (index score)";`,
+          `proc univariate data=${sc.scoreTable} pctldef=5;`,
+          `  var score;`,
           `run;`,
           ``
         );

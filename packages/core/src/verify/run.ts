@@ -515,11 +515,27 @@ export async function verifyGoldA(): Promise<VerificationResult> {
       approx(`balance ${tag}: SMD = ${w.smd}`, Number(r.smd), w.smd, 0.00001);
       eq(`balance ${tag}: imbalance flag = ${w.imbalanced}`, Number(r.imbalanced), w.imbalanced);
     };
-    checkBal("age (imbalanced by construction)", balRows.find((r) => r.measure === "continuous"), bal.age);
-    checkBal("sex (balanced by construction)", balRows.find((r) => r.measure === "binary"), bal.sex);
+    /* Rows are located by CHARACTERISTIC, not by measure. They were found by
+     * measure until a second CONTINUOUS covariate (the comorbidity index)
+     * joined the table, at which point "the continuous row" stopped naming one
+     * row — it kept working only because "Age at index" sorts before
+     * "Comorbidity index". Accidentally correct is not correct. */
+    const byName = (name: string) => balRows.find((r) => r.characteristic === name);
+    checkBal("age (imbalanced by construction)", byName("Age at index"), bal.age);
+    checkBal("sex (balanced by construction)", byName("Sex"), bal.sex);
+    checkBal("comorbidity index (imbalanced by construction)", byName("Comorbidity index"), bal.cci);
     // the pinned fixture constant and the executed module must agree
     approx("balance: executed SMD reproduces the frozen EXPECTED.smdAge",
-      Number(balRows.find((r) => r.measure === "continuous")?.smd ?? NaN), EXPECTED.smdAge, 0.00001);
+      Number(byName("Age at index")?.smd ?? NaN), EXPECTED.smdAge, 0.00001);
+    /* The index SMD must be computed from the SAME per-patient scores the index
+     * analysis reports. Recomputing 1.6 vs 0.6 from those scores by hand is the
+     * check; that both come from ONE shared scorer is why it holds. */
+    checks.push({
+      name: "balance: the comorbidity SMD is scored by the SAME engine as the index analysis",
+      status: Math.abs(Number(byName("Comorbidity index")?.value_ref ?? NaN) - bal.cci.valueRef) < 0.0001
+        && Math.abs(Number(byName("Comorbidity index")?.value_oth ?? NaN) - bal.cci.valueOth) < 0.0001 ? "pass" : "fail",
+      detail: `arm means ${byName("Comorbidity index")?.value_ref} vs ${byName("Comorbidity index")?.value_oth}; cohort mean ${EXPECTED.comorbidityIndex.index.mean} = (5*${bal.cci.valueRef} + 5*${bal.cci.valueOth})/10`,
+    });
 
     /* ---- direct age standardization (executed vs hand-computed) ----
      * Bands [45,55,65] cover the whole at-risk cohort, so the DSR is exact:
@@ -680,6 +696,36 @@ export async function verifyGoldA(): Promise<VerificationResult> {
       status: Number(all?.paid_per_patient) > Number(all?.paid_median) * 2 ? "pass" : "fail",
       detail: `mean $${Number(all?.paid_per_patient).toLocaleString()} vs median $${Number(all?.paid_median).toLocaleString()}`,
     });
+
+    /* ---- Table 1 comorbidity-index row (executed) ----
+     * The row is scored by the SAME shared engine as the index analysis and the
+     * balance table, so this asserts the wiring rather than the arithmetic:
+     * Table 1 must agree with tz_study_cci to the rounding Table 1 applies. */
+    const t1cci = (
+      await rows<{ n_patients: number; mean_val: number; sd_val: number; median_val: number }>(
+        db,
+        `SELECT n_patients, mean_val::float8, sd_val::float8, median_val::float8
+           FROM tz_study_table1 WHERE characteristic = 'Comorbidity index'`,
+      )
+    )[0];
+    if (!t1cci) {
+      checks.push({ name: "table1: comorbidity-index row exists", status: "fail", detail: "no 'Comorbidity index' row in tz_study_table1" });
+    } else {
+      eq("table1 comorbidity index: scored over the whole cohort", Number(t1cci.n_patients), EXPECTED.finalCohortN);
+      approx("table1 comorbidity index: mean = 1.1 (agrees with the index analysis)", Number(t1cci.mean_val), EXPECTED.comorbidityIndex.index.mean, 0.05);
+      approx("table1 comorbidity index: median = 1", Number(t1cci.median_val), EXPECTED.comorbidityIndex.index.median, 0.05);
+      /* The point of the shared scorer, asserted directly: Table 1 and the
+       * index analysis are two independently-emitted programs reading two
+       * different tables, and they must not disagree about the same cohort. */
+      const cciMean = Number(
+        (await rows<{ score_mean: number }>(db, `SELECT score_mean::float8 FROM tz_study_cci WHERE component = 'index'`))[0]?.score_mean,
+      );
+      checks.push({
+        name: "table1 and the index analysis report the SAME comorbidity mean (one shared scorer)",
+        status: Math.abs(Number(t1cci.mean_val) - Number(cciMean.toFixed(1))) < 0.001 ? "pass" : "fail",
+        detail: `Table 1 ${t1cci.mean_val} vs index analysis ${cciMean} (Table 1 rounds to 1dp)`,
+      });
+    }
 
     /* ---- weighted comorbidity index (executed vs hand-derived) ----
      * The hierarchy is the whole point: without it P03 scores 3 instead of 2

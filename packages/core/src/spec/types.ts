@@ -97,8 +97,13 @@ export interface EnrollmentRule {
 export interface BaselineCharacteristic {
   id: string;
   label: string;
-  kind: "age" | "sex" | "region" | "plan_type" | "year" | "comorbidity" | "medication" | "utilization";
+  kind: "age" | "sex" | "region" | "plan_type" | "year" | "comorbidity" | "medication" | "utilization" | "comorbidity_index";
   codeListId?: string;         // for comorbidity/medication kinds
+  /** for kind "comorbidity_index": the ComorbidityIndexAnalysis whose score this
+   *  characteristic reports. Referenced by id rather than redefined, so the
+   *  index has ONE definition in the spec and Table 1, the balance table and the
+   *  index analysis itself cannot disagree about what it is. */
+  comorbidityIndexAnalysisId?: string;
   window?: RelativeWindow;     // default: the baseline period
   /** Optional (V1): drives Table 1 formatting, SMD, and covariate adjustment.
    *  Readiness WARNS (not blocks) when absent for a variable used as a covariate. */
@@ -717,6 +722,23 @@ export function validateAnalyses(spec: StudySpec): string[] {
     }
     return ids;
   };
+
+  /* A comorbidity-index characteristic must name an ENABLED index analysis.
+   * The reference is what keeps ONE definition of the index in the spec — a
+   * dangling one would leave Table 1 and the balance table silently without
+   * the row rather than loudly without a target. */
+  const enabledIndexIds = new Set(
+    spec.analyses.filter((a) => a.kind === "comorbidity_index" && a.enabled).map((a) => a.id)
+  );
+  for (const b of spec.baseline) {
+    if (b.kind !== "comorbidity_index") continue;
+    if (!b.comorbidityIndexAnalysisId)
+      problems.push(`Baseline "${b.id}": kind "comorbidity_index" requires comorbidityIndexAnalysisId naming the index analysis to score.`);
+    else if (!enabledIndexIds.has(b.comorbidityIndexAnalysisId))
+      problems.push(
+        `Baseline "${b.id}": comorbidityIndexAnalysisId "${b.comorbidityIndexAnalysisId}" does not name an ENABLED comorbidity_index analysis — Table 1 and the balance table would have no index to score.`
+      );
+  }
 
   const seenOut = new Set<string>();
   for (const o of outcomes) {

@@ -34,8 +34,14 @@
 import type { ComorbidityIndexAnalysis } from "../../spec/types";
 import type { GeneratedFile } from "../types";
 import type { AnalysisModule, SqlCtx, SasCtx, SqlModuleFile } from "./types";
-import { oneLine, q, windowConds } from "../sql-base";
-import { cmt, header, levelCheck, sq, windowConds as sasWindowConds, INCLUDE_SETUP } from "../sas-base";
+import { oneLine, q } from "../sql-base";
+import { cmt, header, levelCheck, sq, INCLUDE_SETUP } from "../sas-base";
+import {
+  comorbidityScoreSasScore,
+  comorbidityScoreSasSteps,
+  comorbidityScoreSqlCtes,
+  supersessionPairs,
+} from "../comorbidity";
 import {
   comorbidityIndexLimitations,
   comorbidityIndexParity,
@@ -45,13 +51,6 @@ import {
 } from "../parity";
 
 const MEASURE = "comorbidity_index";
-
-/** winner -> loser pairs, flattened from every condition's `supersedes`. */
-export function supersessionPairs(an: ComorbidityIndexAnalysis): Array<{ winner: string; loser: string }> {
-  const out: Array<{ winner: string; loser: string }> = [];
-  for (const c of an.conditions) for (const loser of c.supersedes ?? []) out.push({ winner: c.id, loser });
-  return out;
-}
 
 /* ================================================================== *
  *  SQL twin
@@ -77,50 +76,10 @@ function sqlComorbidityIndex(ctx: SqlCtx, an: ComorbidityIndexAnalysis, suffix: 
 
   L.push(d.createTableAs(out));
   L.push(`WITH cohort AS (SELECT enrolid, index_date FROM ${wp}_cohort),`);
-  L.push(`cond AS (   -- condition definitions, as declared in the spec`);
-  an.conditions.forEach((c, i) => {
-    const head = i === 0 ? `  ` : `  UNION ALL `;
-    // Aliases repeated on every branch: redundant to SQL, but it makes the row
-    // unambiguously scrapeable by the fingerprint (a label containing a comma
-    // otherwise looks exactly like the next column).
-    L.push(`${head}SELECT '${q(c.id)}' AS cond_id, '${q(c.label)}' AS cond_label, ${c.weight} AS weight, ${i} AS cond_ord`);
-  });
-  L.push(`),`);
-  L.push(`sup AS (   -- hierarchy: the winner's presence withholds the loser's WEIGHT`);
-  if (pairs.length === 0) {
-    L.push(`  -- no supersession declared for this index`);
-    L.push(`  SELECT CAST(NULL AS VARCHAR) AS winner, CAST(NULL AS VARCHAR) AS loser WHERE 1 = 0`);
-  } else {
-    pairs.forEach((p, i) => {
-      const head = i === 0 ? `  ` : `  UNION ALL `;
-      L.push(`${head}SELECT '${q(p.winner)}' AS winner, '${q(p.loser)}' AS loser`);
-    });
-  }
-  L.push(`),`);
-  L.push(`has AS (   -- one row per member per condition present in the lookback`);
-  an.conditions.forEach((c, i) => {
-    const w = windowConds(an.lookback, "e.event_date", "c.index_date", d);
-    const head = i === 0 ? `  ` : `  UNION ALL `;
-    L.push(`${head}SELECT DISTINCT c.enrolid, '${q(c.id)}'${i === 0 ? ` AS cond_id` : ``}`);
-    L.push(`  FROM cohort c JOIN ${wp}_events e ON e.enrolid = c.enrolid`);
-    L.push(`   AND e.code_list_id = '${q(c.codeListId)}'`);
-    for (const cond of w) L.push(`   AND ${cond}`);
-  });
-  L.push(`),`);
-  L.push(`applied AS (   -- weight actually contributed, after the hierarchy`);
-  L.push(`  SELECT h.enrolid, h.cond_id, cd.weight,`);
-  L.push(`         CASE WHEN EXISTS (`);
-  L.push(`                SELECT 1 FROM sup s`);
-  L.push(`                JOIN has h2 ON h2.enrolid = h.enrolid AND h2.cond_id = s.winner`);
-  L.push(`                WHERE s.loser = h.cond_id)`);
-  L.push(`              THEN 0 ELSE cd.weight END AS weight_applied`);
-  L.push(`  FROM has h JOIN cond cd ON cd.cond_id = h.cond_id`);
-  L.push(`),`);
-  L.push(`per_pt AS (   -- every cohort member scores, including the zeros`);
-  L.push(`  SELECT c.enrolid, COALESCE(SUM(a.weight_applied), 0) AS score`);
-  L.push(`  FROM cohort c LEFT JOIN applied a ON a.enrolid = c.enrolid`);
-  L.push(`  GROUP BY c.enrolid`);
-  L.push(`),`);
+  // ONE implementation of the scoring, shared with Table 1 and the SMD table
+  // (emitters/comorbidity.ts) — three copies would be three chances to disagree.
+  const score = comorbidityScoreSqlCtes(ctx, { wp, an, cohortCte: "cohort" });
+  L.push(...score.lines);
   const bandCase = (val: (b: { lower: number; label: string }, i: number) => string): string => {
     const arms = bands
       .map((b, i) => ({ b, i }))
@@ -133,7 +92,7 @@ function sqlComorbidityIndex(ctx: SqlCtx, an: ComorbidityIndexAnalysis, suffix: 
   L.push(`  SELECT enrolid, score,`);
   L.push(`         ${bandCase((b) => `'${q(b.label)}'`)} AS band,`);
   L.push(`         ${bandCase((_b, i) => String(i))} AS band_ord`);
-  L.push(`  FROM per_pt`);
+  L.push(`  FROM ${score.scoreCte}`);
   L.push(`),`);
   L.push(`n AS (SELECT COUNT(*) AS denominator FROM cohort)`);
   L.push(`SELECT '${MEASURE}' AS measure, component, category, ord, patients, denominator,`);
@@ -169,7 +128,7 @@ function sqlComorbidityIndex(ctx: SqlCtx, an: ComorbidityIndexAnalysis, suffix: 
   L.push(`         PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY CAST(score AS DOUBLE PRECISION)),`);
   L.push(`         MAX(CAST(score AS DOUBLE PRECISION)),`);
   L.push(`         '${q(an.indexName)}'`);
-  L.push(`  FROM per_pt`);
+  L.push(`  FROM ${score.scoreCte}`);
   L.push(`) u`);
   L.push(`ORDER BY ord;`);
   L.push("");
@@ -201,6 +160,8 @@ function sasComorbidityIndex(ctx: SasCtx, an: ComorbidityIndexAnalysis, num: str
   const bands = scoreBandLabels(an.scoreBands);
   const limits = comorbidityIndexLimitations(an);
   const label = an.label.replace(/"/g, "'");
+  // same shared scorer the SQL twin and (later) Table 1 / SMD use
+  const score = comorbidityScoreSasSteps(ctx, { an, num, cohT, evOf: ctx.evOf });
 
   const lines: string[] = [
     ...header(spec, `${num}_cci${suffix}.sas`, [
@@ -226,70 +187,10 @@ function sasComorbidityIndex(ctx: SasCtx, an: ComorbidityIndexAnalysis, num: str
     `  delete ${outT.replace("tz.", "")};`,
     `quit;`,
     ``,
-    `/*-------------------- condition definitions (from the spec) -----------------*/`,
-    `data work._${num}_cond;`,
-    `  length cond_id $32 cond_label $60;`,
-    ...an.conditions.map(
-      (c, i) => `  cond_id = "${sq(c.id)}"; cond_label = "${sq(c.label)}"; weight = ${c.weight}; cond_ord = ${i}; output;`,
-    ),
-    `run;`,
-    ``,
-    `/*-------------------- supersession hierarchy --------------------------------*/`,
-    `/* A winner's presence withholds the loser's WEIGHT. The loser's prevalence is`,
-    `   still reported - a scoring convention must not hide a clinical fact. */`,
-    `data work._${num}_sup;`,
-    `  length winner $32 loser $32;`,
-    ...(pairs.length === 0
-      ? [`  /* no supersession declared for this index */`, `  stop;`]
-      : pairs.map((p) => `  winner = "${sq(p.winner)}"; loser = "${sq(p.loser)}"; output;`)),
-    `run;`,
-    ``,
-    `/*-------------------- conditions present in the lookback --------------------*/`,
-    `proc datasets lib=work nolist nowarn; delete _${num}_has; quit;`,
-    ``,
-    ...an.conditions.flatMap((c) => [
-      `proc sql;`,
-      `  create table work._${num}_h as`,
-      `  select distinct a.enrolid, "${sq(c.id)}" as cond_id length=32`,
-      `  from ${cohT} as a`,
-      `  inner join ${ctx.evOf(c.codeListId)} as e`,
-      `    on  e.enrolid = a.enrolid`,
-      ...sasWindowConds(an.lookback, "e").map((l) => `    ${l}`),
-      `  ;`,
-      `quit;`,
-      ``,
-      `proc append base=work._${num}_has data=work._${num}_h force;`,
-      `run;`,
-      ``,
-    ]),
+    ...score.lines,
     ...levelCheck(`work._${num}_has`, "member x condition rows"),
     ``,
-    `/*-------------------- apply the hierarchy, then score ------------------------*/`,
-    `proc sql;`,
-    `  create table work._${num}_applied as`,
-    `  select h.enrolid, h.cond_id, cd.weight,`,
-    `         case when exists (`,
-    `                select 1 from work._${num}_sup as s`,
-    `                inner join work._${num}_has as h2`,
-    `                  on  h2.enrolid = h.enrolid`,
-    `                  and h2.cond_id = s.winner`,
-    `                where s.loser = h.cond_id)`,
-    `              then 0 else cd.weight end as weight_applied`,
-    `  from work._${num}_has as h`,
-    `  inner join work._${num}_cond as cd`,
-    `    on cd.cond_id = h.cond_id;`,
-    `quit;`,
-    ``,
-    `/* every cohort member scores, including the zeros */`,
-    `proc sql;`,
-    `  create table work._${num}_perpt as`,
-    `  select a.enrolid, coalesce(sum(b.weight_applied), 0) as score`,
-    `  from ${cohT} as a`,
-    `  left join work._${num}_applied as b`,
-    `    on b.enrolid = a.enrolid`,
-    `  group by a.enrolid;`,
-    `quit;`,
-    ``,
+    ...comorbidityScoreSasScore(num, cohT),
     `data work._${num}_banded;`,
     `  set work._${num}_perpt;`,
     `  length band $16;`,

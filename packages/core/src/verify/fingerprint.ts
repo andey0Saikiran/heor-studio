@@ -258,6 +258,17 @@ function sqlFingerprint(kind: string, raw: string): Fingerprint {
       // so matching inside it needs balancing (same trap as POWER above)
       put(fp, "imbalance_threshold", grab(sql, [/>\s*([\d.]+)\s*THEN 1/i]));
       put(fp, "reference_arm", grab(sql, [/IN \('([^']+)',/i]));
+      /* WHICH column each covariate's moments are taken from, in order. A
+       * second CONTINUOUS covariate (the comorbidity index) can silently reuse
+       * age's column if the emitter keys on the measure instead of the axis —
+       * the table then reports age's SMD twice under two different labels. */
+      put(fp, "covariate_columns",
+        [...sql.matchAll(/AVG\(CASE WHEN arm = '[^']*' THEN (\w+) END\) AS m_ref/g)].map((m) => m[1]).join(","));
+      /* When this table scores a comorbidity index, it must apply the SAME
+       * hierarchy the index analysis applies. Dropping it here alone would put
+       * two different comorbidity means in one deliverable. */
+      if (/weight_applied/i.test(sql))
+        put(fp, "cci_hierarchy_withholds", /THEN 0 ELSE cd\.weight END AS weight_applied/i.test(sql) ? "yes" : "no");
       break;
     }
     case "comorbidity_index": {
@@ -414,6 +425,13 @@ function sasFingerprint(kind: string, rawSas: string, setup: string): Fingerprin
       put(fp, "pooled_halved_denominator", /\/\s*2\s*\)/.test(sas) ? "yes" : "no");
       put(fp, "imbalance_threshold", grab(sas, [/abs\(smd\)\s*>\s*([\d.]+)/i]));
       put(fp, "reference_arm", grab(sas, [/in \('([^']+)',/i]));
+      // SAS names a per-axis PREFIX where SQL names a column; normalized here
+      // so the two are comparable at all.
+      const PRE_TO_COL: Record<string, string> = { age: "age_val", sex: "sex_male", cci: "cci_val" };
+      put(fp, "covariate_columns",
+        [...sas.matchAll(/value_ref = round\((\w+?)_[mp]_ref/g)].map((m) => PRE_TO_COL[m[1]] ?? `UNMAPPED(${m[1]})`).join(","));
+      if (/weight_applied/i.test(sas))
+        put(fp, "cci_hierarchy_withholds", /then 0 else cd\.weight end as weight_applied/i.test(sas) ? "yes" : "no");
       break;
     }
     case "comorbidity_index": {
@@ -658,6 +676,14 @@ export function expectedFromStamp(kind: string, stamp: Record<string, unknown>):
       if (stamp.smdDenominator === "pooled_sd_sample_variance") {
         exp.sample_variance = "yes";
         exp.pooled_halved_denominator = "yes";
+      }
+      /* The stamp lists the covariates and their axes; the code must read each
+       * one from the column that axis implies, in the same order. */
+      if (Array.isArray(stamp.covariates)) {
+        const AXIS_TO_COL: Record<string, string> = { age: "age_val", sex: "sex_male", comorbidity_index: "cci_val" };
+        const covs = stamp.covariates as Array<{ axis: string }>;
+        exp.covariate_columns = covs.map((c) => AXIS_TO_COL[c.axis] ?? `UNMAPPED(${c.axis})`).join(",");
+        if (covs.some((c) => c.axis === "comorbidity_index")) exp.cci_hierarchy_withholds = "yes";
       }
       break;
     }

@@ -33,6 +33,7 @@ import { findCodeList } from "../../spec/types";
 import type { GeneratedFile } from "../types";
 import type { AnalysisModule, SqlCtx, SasCtx, SqlModuleFile } from "./types";
 import { oneLine } from "../sql-base";
+import { comorbidityScoreSasScore, comorbidityScoreSasSteps, comorbidityScoreSqlCtes, indexAnalysisFor } from "../comorbidity";
 import { cmt, header, levelCheck, sq, INCLUDE_SETUP } from "../sas-base";
 import {
   balanceCovariates,
@@ -52,6 +53,7 @@ function plan(spec: StudySpec, an: StatisticalEngineAnalysis) {
   const { supported, unsupported } = balanceCovariates(
     spec.baseline,
     cfg?.covariateIds ?? [],
+    new Set(spec.analyses.filter((x) => x.kind === "comorbidity_index" && x.enabled).map((x) => x.id)),
   );
   const levels = gv?.levels ?? [];
   const referenceLevel = gv?.referenceLevel ?? levels[0] ?? "";
@@ -71,7 +73,7 @@ function plan(spec: StudySpec, an: StatisticalEngineAnalysis) {
     );
   for (const u of unsupported)
     limitations.push(
-      `covariate "${u.id}" (kind "${u.kind}") is NOT in the balance table - only age (continuous) and sex (binary) are derivable from the cohort spine today`,
+      `covariate "${u.id}" (kind "${u.kind}") is NOT in the balance table - age (continuous), sex (binary) and a comorbidity_index referencing an ENABLED index analysis are what the cohort spine can derive today`,
     );
   if (an.comparisonIds.length > 0)
     limitations.push(
@@ -151,16 +153,33 @@ function sqlStatisticalEngine(ctx: SqlCtx, an: StatisticalEngineAnalysis, suffix
   body.push(`  WHERE enrolid IS NOT NULL`);
   body.push(`  GROUP BY enrolid`);
   body.push(`),`);
+  /* Comorbidity-index covariates are scored by the SHARED scorer, not by a
+   * second copy of the rules living here. The alternative — re-deriving the
+   * score in the balance table — would let this table and the index analysis
+   * report two different comorbidity means for the same cohort, each internally
+   * consistent, with nothing to flag the disagreement. */
+  const cciCov = p.covariates.find((c) => c.axis === "comorbidity_index");
+  const cciAn = indexAnalysisFor(spec, cciCov?.analysisId);
+  let cciScoreCte: string | null = null;
+  if (cciCov && cciAn) {
+    const sc = comorbidityScoreSqlCtes(ctx, { wp, an: cciAn, cohortCte: "arms", prefix: "cci_" });
+    body.push(...sc.lines);
+    cciScoreCte = sc.scoreCte;
+  }
   body.push(`sub AS (`);
   body.push(`  SELECT a.enrolid, a.arm,`);
   body.push(`         CAST(${ageExpr} AS NUMERIC) AS age_val,`);
-  body.push(`         CASE WHEN dm.sex = '1' THEN 1.0 ELSE 0.0 END AS sex_male`);
+  body.push(`         CASE WHEN dm.sex = '1' THEN 1.0 ELSE 0.0 END AS sex_male${cciScoreCte ? "," : ""}`);
+  if (cciScoreCte) body.push(`         CAST(COALESCE(cs.score, 0) AS NUMERIC) AS cci_val`);
   body.push(`  FROM arms a JOIN ${wp}_cohort c ON c.enrolid = a.enrolid`);
   body.push(`              LEFT JOIN demo dm ON dm.enrolid = a.enrolid`);
+  if (cciScoreCte) body.push(`              LEFT JOIN ${cciScoreCte} cs ON cs.enrolid = a.enrolid`);
   body.push(`)`);
 
   const blocks = p.covariates.map((c) => {
-    const col = c.measure === "continuous" ? "age_val" : "sex_male";
+    // keyed on the AXIS, not the measure: a comorbidity index is continuous
+    // too, and keying on "continuous" would silently point it at age.
+    const col = c.axis === "age" ? "age_val" : c.axis === "sex" ? "sex_male" : "cci_val";
     // AVG/VAR_SAMP per arm, pivoted to reference vs comparator
     return [
       `SELECT '${sqlLit(stratLabel(c.label))}' AS characteristic,`,
@@ -261,11 +280,16 @@ function sasStatisticalEngine(ctx: SasCtx, an: StatisticalEngineAnalysis, num: s
   const viaNdc = findCodeList(spec, indexListId)?.system === "drug_name";
   const ndcT = ctx.ndcOf(indexListId);
 
+  const cciCovS = p.covariates.find((c) => c.axis === "comorbidity_index");
+  const cciAnS = indexAnalysisFor(spec, cciCovS?.analysisId);
+  const cciScore = cciCovS && cciAnS ? comorbidityScoreSasSteps(ctx, { an: cciAnS, num, cohT, evOf: ctx.evOf }) : null;
+
   lines.push(
     `proc datasets lib=tz nolist nowarn;`,
     `  delete ${outT.replace("tz.", "")};`,
     `quit;`,
     ``,
+    ...(cciScore ? [...cciScore.lines, ...comorbidityScoreSasScore(num, cohT)] : []),
     `/* exposure arm = the index event the subject matched (same as the SQL twin)`,
     ...(viaNdc
       ? [`   The index list is a DRUG-NAME list, so index_code holds the resolved NDC`,
@@ -276,8 +300,10 @@ function sasStatisticalEngine(ctx: SasCtx, an: StatisticalEngineAnalysis, num: s
     `  select a.enrolid,`,
     ...(viaNdc ? [`         n.pattern as arm length=40,`] : [`         a.index_code as arm length=40,`]),
     `         (year(a.index_date) - b.dobyr) as age_val,`,
-    `         (case when b.sex = '1' then 1 else 0 end) as sex_male`,
+    `         (case when b.sex = '1' then 1 else 0 end) as sex_male${cciScore ? "," : ""}`,
+    ...(cciScore ? [`         coalesce(s.score, 0) as cci_val`] : []),
     `  from ${cohT} as a`,
+    ...(cciScore ? [`  left join ${cciScore.scoreTable} as s on s.enrolid = a.enrolid`] : []),
     ...(viaNdc ? [`  inner join ${ndcT} as n on n.ndcnum = a.index_code`] : []),
     `  left join (select enrolid, min(dobyr) as dobyr, min(sex) as sex`,
     `             from ${enrT} group by enrolid) as b`,
@@ -300,7 +326,15 @@ function sasStatisticalEngine(ctx: SasCtx, an: StatisticalEngineAnalysis, num: s
     `    var (case when arm = '${sq(refLevel)}' then age_val else . end) as age_v_ref,`,
     `    var (case when arm = '${sq(othLevel)}' then age_val else . end) as age_v_oth,`,
     `    mean(case when arm = '${sq(refLevel)}' then sex_male else . end) as sex_p_ref,`,
-    `    mean(case when arm = '${sq(othLevel)}' then sex_male else . end) as sex_p_oth`,
+    `    mean(case when arm = '${sq(othLevel)}' then sex_male else . end) as sex_p_oth${cciScore ? "," : ""}`,
+    ...(cciScore
+      ? [
+          `    mean(case when arm = '${sq(refLevel)}' then cci_val else . end) as cci_m_ref,`,
+          `    mean(case when arm = '${sq(othLevel)}' then cci_val else . end) as cci_m_oth,`,
+          `    var (case when arm = '${sq(refLevel)}' then cci_val else . end) as cci_v_ref,`,
+          `    var (case when arm = '${sq(othLevel)}' then cci_val else . end) as cci_v_oth`,
+        ]
+      : []),
     `  from work._${num}_sub;`,
     `quit;`,
     ``,
@@ -310,21 +344,24 @@ function sasStatisticalEngine(ctx: SasCtx, an: StatisticalEngineAnalysis, num: s
   );
 
   for (const c of p.covariates) {
-    const pre = c.measure === "continuous" ? "age" : "sex";
+    // Same rule as the SQL twin: the prefix follows the AXIS, so a second
+    // continuous covariate cannot silently reuse age's moments.
+    const pre = c.axis === "age" ? "age" : c.axis === "sex" ? "sex" : "cci";
+    const cont = c.measure === "continuous";
     lines.push(
       ``,
       `  /* ${cmt(c.label)} */`,
       `  characteristic = "${sq(stratLabel(c.label))}";`,
       `  measure = "${c.measure}";`,
-      c.measure === "continuous"
+      cont
         ? `  value_ref = round(${pre}_m_ref, 0.0001); value_oth = round(${pre}_m_oth, 0.0001);`
         : `  value_ref = round(${pre}_p_ref, 0.0001); value_oth = round(${pre}_p_oth, 0.0001);`,
-      c.measure === "continuous"
-        ? `  _den = sqrt((age_v_ref + age_v_oth) / 2);`
-        : `  _den = sqrt((sex_p_ref*(1-sex_p_ref) + sex_p_oth*(1-sex_p_oth)) / 2);`,
-      c.measure === "continuous"
-        ? `  if _den > 0 then smd = round((age_m_ref - age_m_oth) / _den, 0.00001); else smd = .;`
-        : `  if _den > 0 then smd = round((sex_p_ref - sex_p_oth) / _den, 0.00001); else smd = .;`,
+      cont
+        ? `  _den = sqrt((${pre}_v_ref + ${pre}_v_oth) / 2);`
+        : `  _den = sqrt((${pre}_p_ref*(1-${pre}_p_ref) + ${pre}_p_oth*(1-${pre}_p_oth)) / 2);`,
+      cont
+        ? `  if _den > 0 then smd = round((${pre}_m_ref - ${pre}_m_oth) / _den, 0.00001); else smd = .;`
+        : `  if _den > 0 then smd = round((${pre}_p_ref - ${pre}_p_oth) / _den, 0.00001); else smd = .;`,
       `  imbalanced = (smd ne . and abs(smd) > ${thr});`,
       `  output;`,
     );

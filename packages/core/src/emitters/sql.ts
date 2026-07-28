@@ -45,6 +45,7 @@ import { ascertainmentWindow } from "./parity";
 import { EMITTER_VERSION, stableHash } from "../provenance";
 import type { Ctx } from "./sql-base";
 import { moduleAnalyses } from "./modules/registry";
+import { comorbidityScoreSqlCtes, indexAnalysisFor } from "./comorbidity";
 
 /* ------------------------------------------------------------------ */
 /* Small utilities                                                     */
@@ -1186,6 +1187,42 @@ function build06(ctx: Ctx): string {
             oneLine(ch.label),
             `CAST(${d.year("index_date")} AS VARCHAR)`
           )
+        );
+        break;
+      }
+      case "comorbidity_index": {
+        const idxAn = indexAnalysisFor(spec, ch.comorbidityIndexAnalysisId);
+        if (!idxAn) {
+          skipped.push(
+            `-- SKIPPED "${oneLine(ch.label)}" (comorbidity_index): comorbidityIndexAnalysisId ` +
+            `"${ch.comorbidityIndexAnalysisId ?? "(unset)"}" does not name an enabled comorbidity_index analysis.`
+          );
+          break;
+        }
+        /* Scored by the SHARED scorer (emitters/comorbidity.ts), the same one
+         * the index analysis and the balance table use. Table 1 is emitted by
+         * the spine, BEFORE any analysis module, so it cannot read the index
+         * module's output — which leaves either a second copy of the scoring
+         * rules here, or one shared emitter. A Table 1 that scored a patient
+         * differently from the index analysis would put two comorbidity means
+         * in one deliverable with nothing to flag the disagreement. */
+        const pfx = `cci${ord}_`;
+        const sc = comorbidityScoreSqlCtes(ctx, { wp, an: idxAn, cohortCte: "cohort", prefix: pfx });
+        ctes.push(sc.lines.join("\n").replace(/,\s*$/, ""));
+        branches.push(
+          [
+            `-- ${oneLine(ch.label)} (comorbidity index "${q(idxAn.indexName)}", continuous score;`,
+            `-- weights and hierarchy from the reviewed spec, scored by the shared engine)`,
+            `SELECT ${ord} AS ord,`,
+            `       '${q(oneLine(ch.label))}' AS characteristic,`,
+            `       '(index score)' AS category,`,
+            `       COUNT(*) AS n_patients,`,
+            `       ${NULL_NUM} AS pct,`,
+            `       ${d.round1(`AVG(score)`)} AS mean_val,`,
+            `       ${d.round1(`STDDEV(score)`)} AS sd_val,`,
+            `       ${d.round1(`PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY score)`)} AS median_val`,
+            `FROM ${sc.scoreCte}`,
+          ].join("\n")
         );
         break;
       }

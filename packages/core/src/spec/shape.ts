@@ -422,6 +422,7 @@ export function checkSpecShape(raw: unknown): { ok: boolean; problems: string[] 
       needStr(p, b, "label", bp);
       needStr(p, b, "kind", bp, { nonEmpty: true });
       if (b.codeListId !== undefined) needStr(p, b, "codeListId", bp);
+      if (b.comorbidityIndexAnalysisId !== undefined) needStr(p, b, "comorbidityIndexAnalysisId", bp, { nonEmpty: true });
       if (b.window !== undefined) checkWindow(p, b.window, `${bp}.window`);
     });
   }

@@ -495,8 +495,13 @@ export interface BalanceCovariate {
   measure: "continuous" | "binary";
   /** for binary demographic covariates, the coded value counted as the "1" */
   positiveValue?: string;
-  /** demographic axis the value is read from */
-  axis: "age" | "sex";
+  /** where the value is read from. "comorbidity_index" is not a demographic —
+   *  it is a DERIVED score, computed by the shared scorer in
+   *  emitters/comorbidity.ts so Table 1, this table and the index analysis
+   *  cannot disagree about it. */
+  axis: "age" | "sex" | "comorbidity_index";
+  /** for axis "comorbidity_index": the ComorbidityIndexAnalysis being scored */
+  analysisId?: string;
 }
 
 export interface SmdParity {
@@ -504,7 +509,12 @@ export interface SmdParity {
   groupVarId: string;
   levels: string[];
   referenceLevel: string;
-  covariates: Array<{ id: string; measure: string }>;
+  /* The AXIS is stamped alongside the measure because the measure alone stopped
+   * identifying the source variable the moment a second CONTINUOUS covariate
+   * (a comorbidity index) joined the table. Without it the stamp could not say
+   * which variable a row's moments come from, which is exactly the thing that
+   * silently goes wrong. */
+  covariates: Array<{ id: string; measure: string; axis: string }>;
   /** pooled-SD denominator convention actually computed */
   smdDenominator: "pooled_sd_sample_variance";
   imbalanceThreshold: number;
@@ -525,19 +535,22 @@ export function smdParity(
     groupVarId: consumed.groupVarId,
     levels: [...consumed.levels],
     referenceLevel: consumed.referenceLevel,
-    covariates: consumed.covariates.map((c) => ({ id: c.id, measure: c.measure })),
+    covariates: consumed.covariates.map((c) => ({ id: c.id, measure: c.measure, axis: c.axis })),
     smdDenominator: "pooled_sd_sample_variance",
     imbalanceThreshold: consumed.imbalanceThreshold,
   };
 }
 
-/** Baseline characteristics the balance table can compute from the cohort
- *  spine today: age (continuous) and sex (binary). Everything else needs the
- *  baseline covariate tables the P2+ work adds, and is reported as a
- *  limitation rather than silently dropped. */
+/** Baseline characteristics the balance table can compute today: age
+ *  (continuous), sex (binary), and a comorbidity_index scored by the shared
+ *  engine. Everything else needs the baseline covariate tables the P2+ work
+ *  adds, and is reported as a limitation rather than silently dropped. */
 export function balanceCovariates(
-  baseline: Array<{ id: string; label: string; kind: string }>,
-  covariateIds: string[]
+  baseline: Array<{ id: string; label: string; kind: string; comorbidityIndexAnalysisId?: string }>,
+  covariateIds: string[],
+  /** ids of ENABLED comorbidity_index analyses, so a dangling reference lands in
+   *  `unsupported` with a reason rather than emitting a column of nulls */
+  enabledIndexIds: ReadonlySet<string> = new Set()
 ): { supported: BalanceCovariate[]; unsupported: Array<{ id: string; kind: string }> } {
   const wanted = covariateIds.length > 0 ? baseline.filter((b) => covariateIds.includes(b.id)) : baseline;
   const supported: BalanceCovariate[] = [];
@@ -545,6 +558,11 @@ export function balanceCovariates(
   for (const b of wanted) {
     if (b.kind === "age") supported.push({ id: b.id, label: b.label, measure: "continuous", axis: "age" });
     else if (b.kind === "sex") supported.push({ id: b.id, label: b.label, measure: "binary", axis: "sex", positiveValue: "1" });
+    else if (b.kind === "comorbidity_index" && b.comorbidityIndexAnalysisId && enabledIndexIds.has(b.comorbidityIndexAnalysisId))
+      supported.push({
+        id: b.id, label: b.label, measure: "continuous",
+        axis: "comorbidity_index", analysisId: b.comorbidityIndexAnalysisId,
+      });
     else unsupported.push({ id: b.id, kind: b.kind });
   }
   return { supported, unsupported };

@@ -100,6 +100,10 @@ export const BASELINE_KINDS = enumValues<BaselineCharacteristic["kind"]>({
   comorbidity: true,
   medication: true,
   utilization: true,
+  /* Emitted by Table 1 and the balance table from a comorbidity_index ANALYSIS,
+   * referenced by id. The extractor may propose it, and readiness refuses it if
+   * the reference does not resolve — the coupling is checked, not assumed. */
+  comorbidity_index: true,
 });
 
 export const ANALYSIS_TYPES = enumValues<LegacyAnalysisType>({
