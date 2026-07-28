@@ -1908,6 +1908,115 @@ export async function verifyGoldA(): Promise<VerificationResult> {
     const fgFitted = await rows<{ n: number }>(db, `SELECT count(*)::int AS n FROM ${FG_T} WHERE component = 'adjusted' AND estimate IS NOT NULL`);
     eq("fine-gray: every fitted coefficient is NULL in SQL", Number(fgFitted[0]?.n), 0);
 
+    /* ---- Propensity score: the saturated score, positivity, and balance ---- */
+    const psx = EXPECTED.propensityScore;
+    const PS_T = "tz_study_ps_a_ps";
+    eq(`propensity rows = ${psx.rowCount}`, await scalar<number>(db, `SELECT count(*)::int FROM ${PS_T}`), psx.rowCount);
+    const psRow = async (statistic: string, term?: string) =>
+      (
+        await rows<{ estimate: number | null; method: string }>(
+          db,
+          `SELECT estimate::float8, method FROM ${PS_T} WHERE statistic = '${statistic}'${term ? ` AND term = '${term}'` : ``}`,
+        )
+      )[0];
+
+    eq("ps: 4 region cells", Number((await psRow("n_cells"))?.estimate), psx.nCells);
+    approx("ps: minimum saturated score = 1/3", Number((await psRow("min_score"))?.estimate), psx.minScore, 0.00001);
+    eq("ps: maximum saturated score = 1 (region 4 is entirely treated)", Number((await psRow("max_score"))?.estimate), psx.maxScore);
+
+    /* POSITIVITY — the rows this module exists to produce. */
+    eq("ps: 1 cell has no control at all", Number((await psRow("cells_with_no_control"))?.estimate), psx.cellsWithNoControl);
+    eq("ps: 0 cells have no treated subject", Number((await psRow("cells_with_no_treated"))?.estimate), psx.cellsWithNoTreated);
+    eq("ps: 2 subjects are off support", Number((await psRow("subjects_off_support"))?.estimate), psx.subjectsOffSupport);
+    eq("ps: treated pseudo-population = 10", Number((await psRow("pseudo_population_treated"))?.estimate), psx.pseudoTreated);
+    eq("ps: control pseudo-population = 8", Number((await psRow("pseudo_population_control"))?.estimate), psx.pseudoControl);
+    const gap = await psRow("pseudo_population_gap");
+    eq("ps: the gap is exactly 2 — the region-4 subjects", Number(gap?.estimate), psx.pseudoGap);
+    checks.push({
+      name: "ps: and the program says the two pseudo-populations differ in size",
+      status: /DIFFERENT SIZES/.test(gap?.method ?? "") ? "pass" : "fail",
+      detail: (gap?.method ?? "no row").slice(0, 90),
+    });
+    /* On THIS configuration the gap happens to equal the off-support count.
+     * It is not an identity — see the ps2 counterexample below, where the gap
+     * is zero and four subjects are off support. Pinned here as the value it
+     * takes, not as a law. */
+    checks.push({
+      name: "ps: here the gap coincides with the off-support count (NOT an identity — see ps2)",
+      status: Number(gap?.estimate) === Number((await psRow("subjects_off_support"))?.estimate) ? "pass" : "fail",
+      detail: `gap ${gap?.estimate} vs off-support ${(await psRow("subjects_off_support"))?.estimate}`,
+    });
+
+    eq("ps: largest weight = 3", Number((await psRow("max_weight"))?.estimate), psx.maxWeight);
+    approx("ps: effective n (treated) = 25/6", Number((await psRow("effective_n_treated"))?.estimate), psx.essTreated, 0.00001);
+    approx("ps: effective n (control) = 64/13", Number((await psRow("effective_n_control"))?.estimate), psx.essControl, 0.00001);
+    /* Kish's ESS is never above n, and equals it only when every weight is the
+     * same. Both arms are weighted here, so both must come in strictly below 5. */
+    for (const [arm, stat] of [["treated", "effective_n_treated"], ["control", "effective_n_control"]] as const) {
+      const e = Number((await psRow(stat))?.estimate);
+      checks.push({
+        name: `ps: the ${arm} effective n is strictly below its actual n of 5`,
+        status: e < 5 && e > 0 ? "pass" : "fail",
+        detail: `${e} vs n = 5`,
+      });
+    }
+
+    /* BALANCE, before and after — including the two cases that matter most. */
+    for (const [term, want] of Object.entries(psx.balance)) {
+      approx(`ps: ${term} SMD before weighting = ${want.unweighted}`, Number((await psRow("smd_unweighted", term))?.estimate), want.unweighted, 0.00001);
+      approx(`ps: ${term} SMD after weighting = ${want.weighted}`, Number((await psRow("smd_weighted", term))?.estimate), want.weighted, 0.00001);
+      const ch = await psRow("abs_smd_change", term);
+      checks.push({
+        name: `ps: weighting on region made ${term} WORSE, and the program says so`,
+        status: Number(ch?.estimate) > 0 && /WORSE/.test(ch?.method ?? "") ? "pass" : "fail",
+        detail: `change ${ch?.estimate}; ${(ch?.method ?? "").slice(0, 60)}`,
+      });
+    }
+    /* SEX WAS PERFECTLY BALANCED and weighting broke it. That is the sharpest
+     * version of the point: an SMD of exactly 0 is not a number weighting can
+     * be trusted to preserve, and a module reporting only the after-value would
+     * present 0.045 as though it were an achievement. */
+    checks.push({
+      name: "ps: sex was EXACTLY balanced before weighting (SMD 0) and is not after",
+      status: Number((await psRow("smd_unweighted", "Sex"))?.estimate) === 0
+        && Number((await psRow("smd_weighted", "Sex"))?.estimate) !== 0 ? "pass" : "fail",
+      detail: `before ${(await psRow("smd_unweighted", "Sex"))?.estimate}, after ${(await psRow("smd_weighted", "Sex"))?.estimate}`,
+    });
+
+    /* THE COUNTEREXAMPLE, from the second propensity analysis (region x sex).
+     *
+     * Seven cells, FOUR of them single-arm, so positivity plainly fails — and
+     * both pseudo-populations still come to exactly 8, so the gap is ZERO. This
+     * module used to claim the two sums "agree if and only if every cell
+     * contains both arms". The "if" is right; the "only if" is not, and the
+     * sums can coincide by arithmetic accident. A nonzero gap PROVES a
+     * violation; a zero gap proves nothing, and subjects_off_support is the
+     * authoritative row. */
+    const PS2_T = "tz_study_ps_a_ps2";
+    const ps2 = async (statistic: string) =>
+      (
+        await rows<{ estimate: number | null; method: string }>(
+          db, `SELECT estimate::float8, method FROM ${PS2_T} WHERE statistic = '${statistic}'`,
+        )
+      )[0];
+    eq("ps2: region x sex gives 7 cells", Number((await ps2("n_cells"))?.estimate), 7);
+    eq("ps2: 2 cells have no control", Number((await ps2("cells_with_no_control"))?.estimate), 2);
+    eq("ps2: 2 cells have no treated subject", Number((await ps2("cells_with_no_treated"))?.estimate), 2);
+    eq("ps2: 4 subjects are off support", Number((await ps2("subjects_off_support"))?.estimate), 4);
+    eq("ps2: treated pseudo-population = 8", Number((await ps2("pseudo_population_treated"))?.estimate), 8);
+    eq("ps2: control pseudo-population = 8, the SAME", Number((await ps2("pseudo_population_control"))?.estimate), 8);
+    const g2 = await ps2("pseudo_population_gap");
+    checks.push({
+      name: "ps2: the gap is ZERO even though positivity fails for 4 subjects — a zero gap proves nothing",
+      status: Number(g2?.estimate) === 0 && Number((await ps2("subjects_off_support"))?.estimate) === 4 ? "pass" : "fail",
+      detail: `gap ${g2?.estimate}, off-support 4`,
+    });
+    checks.push({
+      name: "ps2: and the gap row does NOT claim positivity holds when it is zero",
+      status: !/every cell contains both arms/.test(g2?.method ?? "") ? "pass" : "fail",
+      detail: (g2?.method ?? "no row").slice(0, 110),
+    });
+
     /* ---- Table 1 comorbidity-index row (executed) ----
      * The row is scored by the SAME shared engine as the index analysis and the
      * balance table, so this asserts the wiring rather than the arithmetic:

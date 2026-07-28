@@ -587,6 +587,45 @@ function sqlFingerprint(kind: string, raw: string): Fingerprint {
       }
       break;
     }
+    case "propensity_score": {
+      put(fp, "treated_level", grab(sql, [/WHEN (?:nl\.pattern|c\.index_code) = '([^']+)' THEN 1 ELSE 0 END AS treated/i]));
+      put(fp, "arm_levels", (sql.match(/IN \('([^']+)', '([^']+)'\)\s*$/im) ?? []).slice(1).join(","));
+      /* THE SCORE IS THE CELL FRACTION. That single expression is the saturated
+       * maximum-likelihood claim; anything else is a different estimator. */
+      put(fp, "score_is_cell_fraction",
+        /SUM\(treated\) \* 1\.0 \/ COUNT\(\*\) AS ps/i.test(sql) ? "yes" : "no");
+      /* THE CELL SPELLING. Two twins agreeing on the covariates but
+       * concatenating them differently would score the same subject
+       * differently, and no comparison of NUMBERS would catch it - the cell is
+       * a string. The separator and the axis order are both scraped. */
+      put(fp, "cell_separator", /\|\| '\|' \|\|/.test(sql) ? "pipe" : (/AS cell/i.test(sql) ? "OTHER" : "ABSENT"));
+      put(fp, "cell_axis_count", String(((sql.match(/AS cell,/i) ? sql.slice(0, sql.search(/AS cell,/i)) : "").match(/\|\| '\|' \|\|/g) ?? []).length + 1));
+      /* THE WEIGHTS. ATE and ATT differ only in these two expressions, and a
+       * swapped pair produces a perfectly plausible set of weights for the
+       * OTHER estimand. */
+      put(fp, "treated_weight",
+        /THEN 1\.0 \/ NULLIF\(c\.ps, 0\) ELSE/i.test(sql) ? "ate"
+        : /THEN 1\.0 ELSE/i.test(sql) ? "att" : "OTHER");
+      put(fp, "control_weight",
+        /ELSE 1\.0 \/ NULLIF\(1 - c\.ps, 0\) END AS w_raw/i.test(sql) ? "ate"
+        : /ELSE c\.ps \/ NULLIF\(1 - c\.ps, 0\) END AS w_raw/i.test(sql) ? "att" : "OTHER");
+      /* A zero denominator must be NULL. A large finite weight there would be a
+       * number standing in for a counterpart that does not exist. */
+      put(fp, "zero_denominator_is_null", /NULLIF\(1 - c\.ps, 0\)/i.test(sql) ? "yes" : "no");
+      put(fp, "stabilized", /p_treated \* \(/i.test(sql) ? "yes" : "no");
+      put(fp, "trim_bounds", (sql.match(/c\.ps < ([\d.]+) OR c\.ps > ([\d.]+)/i) ?? []).slice(1).join(",") || "none");
+      /* THE WEIGHTED VARIANCE. The naive SUM(w(x-xbar)^2)/SUM(w) shrinks every
+       * standardized difference and flatters the balance - the direction nobody
+       * checks. The frequency-weighted form carries the sw^2 - sw2 denominator. */
+      put(fp, "weighted_variance_is_frequency_form",
+        /\(b\.sw_t \/ NULLIF\(b\.sw_t \* b\.sw_t - b\.sw2_t, 0\)\)/i.test(sql) ? "yes" : "no");
+      put(fp, "ess_is_kish", /POWER\(sw_t, 2\) \/ NULLIF\(sw2_t, 0\)/i.test(sql) ? "yes" : "no");
+      put(fp, "positivity_gap_emitted", /'pseudo_population_gap'/i.test(sql) ? "yes" : "no");
+      put(fp, "reports_balance_before_and_after",
+        /'smd_unweighted'/i.test(sql) && /'smd_weighted'/i.test(sql) ? "yes" : "no");
+      put(fp, "balance_terms", [...sql.matchAll(/CAST\('balance' AS VARCHAR\) AS component, CAST\('([^']*)' AS VARCHAR\) AS term,\n\s*CAST\('smd_unweighted'/g)].map((m) => m[1]).join(","));
+      break;
+    }
     case "comorbidity_index": {
       /* The index IS its weights and its hierarchy. A dropped supersession or a
        * shifted weight produces a score that is wrong by a plausible amount on
@@ -966,6 +1005,34 @@ function sasFingerprint(kind: string, rawSas: string, setup: string): Fingerprin
         /Cox model by another name/i.test(rawSas) ? "yes" : "no");
       break;
     }
+    case "propensity_score": {
+      put(fp, "treated_level", grab(sas, [/treated = \(arm = "([^"]+)"\)/i]));
+      put(fp, "arm_levels", (sas.match(/arm not in \("([^"]+)", "([^"]+)"\)/i) ?? []).slice(1).join(","));
+      put(fp, "score_is_cell_fraction", /sum\(treated\) \/ count\(\*\) as ps/i.test(sas) ? "yes" : "no");
+      put(fp, "cell_separator", /\|\| '\|' \|\|/.test(sas) ? "pipe" : (/cell = /i.test(sas) ? "OTHER" : "ABSENT"));
+      put(fp, "cell_axis_count", String(((/cell = ([^;]*);/i.exec(sas) ?? ["", ""])[1].match(/\|\| '\|' \|\|/g) ?? []).length + 1));
+      put(fp, "treated_weight",
+        /then w_raw = 1 \/ ps;/i.test(sas) ? "ate" : /then w_raw = 1;/i.test(sas) ? "att" : "OTHER");
+      put(fp, "control_weight",
+        /then w_raw = 1 \/ \(1 - ps\);/i.test(sas) ? "ate" : /then w_raw = ps \/ \(1 - ps\);/i.test(sas) ? "att" : "OTHER");
+      put(fp, "zero_denominator_is_null", /if 1 - ps > 0 then w_raw/i.test(sas) ? "yes" : "no");
+      put(fp, "stabilized", /w = p_treated \* w_raw;/i.test(sas) ? "yes" : "no");
+      put(fp, "trim_bounds", (sas.match(/trimmed = \(ps < ([\d.]+) or ps > ([\d.]+)\)/i) ?? []).slice(1).join(",") || "none");
+      put(fp, "weighted_variance_is_frequency_form",
+        /\(b\.sw_t \/ \(b\.sw_t\*b\.sw_t - b\.sw2_t\)\)/i.test(sas) ? "yes" : "no");
+      put(fp, "ess_is_kish", /\(sw_t\*\*2\) \/ sw2_t/i.test(sas) ? "yes" : "no");
+      put(fp, "positivity_gap_emitted", /'pseudo_population_gap'/i.test(sas) ? "yes" : "no");
+      put(fp, "reports_balance_before_and_after",
+        /'smd_unweighted'/i.test(sas) && /'smd_weighted'/i.test(sas) ? "yes" : "no");
+      put(fp, "balance_terms", (sas.match(/component = 'balance'; term = "([^"]*)"/g) ?? []).map((m) => (/term = "([^"]*)"/.exec(m) ?? [])[1]).join(","));
+      /* Language-local: the anchor. The saturated claim is exactly the kind of
+       * statement that is easy to assert and easy to get wrong, so the emitted
+       * program checks it against PROC LOGISTIC instead of repeating it. */
+      put(fp, "ps_anchor_present",
+        /proc logistic data=work\.\w+ noprint descending;/i.test(sas) &&
+        /ps_anchor_verdict = 'PASS: saturated closed form = PROC LOGISTIC fitted probability'/i.test(sas) ? "yes" : "no");
+      break;
+    }
     case "comorbidity_index": {
       const conds = [...sas.matchAll(/cond_id = "([^"]+)"; cond_label = "[^"]*"; weight = (\d+); cond_ord = (\d+)/g)];
       put(fp, "condition_ids", conds.map((m) => m[1]).join(","));
@@ -1149,6 +1216,19 @@ function evalOffset(expr: string | undefined): string {
 /** Values the fingerprint must agree with, derived from the parity stamp.
  *  Only keys present here are cross-checked against the stamp; a fingerprint
  *  key with no stamp counterpart is still compared ACROSS languages. */
+/**
+ * Keys `expectedFromStamp` sets for EVERY kind, before the switch.
+ *
+ * The coverage guard used to ask only whether the result was non-empty, and
+ * `setting_filter` is set for any stamp carrying a settingFilter — which is
+ * every outcome-based analysis. So a kind with NO case in the switch at all
+ * still "returned something", and the guard passed. Three modules shipped that
+ * way (cox, fine_gray, competing_risks) before propensity_score — whose stamp
+ * has no settingFilter, so it returned genuinely nothing — made the hole
+ * visible. The guard now counts only keys BEYOND these.
+ */
+export const STAMP_SHARED_KEYS: ReadonlySet<string> = new Set(["setting_filter"]);
+
 export function expectedFromStamp(kind: string, stamp: Record<string, unknown>): Fingerprint {
   const exp: Fingerprint = {};
   const num = (v: unknown): string | undefined =>
@@ -1278,6 +1358,38 @@ export function expectedFromStamp(kind: string, stamp: Record<string, unknown>):
         exp.exposed_level = String(stamp.exposedLevel ?? "");
         exp.arm_levels = [stamp.referenceLevel, stamp.exposedLevel].filter(Boolean).join(",");
       }
+      break;
+    }
+    case "cox": {
+      exp.exposed_level = String(stamp.exposedLevel ?? "");
+      exp.arm_levels = [stamp.referenceLevel, stamp.exposedLevel].filter(Boolean).join(",");
+      exp.model_terms = (stamp.terms as string[] ?? []).join(",");
+      break;
+    }
+    case "fine_gray": {
+      exp.exposed_level = String(stamp.exposedLevel ?? "");
+      exp.arm_levels = [stamp.referenceLevel, stamp.exposedLevel].filter(Boolean).join(",");
+      exp.model_terms = (stamp.terms as string[] ?? []).join(",");
+      exp.causes = ((stamp.causes as Array<{ code: number }>) ?? []).map((c) => c.code).join(",");
+      break;
+    }
+    case "competing_risks": {
+      /* The CAUSE NUMBERING is the part worth cross-checking: if the twins
+       * disagreed about which cause is 2, every cumulative incidence would be
+       * attached to the wrong label while the partition identity still held
+       * perfectly. */
+      exp.causes = ((stamp.causes as Array<{ code: number }>) ?? []).map((c) => c.code).join(",");
+      exp.horizons = (stamp.horizonDays as number[] ?? []).join(",");
+      break;
+    }
+    case "propensity_score": {
+      exp.treated_level = String(stamp.treatedLevel ?? "");
+      exp.arm_levels = [stamp.referenceLevel, stamp.treatedLevel].filter(Boolean).join(",");
+      exp.cell_axis_count = String((stamp.cellAxes as string[] ?? []).length);
+      exp.balance_terms = (stamp.balanceTerms as string[] ?? []).join(",");
+      exp.treated_weight = String(stamp.estimand ?? "");
+      exp.control_weight = String(stamp.estimand ?? "");
+      exp.stabilized = stamp.stabilized ? "yes" : "no";
       break;
     }
     case "comorbidity_index": {
@@ -1453,6 +1565,16 @@ const EXPECTED_CONSTANTS: Record<string, Record<"sql" | "sas", ConstantProfileSp
     sql: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
     sas: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
   },
+  propensity_score: {
+    /* NO z and NO z^2, in either twin. This module emits no confidence
+     * interval at all: standardized differences are reported as point
+     * estimates because their sampling distribution under weighting is not the
+     * simple one, and an interval computed as though it were would be a
+     * confident statement about the wrong quantity. A z appearing here later
+     * means someone added an interval, and it should be argued for first. */
+    sql: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
+    sas: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
+  },
   fine_gray: {
     /* Identical to cox, and for the same reasons: z twice in the one-step
      * interval, z^2 once in the score test's alpha = 0.05 decision. */
@@ -1596,6 +1718,7 @@ export const LANGUAGE_LOCAL_KEYS: Record<string, { language: "sql" | "sas"; must
   cox_fit_in_sas: { language: "sas", must: "yes", means: "PROC PHREG fits the model, with ties=breslow stated explicitly rather than left to the default" },
   cox_null_loglik_check: { language: "sas", must: "yes", means: "PHREG's null -2 LOG L is checked against the closed-form partial log-likelihood" },
   cox_score_zero_check: { language: "sas", must: "yes", means: "U(beta_hat) = 0 is verified — the fitted coefficient is checked against the equation that defines it" },
+  ps_anchor_present: { language: "sas", must: "yes", means: "PROC LOGISTIC is run beside the saturated closed form and compared to it, so the saturation claim is checked rather than asserted" },
   fg_fit_null_in_sql: { language: "sql", must: "yes", means: "the fitted subdistribution coefficient is NULL in SQL, not approximated by the one-step estimate above it" },
   fg_fit_in_sas: { language: "sas", must: "yes", means: "PROC PHREG fits with eventcode= — without it it fits a cause-specific Cox model, cleanly, answering a different question" },
   fg_null_loglik_check: { language: "sas", must: "yes", means: "PHREG's null -2 LOG L is checked against the closed-form partial log-likelihood" },

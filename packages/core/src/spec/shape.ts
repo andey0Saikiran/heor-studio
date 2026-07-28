@@ -31,7 +31,7 @@ const DEMO_AXES = new Set(["age_band", "sex", "region", "plan_type", "year"]);
 const ANALYSIS_KINDS = new Set([
   "attrition", "table1", "point_prevalence", "period_prevalence", "cumulative_incidence",
   "incidence_rate", "standardization", "calendar_trend", "resource_use",
-  "comorbidity_index", "regression", "survival", "cox", "competing_risks", "fine_gray", "statistical_engine", "future_stub",
+  "comorbidity_index", "regression", "survival", "cox", "competing_risks", "fine_gray", "propensity_score", "statistical_engine", "future_stub",
 ]);
 const SURVIVAL_CI = new Set(["log_log", "linear"]);
 const SURVIVAL_ENDPOINTS = new Set(["claims_event", "death"]);
@@ -385,6 +385,19 @@ function checkAnalysis(p: Problems, v: unknown, path: string): void {
       needStr(p, v, "groupVarId", path, { nonEmpty: true });
       if (!Array.isArray(v.covariateIds)) p.push(`${path}.covariateIds`, `expected an array of baseline ids, got ${typeOf(v.covariateIds)}`);
       else v.covariateIds.forEach((x, j) => need(p, `${path}.covariateIds[${j}]`, isStr(x), `expected a baseline id string, got ${typeOf(x)}`));
+      break;
+    }
+    case "propensity_score": {
+      needStr(p, v, "groupVarId", path, { nonEmpty: true });
+      needStr(p, v, "method", path, { nonEmpty: true });
+      needStr(p, v, "estimand", path, { nonEmpty: true });
+      needBool(p, v, "stabilized", path);
+      needNum(p, v, "trim", path);
+      for (const key of ["psCovariateIds", "balanceCovariateIds"]) {
+        const arr = (v as Record<string, unknown>)[key];
+        if (!Array.isArray(arr)) p.push(`${path}.${key}`, `expected an array of baseline ids, got ${typeOf(arr)}`);
+        else arr.forEach((x, j) => need(p, `${path}.${key}[${j}]`, isStr(x), `expected a baseline id string, got ${typeOf(x)}`));
+      }
       break;
     }
     case "standardization":

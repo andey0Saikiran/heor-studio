@@ -433,6 +433,38 @@ export interface CompetingRisksAnalysis extends AnalysisCommon {
 }
 
 /**
+ * Propensity-score adjustment.
+ *
+ * The score is a fitted logistic probability, so by the rule this project
+ * settled on in Wave 6.4 the coefficients would be SAS-primary. But unlike Cox,
+ * everything downstream DEPENDS on the score — carve it out and the SQL twin is
+ * empty. The SATURATED design resolves it: with only categorical covariates the
+ * maximum-likelihood fitted probability in each cell IS the observed treated
+ * fraction, so the score is closed form and the whole pipeline executes. See
+ * emitters/ps-core.ts.
+ *
+ * `method` is where the refusals live — nearest-neighbour matching is
+ * order-dependent and cannot be byte-stable, which is a property of the
+ * algorithm and not of this implementation.
+ *
+ * Ref: Rosenbaum & Rubin Biometrika 1983;70:41; Austin & Stuart Stat Med
+ * 2015;34:3661.
+ */
+export interface PropensityScoreAnalysis extends AnalysisCommon {
+  kind: "propensity_score";
+  groupVarId: string;
+  /** the PS model's covariates. Must ALL be categorical — see readiness. */
+  psCovariateIds: string[];
+  /** what balance is reported on; may include continuous covariates */
+  balanceCovariateIds: string[];
+  method: "iptw" | "stratification" | "nearest_neighbour" | "optimal";
+  estimand: "ate" | "att";
+  stabilized: boolean;
+  /** symmetric trim on the score, e.g. 0.05 keeps [0.05, 0.95]. 0 = none. */
+  trim: number;
+}
+
+/**
  * Fine-Gray subdistribution hazard model.
  *
  * The one thing that differs from Cox is the RISK SET: a subject who fails from
@@ -738,6 +770,7 @@ export type Analysis =
   | CoxAnalysis
   | CompetingRisksAnalysis
   | FineGrayAnalysis
+  | PropensityScoreAnalysis
   | StatisticalEngineAnalysis
   | FutureAnalysisStub;
 
@@ -767,6 +800,7 @@ export const EMITTABLE_ANALYSIS_KINDS: ReadonlySet<AnalysisKind> = new Set<Analy
   "cox",
   "competing_risks",
   "fine_gray",
+  "propensity_score",
 ]);
 
 export type DescriptiveAnalysis =
@@ -1327,6 +1361,46 @@ export function validateAnalyses(spec: StudySpec): string[] {
             problems.push(`${w}: exposure "${gvF.id}" has no referenceLevel — without one the direction of the subdistribution hazard ratio is arbitrary.`);
         }
         a.covariateIds.forEach((b) => requireBaseline(b, `${w} covariate`));
+        break;
+      }
+      case "propensity_score": {
+        const gvP = groupVars.find((g) => g.id === a.groupVarId);
+        if (!gvP) problems.push(`${w}: groupVarId "${a.groupVarId}" is not in groupVars[].`);
+        else {
+          if (gvP.levels.length !== 2) problems.push(`${w}: exposure "${gvP.id}" has ${gvP.levels.length} levels — a propensity score is the probability of ONE treatment, so exactly 2 are required.`);
+          if (!gvP.referenceLevel) problems.push(`${w}: exposure "${gvP.id}" has no referenceLevel, so which arm the score is the probability OF is undefined.`);
+        }
+        /* THE MATCHING REFUSALS. Both are properties of the algorithm, not of
+         * this implementation, and both would produce a result that looks
+         * perfectly ordinary. */
+        if (a.method === "nearest_neighbour")
+          problems.push(
+            `${w}: greedy nearest-neighbour matching is NOT emitted. It is ORDER-DEPENDENT — the match a treated subject gets depends on how many controls earlier treated subjects already consumed, so the same data in a different row order produces a different matched set and a different estimate. This project's contract is byte-stable emission and reproducible results, and greedy matching cannot satisfy the second even when the code is identical. Use method:"iptw", or run the matching in your own environment and bring the matched pairs in as a cohort.`,
+          );
+        if (a.method === "optimal")
+          problems.push(
+            `${w}: optimal matching is NOT emitted. Minimizing total distance across all pairs is an assignment problem — it needs the Hungarian algorithm or a min-cost flow, neither of which warehouse SQL can express, and ties between equally-good assignments have to be broken by a rule the method itself does not specify. Use method:"iptw".`,
+          );
+        if (a.method === "stratification")
+          problems.push(
+            `${w}: propensity-score STRATIFICATION is not built yet. It is deterministic and closed form, so this is an unbuilt feature and not a refusal — method:"iptw" is available now.`,
+          );
+        if (a.psCovariateIds.length === 0)
+          problems.push(`${w}: psCovariateIds[] is empty, so there is no propensity model.`);
+        /* SATURATION IS THE WHOLE BASIS of the closed form. One continuous
+         * covariate and the model is no longer saturated, its MLE is not the
+         * cell fraction, and every number downstream would be wrong while
+         * looking entirely reasonable. */
+        for (const id of a.psCovariateIds) {
+          const b = spec.baseline.find((x) => x.id === id);
+          if (!b) { problems.push(`${w}: psCovariateIds references "${id}", which is not in baseline[].`); continue; }
+          if (!["sex", "region", "plan_type", "year"].includes(b.kind))
+            problems.push(
+              `${w}: propensity covariate "${id}" is kind "${b.kind}", which is not categorical. The score here is closed form ONLY because a logistic model over categorical cells is SATURATED — its fitted probability in each cell IS the observed treated fraction. A continuous covariate breaks that, the maximum-likelihood score becomes something only iteratively reweighted least squares can produce, and every weight, diagnostic and balance number downstream would be computed from a score that is not the MLE. Use a banded version of it, or fit the score in SAS and bring it in.`,
+            );
+        }
+        a.balanceCovariateIds.forEach((b) => requireBaseline(b, `${w} balance covariate`));
+        if (a.trim < 0 || a.trim >= 0.5) problems.push(`${w}: trim must be in [0, 0.5); got ${a.trim}.`);
         break;
       }
       case "statistical_engine": {

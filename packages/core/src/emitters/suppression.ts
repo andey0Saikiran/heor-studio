@@ -231,6 +231,17 @@ export const SUPPRESSION_SHAPES: Record<string, SuppressionShape> = {
     keepCols: ["ord", "method"],
     tieBreakCol: "time_days",
   },
+  propensity_score: {
+    /* Cell counts and pseudo-population sizes are the disclosive quantities
+     * here — a cell of one is one identifiable person, and the positivity rows
+     * are built from exactly those cells. Everything masks with them. */
+    labelCols: ["measure", "component", "statistic"],
+    groupCols: ["measure", "component"],
+    countCol: "estimate",
+    maskCols: ["estimate"],
+    keepCols: ["ord", "term", "method"],
+    tieBreakCol: "statistic",
+  },
   fine_gray: {
     /* The same shape as cox — the design rows carry the counts everything else
      * is computed from, and an estimate fitted on a handful of events is as

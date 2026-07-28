@@ -27,7 +27,7 @@ import { emitSas } from "../emitters/sas";
 import { parseParityStamps } from "../emitters/parity";
 import { ANALYSIS_MODULES, STAMP_KIND_BY_ANALYSIS } from "../emitters/modules/registry";
 import { SUPPRESSION_SHAPES } from "../emitters/suppression";
-import { fingerprint, expectedFromStamp, hasConstantProfile } from "./fingerprint";
+import { fingerprint, expectedFromStamp, hasConstantProfile, STAMP_SHARED_KEYS } from "./fingerprint";
 import { GOLD_A_SPEC, GOLD_A_OPTS } from "./fixture";
 import type { Analysis } from "../spec/types";
 import {
@@ -114,14 +114,18 @@ export function fingerprintCoverageChecks(): Check[] {
 
     // the stamp must be cross-checkable against the code
     const exp = expectedFromStamp(stampKind, sq.stamp);
-    const expKeys = Object.keys(exp).length;
+    /* Only KIND-SPECIFIC keys count. setting_filter is set for every stamp that
+     * carries one, so a bare non-emptiness test passed for kinds with no case
+     * in the switch at all — which is how three modules shipped with a stamp
+     * that was never cross-checked. */
+    const expSpecific = Object.keys(exp).filter((k) => !STAMP_SHARED_KEYS.has(k));
     checks.push({
       name: `coverage ${label}: stamp is cross-checked against the code`,
-      status: expKeys >= 1 ? "pass" : "fail",
+      status: expSpecific.length >= 1 ? "pass" : "fail",
       detail:
-        expKeys >= 1
-          ? `${expKeys} stamp value(s) asserted against the emitted code`
-          : `expectedFromStamp("${stampKind}") returns nothing — the PARITY stamp is never compared to what the code actually does`,
+        expSpecific.length >= 1
+          ? `${expSpecific.length} kind-specific stamp value(s) asserted against the emitted code (${expSpecific.join(", ")})`
+          : `expectedFromStamp("${stampKind}") returns no KIND-SPECIFIC expectation (only ${Object.keys(exp).join(", ") || "nothing"}) — the PARITY stamp is never compared to what the code actually does`,
     });
   }
 

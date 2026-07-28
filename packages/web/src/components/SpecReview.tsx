@@ -793,6 +793,7 @@ const ANALYSIS_KIND_LABELS: Record<AnalysisKind, string> = {
   cox: "Cox proportional hazards",
   competing_risks: "Cumulative incidence with competing risks",
   fine_gray: "Fine-Gray subdistribution hazard model",
+  propensity_score: "Propensity-score adjustment (IPTW)",
   statistical_engine: "Statistical comparison",
   future_stub: "Planned (not generated yet)",
 };

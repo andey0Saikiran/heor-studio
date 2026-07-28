@@ -548,6 +548,39 @@ export const EXPECTED = {
     biasInterest365: 0,      // EXACTLY zero, not approximately
     identitySum: 0.375,
   },
+  /* ---------------- Propensity score (IPTW on region) ---------------- *
+   * Cells are the four regions: {P01,P02,P09}, {P03,P04,P10}, {P05,P06} and
+   * {P07,P08}. Saturated scores 1/3, 1/3, 1/2 and 1 — the last because region 4
+   * is entirely DRUG_Y.
+   *
+   *   ATE weights   treated 1/ps -> P06 2, P07 1, P08 1, P09 3, P10 3  = 10
+   *                 control 1/(1-ps) -> 1.5, 1.5, 1.5, 1.5, 2          =  8
+   *
+   * The pseudo-populations are 10 and 8. Both are meant to represent the SAME
+   * population, so the gap of 2 is not rounding: it is exactly the two people
+   * in region 4, who exist in the treated pseudo-population and have no
+   * counterpart in the control one.
+   *
+   * BALANCE IS REPORTED ON AGE AND SEX, NEITHER IN THE SCORE. Age was already
+   * imbalanced and gets WORSE (-0.63246 -> -0.76234); sex was PERFECTLY
+   * balanced (3M/2F in both arms, SMD exactly 0) and weighting breaks it
+   * (0 -> 0.04527). Both are correct behaviour and both are the reason this
+   * module reports before AND after rather than only the number an analyst
+   * wants to see. */
+  propensityScore: {
+    rowCount: 24, // 5 design + 7 positivity + 6 weights + 2 covariates x 3
+    nTreated: 5, nControl: 5, nCells: 4,
+    minScore: 0.33333, maxScore: 1,
+    cellsWithNoControl: 1, cellsWithNoTreated: 0, subjectsOffSupport: 2,
+    pseudoTreated: 10, pseudoControl: 8, pseudoGap: 2,
+    maxWeight: 3,
+    essTreated: 4.16667,  // 25/6
+    essControl: 4.92308,  // 64/13
+    balance: {
+      "Age at index": { unweighted: -0.63246, weighted: -0.76234, worse: true },
+      Sex: { unweighted: 0, weighted: 0.04527, worse: true },
+    } as Record<string, { unweighted: number; weighted: number; worse: boolean }>,
+  },
   /* ---------------- Fine-Gray, the REDUCTION branch ---------------- *
    * Gold A's competing cause never occurs, so every one of these must EQUAL
    * the Cox value above. They are listed separately rather than referenced so
@@ -1315,6 +1348,45 @@ export const GOLD_A_SPEC: StudySpec = {
       horizonDays: [180, 365],
       emitNaiveComparison: true,
       emitLifeTable: true,
+    },
+    /* PROPENSITY SCORE, scored on REGION — chosen because it produces the
+     * configuration this module most needs to be tested against.
+     *
+     * The four region cells hold {P01,P02,P09}, {P03,P04,P10}, {P05,P06} and
+     * {P07,P08}. The last is entirely DRUG_Y, so its saturated score is exactly
+     * 1: there is no control anywhere in it, and no weighting can conjure one.
+     * The treated pseudo-population comes to 10 and the control one to 8, and
+     * the gap of 2 IS those two subjects.
+     *
+     * Balance is reported on age and sex, NEITHER of which is in the score —
+     * deliberately, because weighting on region makes the age imbalance WORSE
+     * (SMD -0.63246 before, -0.76234 after) and a module that could only ever
+     * show balance improving would be hiding its most useful output. */
+    {
+      id: "a_ps", label: "Propensity-score adjustment (IPTW on region)", kind: "propensity_score", enabled: true,
+      groupVarId: "g_arm",
+      psCovariateIds: ["b_region"],
+      balanceCovariateIds: ["b_age", "b_sex"],
+      method: "iptw", estimand: "ate", stabilized: false, trim: 0,
+    },
+    /* A SECOND propensity analysis, scored on REGION x SEX.
+     *
+     * It exists for two reasons. First, a one-axis score never emits a cell
+     * SEPARATOR, so the cell-spelling contract — which the parity stamp records
+     * precisely because a mis-spelled cell changes every score without changing
+     * any comparison of numbers — was structurally unexercised.
+     *
+     * Second, and this is why it earned its place: it is a COUNTEREXAMPLE to a
+     * claim this module used to make. Seven cells, four of them single-arm, so
+     * positivity plainly fails — and yet both pseudo-populations come to
+     * exactly 8, so the gap is ZERO. A nonzero gap proves a violation; a zero
+     * gap proves nothing. subjects_off_support is the authoritative row. */
+    {
+      id: "a_ps2", label: "Propensity-score adjustment (IPTW on region x sex)", kind: "propensity_score", enabled: true,
+      groupVarId: "g_arm",
+      psCovariateIds: ["b_region", "b_sex"],
+      balanceCovariateIds: ["b_age"],
+      method: "iptw", estimand: "ate", stabilized: false, trim: 0,
     },
     /* FINE-GRAY on the same endpoint and the same competing cause as a_cif.
      *

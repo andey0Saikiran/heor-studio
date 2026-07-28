@@ -28,6 +28,7 @@ import type {
   CoxAnalysis,
   CompetingRisksAnalysis,
   FineGrayAnalysis,
+  PropensityScoreAnalysis,
   SurvivalAnalysis,
   TrendSpec,
 } from "../spec/types";
@@ -1468,5 +1469,74 @@ export function fineGrayParity(
     oneStep: "first_newton_step",
     fittedCoefficient: "sas_primary",
     selfChecks: ["null_minus_2_loglik", "score_at_beta_hat_is_zero", "subdistribution_actually_fitted"],
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ *  Propensity score (IPTW)
+ * ------------------------------------------------------------------ */
+
+export interface PropensityScoreParity {
+  id: string;
+  referenceLevel: string;
+  treatedLevel: string;
+  /** THE CELL SPELLING, in order. Two twins that agreed on the covariates but
+   *  concatenated them differently would produce different scores from the same
+   *  data, and no comparison of NUMBERS would catch it — the cell is a string,
+   *  and its construction is part of the contract. */
+  cellAxes: string[];
+  balanceTerms: string[];
+  method: string;
+  estimand: string;
+  stabilized: boolean;
+  trim: number;
+  score: "saturated_closed_form";
+  variance: "frequency_weighted_sample";
+  sasPrimary: "none";
+}
+
+export function propensityScoreLimitations(an: PropensityScoreAnalysis, droppedBalance: string[]): string[] {
+  const out: string[] = [];
+  for (const d of droppedBalance)
+    out.push(`balance covariate "${d}" is NOT reported - only age, sex and a comorbidity_index referencing an ENABLED index analysis are derivable from the cohort spine today`);
+  out.push(`the score is SATURATED over categorical cells, which is what makes it closed form. It is therefore a FULLY INTERACTED model: every combination of the covariates gets its own probability. That is the most flexible specification available and also the one most prone to empty cells - read the positivity rows first`);
+  out.push(`NO CONTINUOUS COVARIATE can enter the score. Readiness refuses one rather than emitting a pipeline whose every number would come from a probability that is not the maximum-likelihood estimate. Band it, or fit the score elsewhere`);
+  out.push(`the OUTCOME MODEL is not run here. This analysis produces the score, the weights and the balance; a weighted effect estimate is a separate analysis, and the weights it would need are per-subject rather than in this summary table`);
+  out.push(`weighting adjusts for what is IN the score and nothing else. Unmeasured confounding is untouched, and covariates outside the model can end up MORE imbalanced - the balance rows report both numbers so that is visible rather than assumed away`);
+  if (an.trim > 0)
+    out.push(`TRIMMING at ${an.trim} changes the estimand: the effect is now for the sub-population whose score falls inside the bounds, which is not the cohort described in the attrition table`);
+  if (an.method === "iptw" && !an.stabilized)
+    out.push(`weights are UNSTABILIZED, so their scale is the pseudo-population rather than the sample. Stabilized weights change the scale and not the balance, and make the effective sample size easier to read against the actual n`);
+  return out;
+}
+
+export const PROPENSITY_SCORE_METHOD_NOTES = [
+  `the score is the SATURATED maximum-likelihood estimate: a logistic model over categorical cells has as many parameters as cells, so its fitted probability in each cell IS the observed treated fraction. That is arithmetic, not a fit - and the SAS twin checks it against PROC LOGISTIC rather than asserting it`,
+  `POSITIVITY IS REPORTED AS A COUNT OF PEOPLE, not as a warning about a distribution. Read subjects_off_support first: it counts the members of cells that are entirely one arm, directly`,
+  `the pseudo-population gap is a CORROBORATING row, not the test. A gap PROVES a positivity violation - it can only come from single-arm cells. A gap of zero proves nothing: the cells containing treated members and the cells containing controls can hold the same number of people by arithmetic accident, and on one of this project's own fixtures they do, with four subjects off support and a gap of exactly zero`,
+  `a weight of 1/0 is UNDEFINED, not large. Those rows are NULL and counted separately rather than summed into a total that would look finite`,
+  `the effective sample size is Kish's: how many EQUALLY weighted subjects carry the same information. It is never more than the actual n, and equal to it only when every weight is the same - so it is the honest denominator for anything computed on the weighted sample`,
+  `the weighted standardized difference uses the FREQUENCY-WEIGHTED sample variance (Austin Stat Med 2009;28:3083). The naive SUM(w(x-xbar)^2)/SUM(w) shrinks the denominator and makes a weighted analysis look better balanced than it is`,
+  `balance is reported BEFORE and AFTER, per covariate, with the change. Weighting can make a covariate WORSE if it is not in the score, and a table that only showed the after number would hide it`,
+  `SAS-PRIMARY: nothing. Every number in this analysis is computed by both twins`,
+];
+
+export function propensityScoreParity(
+  an: PropensityScoreAnalysis,
+  consumed: { referenceLevel: string; treatedLevel: string; cellAxes: string[]; balanceTerms: string[] },
+): PropensityScoreParity {
+  return {
+    id: an.id,
+    referenceLevel: consumed.referenceLevel,
+    treatedLevel: consumed.treatedLevel,
+    cellAxes: consumed.cellAxes,
+    balanceTerms: consumed.balanceTerms,
+    method: an.method,
+    estimand: an.estimand,
+    stabilized: an.stabilized,
+    trim: an.trim,
+    score: "saturated_closed_form",
+    variance: "frequency_weighted_sample",
+    sasPrimary: "none",
   };
 }

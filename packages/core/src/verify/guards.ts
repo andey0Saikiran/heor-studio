@@ -519,6 +519,63 @@ export function verifySilenceGuards(): Check[] {
     );
   }
 
+  /* 3f-sexies. Propensity-score readiness — three refusals and one gate.
+   *
+   * The matching refusals are properties of the ALGORITHM, not of this
+   * implementation, and both would otherwise produce output that looks entirely
+   * ordinary. The saturation gate is the one that protects a number: a
+   * continuous covariate makes the closed-form score stop being the
+   * maximum-likelihood estimate, and every weight downstream would be computed
+   * from it while looking perfectly reasonable. */
+  {
+    const base: StudySpec = JSON.parse(JSON.stringify(GOLD_A_SPEC));
+    const psAnalysis = (over: Record<string, unknown>) => ({
+      id: "guard_ps", label: "guard ps", kind: "propensity_score", enabled: true,
+      groupVarId: "g_arm", psCovariateIds: ["b_region"], balanceCovariateIds: ["b_age"],
+      method: "iptw", estimand: "ate", stabilized: false, trim: 0,
+      ...over,
+    });
+    const probeFor = (over: Record<string, unknown>) => {
+      const sp: StudySpec = JSON.parse(JSON.stringify(base));
+      sp.analyses.push(psAnalysis(over) as never);
+      return specReadiness(sp).problems.find((p) => p.includes("guard_ps"));
+    };
+
+    const nn = probeFor({ method: "nearest_neighbour" });
+    push(
+      "guard: greedy nearest-neighbour matching is refused, naming ORDER-DEPENDENCE",
+      !!nn && nn.includes("ORDER-DEPENDENT") && nn.includes("different matched set"),
+      nn?.slice(0, 130) ?? "accepted greedy matching",
+    );
+    const opt = probeFor({ method: "optimal" });
+    push(
+      "guard: optimal matching is refused, naming the assignment problem",
+      !!opt && opt.includes("assignment problem"),
+      opt?.slice(0, 120) ?? "accepted optimal matching",
+    );
+    /* Stratification is UNBUILT, not wrong — and the message has to say which,
+     * because "not emitted" reads identically for a refusal and for a gap. */
+    const strat = probeFor({ method: "stratification" });
+    push(
+      "guard: PS stratification is named UNBUILT rather than refused",
+      !!strat && strat.includes("not a refusal"),
+      strat?.slice(0, 120) ?? "accepted stratification",
+    );
+
+    const cont = probeFor({ psCovariateIds: ["b_age"] });
+    push(
+      "guard: a CONTINUOUS propensity covariate is refused, because it breaks saturation",
+      !!cont && cont.includes("SATURATED") && cont.includes("iteratively reweighted least squares"),
+      cont?.slice(0, 140) ?? "accepted a continuous covariate",
+    );
+
+    push(
+      "guard: a well-formed IPTW analysis is NOT refused",
+      !probeFor({}),
+      probeFor({}) ?? "no problems",
+    );
+  }
+
   /* 3g. Reproducibility provenance. "Identical spec in, identical code out" is
      only auditable against a generator VERSION and a spec identity — otherwise
      a reviewer re-running a study a year later cannot tell a legitimate emitter

@@ -705,6 +705,62 @@ const MUTATIONS: Mutation[] = [
       /(CAST\('adjusted' AS VARCHAR\) AS component,[\s\S]{0,260}?CAST\(\d+ AS INT\) AS ord,\s*\n\s*)CAST\(NULL AS NUMERIC\) AS estimate/g,
       "$1ROUND(CAST(EXP(score_u0 / NULLIF(information0, 0)) AS NUMERIC), 5) AS estimate"),
   },
+  /* ---- propensity_score ---------------------------------------------------- */
+  {
+    /* The score stops being the cell fraction. Any other expression here is a
+     * different estimator, and the saturated-MLE claim in every method note
+     * becomes false while the pipeline still produces weights that look fine. */
+    name: "SQL propensity score is no longer the cell treated fraction",
+    kind: "propensity_score", lang: "sql",
+    apply: (t) => t.replace(/SUM\(treated\) \* 1\.0 \/ COUNT\(\*\) AS ps/, "0.5 AS ps"),
+  },
+  {
+    /* ATE and ATT differ ONLY in these two expressions. Swapping the control
+     * weight gives a perfectly plausible set of weights for the other
+     * estimand — and the label above them would still say ATE. */
+    name: "SQL uses the ATT control weight while claiming ATE",
+    kind: "propensity_score", lang: "sql",
+    apply: (t) => t.replace(/ELSE 1\.0 \/ NULLIF\(1 - c\.ps, 0\) END AS w_raw/, "ELSE c.ps / NULLIF(1 - c.ps, 0) END AS w_raw"),
+  },
+  {
+    /* A weight of 1/0 becomes a large finite number instead of NULL. It then
+     * sums into a pseudo-population total that looks finite, and the positivity
+     * gap — the whole diagnostic — reports a number nobody can interpret. */
+    name: "SAS lets a zero denominator produce a weight instead of a missing value",
+    kind: "propensity_score", lang: "sas",
+    apply: (t) => t.replace(/if 1 - ps > 0 then w_raw = /, "if 1 else w_raw = "),
+  },
+  {
+    /* THE WEIGHTED VARIANCE, replaced by the naive form. It shrinks the
+     * denominator of every standardized difference, so a weighted analysis
+     * looks better balanced than it is — in the direction nobody checks. */
+    name: "SQL weighted variance becomes the naive SUM(w(x-xbar)^2)/SUM(w)",
+    kind: "propensity_score", lang: "sql",
+    apply: (t) => t.replace(/\(b\.sw_t \/ NULLIF\(b\.sw_t \* b\.sw_t - b\.sw2_t, 0\)\)/g, "(1.0 / NULLIF(b.sw_t, 0))"),
+  },
+  {
+    /* The cell separator dropped, so "Male" + "1" and "Male" + "1..." collapse
+     * into the same cell and two different covariate combinations get one
+     * score. pathMatch is REQUIRED: a one-axis score emits no separator at all,
+     * and programsByKind returns the first program of the kind — which is the
+     * one-axis one, where this mutation is silently vacuous. */
+    name: "SQL drops the cell separator, so distinct covariate combinations collide",
+    kind: "propensity_score", lang: "sql", pathMatch: /_a_ps2\./,
+    apply: (t) => t.replace(/ \|\| '\|' \|\| /g, " || "),
+  },
+  {
+    name: "SAS deletes the PROC LOGISTIC saturation anchor",
+    kind: "propensity_score", lang: "sas",
+    apply: (t) => t.replace(
+      /ps_anchor_verdict = 'PASS: saturated closed form = PROC LOGISTIC fitted probability'/,
+      "ps_anchor_verdict = 'PASS'"),
+  },
+  {
+    // Kish's ESS replaced by the raw n, which is the number weighting invalidates
+    name: "SQL reports the raw n instead of the effective sample size",
+    kind: "propensity_score", lang: "sql",
+    apply: (t) => t.replace(/POWER\(sw_t, 2\) \/ NULLIF\(sw2_t, 0\)/, "CAST(n_t AS DOUBLE PRECISION)"),
+  },
 ];
 
 interface Program {
