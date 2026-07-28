@@ -211,6 +211,42 @@ const MUTATIONS: Mutation[] = [
     apply: (t) => t.replace(/ pctldef=5/, ""),
   },
   {
+    /* The hierarchy stops applying: severe forms ADD to their milder forms
+     * instead of replacing them. Every score rises by a plausible amount and
+     * the table stays perfectly well-formed — cohort mean 1.1 becomes 1.3. */
+    name: "SQL comorbidity hierarchy stops withholding (severe forms ADD to mild ones)",
+    kind: "comorbidity_index", lang: "sql",
+    apply: (t) => t.replace(/THEN 0 ELSE cd\.weight END AS weight_applied/, "THEN cd.weight ELSE cd.weight END AS weight_applied"),
+  },
+  {
+    // A superseded condition's prevalence would silently read as absent.
+    name: "SQL condition prevalence counts only UNSUPERSEDED patients",
+    kind: "comorbidity_index", lang: "sql",
+    apply: (t) => t.replace(/FROM cond cd LEFT JOIN has h ON h\.cond_id = cd\.cond_id/, "FROM cond cd LEFT JOIN applied h ON h.cond_id = cd.cond_id AND h.weight_applied > 0"),
+  },
+  {
+    // Members with no comorbidity drop out, so the mean is over the affected
+    // rather than over the cohort — an inflated index that looks reasonable.
+    name: "SAS index excludes members with no condition (mean over the affected, not the cohort)",
+    kind: "comorbidity_index", lang: "sas",
+    apply: (t) => t.replace(/left join work\._(\w+)_applied as b/, "inner join work._$1_applied as b"),
+  },
+  {
+    name: "SAS comorbidity weight mistyped (severe liver 3 -> 2)",
+    kind: "comorbidity_index", lang: "sas",
+    apply: (t) => t.replace(/cond_id = "sliv"; cond_label = "([^"]*)"; weight = 3;/, 'cond_id = "sliv"; cond_label = "$1"; weight = 2;'),
+  },
+  {
+    name: "SQL loses a supersession rule (complicated diabetes no longer replaces uncomplicated)",
+    kind: "comorbidity_index", lang: "sql",
+    apply: (t) => t.replace(/  UNION ALL SELECT 'dmc' AS winner, 'dm' AS loser\n/, "").replace(/  SELECT 'dmc' AS winner, 'dm' AS loser\n  UNION ALL /, "  "),
+  },
+  {
+    name: "SQL comorbidity lookback widened (365 -> 730 days)",
+    kind: "comorbidity_index", lang: "sql",
+    apply: (t) => t.replace(/\(c\.index_date - 365\)/g, "(c.index_date - 730)"),
+  },
+  {
     name: "SQL resource-use window shortened (364 -> 180 days)",
     kind: "resource_use", lang: "sql",
     apply: (t) => t.replace(/index_date \+ 364\)/g, "index_date + 180)"),

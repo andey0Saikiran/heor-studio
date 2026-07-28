@@ -31,7 +31,7 @@ const DEMO_AXES = new Set(["age_band", "sex", "region", "plan_type", "year"]);
 const ANALYSIS_KINDS = new Set([
   "attrition", "table1", "point_prevalence", "period_prevalence", "cumulative_incidence",
   "incidence_rate", "standardization", "calendar_trend", "resource_use",
-  "statistical_engine", "future_stub",
+  "comorbidity_index", "statistical_engine", "future_stub",
 ]);
 
 const LEDGER_SETTINGS = new Set(["inpatient", "ed", "outpatient", "pharmacy"]);
@@ -252,6 +252,26 @@ function checkAnalysis(p: Problems, v: unknown, path: string): void {
         if (!Array.isArray(v.edPlaceOfService)) p.push(`${path}.edPlaceOfService`, "expected an array of place-of-service codes");
         else v.edPlaceOfService.forEach((x, j) => need(p, `${path}.edPlaceOfService[${j}]`, isStr(x) && SAFE_CODE.test(x), `expected a printable code string, got ${typeOf(x)}`));
       }
+      break;
+    }
+    case "comorbidity_index": {
+      needStr(p, v, "indexName", path, { nonEmpty: true });
+      checkWindow(p, v.lookback, `${path}.lookback`);
+      if (!Array.isArray(v.conditions)) p.push(`${path}.conditions`, `expected an array of conditions, got ${typeOf(v.conditions)}`);
+      else v.conditions.forEach((c, j) => {
+        const cp = `${path}.conditions[${j}]`;
+        if (!isObj(c)) { p.push(cp, `expected a condition object, got ${typeOf(c)}`); return; }
+        needStr(p, c, "id", cp, { nonEmpty: true });
+        needStr(p, c, "label", cp);
+        needStr(p, c, "codeListId", cp, { nonEmpty: true });
+        needNum(p, c, "weight", cp, { min: 0 });
+        if (c.supersedes !== undefined) {
+          if (!Array.isArray(c.supersedes)) p.push(`${cp}.supersedes`, "expected an array of condition ids");
+          else c.supersedes.forEach((x, k) => need(p, `${cp}.supersedes[${k}]`, isStr(x), `expected a condition id string, got ${typeOf(x)}`));
+        }
+      });
+      if (!Array.isArray(v.scoreBands)) p.push(`${path}.scoreBands`, `expected an array of numbers, got ${typeOf(v.scoreBands)}`);
+      else v.scoreBands.forEach((b, j) => need(p, `${path}.scoreBands[${j}]`, isNum(b), `expected a finite number, got ${typeOf(b)}`));
       break;
     }
     case "standardization":

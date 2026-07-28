@@ -317,6 +317,52 @@ export interface ResourceUseAnalysis extends AnalysisCommon {
   edPlaceOfService?: string[];
 }
 
+/* ----- Weighted comorbidity index ----- */
+
+/** One condition in a weighted comorbidity index. */
+export interface ComorbidityCondition {
+  id: string;
+  label: string;
+  /** -> CodeList.id. The CODES are the analyst's, verified per code, never the
+   *  emitter's: Charlson's ICD-10 sets run to hundreds of codes and differ by
+   *  published algorithm. */
+  codeListId: string;
+  weight: number;
+  /** ids of conditions whose weight is NOT added when this one is present.
+   *
+   *  The hierarchy is DECLARED here rather than hardcoded, which is what makes
+   *  this a general index engine instead of a Charlson-only one: severe liver
+   *  disease supersedes mild, complicated diabetes supersedes uncomplicated,
+   *  metastatic tumour supersedes any malignancy — and an Elixhauser-style or
+   *  bespoke index declares its own rules the same way.
+   *
+   *  A superseded condition still reports its PREVALENCE; only its weight is
+   *  withheld. Suppressing the prevalence too would hide a real clinical fact. */
+  supersedes?: string[];
+}
+
+/**
+ * Weighted comorbidity index over a pre-index lookback.
+ *
+ * Deliberately NOT "the Charlson analysis". The scoring algebra and the
+ * hierarchy are the error-prone part and are implemented here; the conditions,
+ * weights and code lists come from the reviewed spec, so a study can run
+ * Charlson (Deyo 1992 / Quan 2005), Elixhauser, or a protocol-specific index
+ * without a new emitter — and so no weight is ever supplied by a machine that
+ * did not read the paper.
+ */
+export interface ComorbidityIndexAnalysis extends AnalysisCommon {
+  kind: "comorbidity_index";
+  /** the index this claims to be — a LABEL carried into the output, never a
+   *  lookup key. The conditions below ARE the definition. */
+  indexName: string;
+  /** pre-index lookback the conditions are ascertained over */
+  lookback: RelativeWindow;
+  conditions: ComorbidityCondition[];
+  /** inclusive lower bounds for the reported score bands, e.g. [0,1,3] */
+  scoreBands: number[];
+}
+
 /* ----- P1 engine: first-class StudySpec sibling entities (referenced by id) ----- */
 
 /** Ref: Manning & Mullahy JHE 2001;20:461 (gamma-log for cost). */
@@ -462,6 +508,7 @@ export type Analysis =
   | StandardizationAnalysis
   | CalendarTrendAnalysis
   | ResourceUseAnalysis
+  | ComorbidityIndexAnalysis
   | StatisticalEngineAnalysis
   | FutureAnalysisStub;
 
@@ -485,6 +532,7 @@ export const EMITTABLE_ANALYSIS_KINDS: ReadonlySet<AnalysisKind> = new Set<Analy
   "statistical_engine",
   "calendar_trend",
   "resource_use",
+  "comorbidity_index",
 ]);
 
 export type DescriptiveAnalysis =
@@ -782,6 +830,31 @@ export function validateAnalyses(spec: StudySpec): string[] {
           problems.push(
             `${w}: an unbounded resource-use window cannot be costed — the per-patient denominator is the observed days INSIDE the window, and "anytime" has no length. Give the window explicit day bounds.`
           );
+        break;
+      }
+      case "comorbidity_index": {
+        if (a.conditions.length === 0) problems.push(`${w}: conditions[] is empty — the index would be zero for everyone.`);
+        const ids = new Set(a.conditions.map((c) => c.id));
+        for (const c of a.conditions) {
+          requireCodeList(c.codeListId, `${w} condition "${c.id}"`);
+          if (!(c.weight > 0)) problems.push(`${w}: condition "${c.id}" has weight ${c.weight} — a weight must be > 0 or the condition contributes nothing.`);
+          for (const sup of c.supersedes ?? []) {
+            if (!ids.has(sup)) problems.push(`${w}: condition "${c.id}" supersedes "${sup}", which is not one of conditions[].`);
+            if (sup === c.id) problems.push(`${w}: condition "${c.id}" supersedes itself.`);
+          }
+        }
+        /* A cycle would make the score depend on evaluation order, which is
+         * exactly the kind of silent non-determinism this project refuses. */
+        for (const c of a.conditions) {
+          for (const sup of c.supersedes ?? []) {
+            const other = a.conditions.find((x) => x.id === sup);
+            if (other?.supersedes?.includes(c.id))
+              problems.push(`${w}: conditions "${c.id}" and "${sup}" supersede EACH OTHER — the score would depend on evaluation order.`);
+          }
+        }
+        if (a.scoreBands.length === 0) problems.push(`${w}: scoreBands[] is empty — no distribution would be reported.`);
+        if (a.scoreBands.some((b, i) => i > 0 && b <= a.scoreBands[i - 1]))
+          problems.push(`${w}: scoreBands must be strictly increasing lower bounds.`);
         break;
       }
       case "statistical_engine": {

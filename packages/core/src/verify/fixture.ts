@@ -165,6 +165,29 @@ const HCRU_OP: Array<[number, string, string, number]> = [
   [8, "2019-06-10", PLACE_ED, 1500],    // P08 -> the only ED visit
 ];
 
+/* Baseline COMORBIDITY claims, all dated inside the 365-day pre-index lookback
+ * and therefore OUTSIDE the resource-use window (which starts at index), so
+ * they move no utilization or cost number either.
+ *
+ * Diagnosis matching is exact membership (`dx in (&list.)`), not prefix, so
+ * E10.0 / E10.2 cannot collide with the outcome list's E11.9.
+ *
+ * P03 carries diabetes BOTH with and without complications, and P05 carries
+ * liver disease BOTH mild and severe — the two supersession rules, planted so
+ * the hierarchy is exercised in both directions rather than assumed. */
+const CCI_DX: Array<[number, string]> = [
+  [1, "I500"], // CHF                             -> 1
+  [2, "E100"], // diabetes, uncomplicated         -> 1
+  [3, "E100"], // P03: uncomplicated ...
+  [3, "E102"], //      ... AND complicated        -> 2, NOT 3
+  [4, "K703"], // mild liver                      -> 1
+  [5, "K703"], // P05: mild ...
+  [5, "K721"], //      ... AND severe             -> 3, NOT 4
+  [6, "I500"], // P06: CHF ...
+  [6, "E102"], //      ... AND complicated DM     -> 3
+];
+const CCI_DATE = "2018-06-15";
+
 /** extra PHARMACY fill: P03 gets a second, non-index fill. */
 const HCRU_RX: Array<[number, string, number]> = [[3, "2019-02-01", 100]];
 
@@ -199,6 +222,7 @@ export function fixtureSeedSql(): string {
   const opVals = [
     ...AE.map(([id, d]) => `(${id}, DATE '${d}', '0', 'E119', NULL, NULL, NULL, NULL, NULL, '${PLACE_OFFICE}', 200)`),
     ...HCRU_OP.map(([id, d, place, pay]) => `(${id}, DATE '${d}', '0', '${NEUTRAL_DX}', NULL, NULL, NULL, NULL, NULL, '${place}', ${pay})`),
+    ...CCI_DX.map(([id, dx]) => `(${id}, DATE '${CCI_DATE}', '0', '${dx}', NULL, NULL, NULL, NULL, NULL, '${PLACE_OFFICE}', 200)`),
   ].join(",\n  ");
   lines.push(
     `INSERT INTO ccaeo_all (enrolid,svcdate,dxver,dx1,dx2,dx3,dx4,proc1,proctyp,stdplac,paytot) VALUES\n  ${opVals};`,
@@ -457,6 +481,37 @@ export const EXPECTED = {
       RX:  { users: 10, encounters: 11, encMean: 1.1,  encSd: 0.31623, encMedian: 1, encMax: 2, paidTotal: 1100,  paidMean: 110,  paidSd: 31.62,   paidMedian: 100, paidMax: 200 },
     } as Record<string, { users: number; encounters: number; encMean: number; encSd: number; encMedian: number; encMax: number; paidTotal: number; paidMean: number; paidSd: number; paidMedian: number; paidMax: number }>,
   },
+  /* Weighted comorbidity index, hand-derived per patient.
+   *
+   *   P01  CHF                        -> 1
+   *   P02  DM uncomplicated           -> 1
+   *   P03  DM uncomplicated + DM comp -> 2   (uncomplicated withheld, NOT 1+2=3)
+   *   P04  mild liver                 -> 1
+   *   P05  mild + severe liver        -> 3   (mild withheld, NOT 1+3=4)
+   *   P06  CHF + DM complicated       -> 3
+   *   P07-P10                         -> 0
+   *
+   * scores 1,1,2,1,3,3,0,0,0,0 -> sum 11, mean 1.1
+   *   sorted 0,0,0,0,1,1,1,2,3,3 -> median = (1+1)/2 = 1, max 3
+   *   sample variance = 12.90/9 = 1.43333, sd = 1.19722
+   *
+   * Superseded conditions still report PREVALENCE: uncomplicated diabetes shows
+   * 2 patients (P02, P03) even though P03 contributed 0 for it. */
+  comorbidityIndex: {
+    rowCount: 9, // 5 conditions + 3 score bands + 1 index row
+    conditions: {
+      "Congestive heart failure": { patients: 2, weight: 1 },
+      "Diabetes, uncomplicated": { patients: 2, weight: 1 },
+      "Diabetes with complications": { patients: 2, weight: 2 },
+      "Mild liver disease": { patients: 2, weight: 1 },
+      "Moderate/severe liver disease": { patients: 1, weight: 3 },
+    } as Record<string, { patients: number; weight: number }>,
+    bands: { "0": 4, "1-2": 4, "3+": 2 } as Record<string, number>,
+    index: { mean: 1.1, sd: 1.19722, median: 1, max: 3 },
+    /* What a hierarchy-less implementation would produce instead — written down
+     * so the failure has a name when it appears. */
+    withoutHierarchy: { p03: 3, p05: 4, sum: 13, mean: 1.3 },
+  },
   /* SMD balance, DRUG_X (reference) vs DRUG_Y, over the 10-patient cohort.
    *   ages X = 40,45,50,55,60 -> mean 50, sample variance 62.5
    *   ages Y = 45,50,55,60,65 -> mean 55, sample variance 62.5
@@ -494,6 +549,15 @@ export const GOLD_A_SPEC: StudySpec = {
       id: "ae_dx", label: "AE (T2DM E11.9)", system: "icd10cm",
       codes: [{ code: "E11.9", source: "user_entered", verified: true }],
     },
+    /* Comorbidity code lists. INVENTED single codes, not a published algorithm:
+     * the fixture's job is to verify the SCORING (weights + hierarchy), and a
+     * partial transcription of a real Charlson code set would be worse than an
+     * obviously synthetic one — it would look authoritative and undercount. */
+    { id: "cci_chf_dx",  label: "Congestive heart failure",     system: "icd10cm", codes: [{ code: "I50.0", source: "user_entered", verified: true }] },
+    { id: "cci_dm_dx",   label: "Diabetes, uncomplicated",      system: "icd10cm", codes: [{ code: "E10.0", source: "user_entered", verified: true }] },
+    { id: "cci_dmc_dx",  label: "Diabetes with complications",  system: "icd10cm", codes: [{ code: "E10.2", source: "user_entered", verified: true }] },
+    { id: "cci_mliv_dx", label: "Mild liver disease",           system: "icd10cm", codes: [{ code: "K70.3", source: "user_entered", verified: true }] },
+    { id: "cci_sliv_dx", label: "Moderate/severe liver disease", system: "icd10cm", codes: [{ code: "K72.1", source: "user_entered", verified: true }] },
   ],
   indexEvent: { type: "first_drug_claim", codeListId: "index_drug", indexPeriod: { start: "2019-01-01", end: "2019-12-31" } },
   enrollment: { baselineDays: 365, followupDays: 365, gapAllowanceDays: 31, requiresRxCoverage: true },
@@ -685,6 +749,23 @@ export const GOLD_A_SPEC: StudySpec = {
       settings: ["inpatient", "ed", "outpatient", "pharmacy"],
       costField: "paytot",
       includeCombined: true,
+    },
+    /* Weighted comorbidity index. Weights follow the classic Charlson shape
+     * (1 / 2 / 3) but are declared HERE, in the spec, exactly as a real study
+     * would declare them after reading the source paper — the emitter supplies
+     * no weight of its own. Both supersession rules are exercised. */
+    {
+      id: "a_cci", label: "Baseline comorbidity index", kind: "comorbidity_index", enabled: true,
+      indexName: "charlson_like_fixture",
+      lookback: { start: -365, end: 0, includesIndex: true },
+      conditions: [
+        { id: "chf",  label: "Congestive heart failure",      codeListId: "cci_chf_dx",  weight: 1 },
+        { id: "dm",   label: "Diabetes, uncomplicated",       codeListId: "cci_dm_dx",   weight: 1 },
+        { id: "dmc",  label: "Diabetes with complications",   codeListId: "cci_dmc_dx",  weight: 2, supersedes: ["dm"] },
+        { id: "mliv", label: "Mild liver disease",            codeListId: "cci_mliv_dx", weight: 1 },
+        { id: "sliv", label: "Moderate/severe liver disease", codeListId: "cci_sliv_dx", weight: 3, supersedes: ["mliv"] },
+      ],
+      scoreBands: [0, 1, 3],
     },
     /* Covariate balance between the exposure arms. Age is deliberately
      * IMBALANCED (SMD -0.63246, |SMD| > 0.1) and sex is deliberately BALANCED

@@ -14,6 +14,7 @@
  */
 import type {
   CalendarTrendAnalysis,
+  ComorbidityIndexAnalysis,
   CodeSystem,
   CumulativeIncidenceAnalysis,
   IncidenceRateAnalysis,
@@ -920,6 +921,75 @@ export function resourceUseParity(
       pharmacy: "one_per_member_date_ndc",
     },
     daysPerYear: consumed.daysPerYear,
+    medianEstimator: "percentile_cont_equivalent",
+  };
+}
+
+/* ================================================================== *
+ *  Weighted comorbidity index
+ * ================================================================== */
+
+/** Score-band labels from inclusive lower bounds, e.g. [0,1,3] -> 0 / 1-2 / 3+. */
+export function scoreBandLabels(lowers: number[]): Array<{ lower: number; label: string }> {
+  const b = [...lowers].sort((x, y) => x - y);
+  return b.map((lo, i) => ({
+    lower: lo,
+    label: i === b.length - 1 ? `${lo}+` : b[i + 1] - lo === 1 ? `${lo}` : `${lo}-${b[i + 1] - 1}`,
+  }));
+}
+
+/** The parameter set a comorbidity-index twin must consume identically. */
+export interface ComorbidityIndexParity {
+  id: string;
+  indexName: string;
+  lookback: { start: number | "anytime_before"; end: number | "anytime_after"; includesIndex: boolean };
+  /** every condition, in emission order, with the weight actually used */
+  conditions: Array<{ id: string; codeListId: string; weight: number }>;
+  /** the hierarchy, flattened and sorted so both twins serialize it identically */
+  supersessions: Array<{ winner: string; loser: string }>;
+  bands: string[];
+  /** what supersession actually does, so the stamp cannot imply more than the code does */
+  supersessionEffect: "withholds_weight_keeps_prevalence";
+  medianEstimator: "percentile_cont_equivalent";
+}
+
+/** Spec options the comorbidity-index twins do NOT implement yet. */
+export function comorbidityIndexLimitations(an: ComorbidityIndexAnalysis): string[] {
+  const out: string[] = [];
+  out.push(
+    `the WEIGHTS and CODE LISTS are taken verbatim from the spec and are NOT validated against any published index - "${an.indexName}" is the label the analyst attached to them, not a lookup this program performed`,
+  );
+  out.push(
+    `conditions are ascertained from ANY care setting and ANY diagnosis position, with a single qualifying claim; published algorithms that require two outpatient claims or an inpatient diagnosis are NOT enforced, which will over-ascertain relative to those definitions`,
+  );
+  out.push(
+    `no age adjustment is applied - the age-weighted Charlson variants add points by decade, and adding them here would double count whenever age is already a covariate`,
+  );
+  return out;
+}
+
+/** Method notes ALWAYS emitted (describe what IS computed). */
+export const COMORBIDITY_INDEX_METHOD_NOTES = [
+  `score = SUM of the weights of the conditions present in the lookback, after the hierarchy: when a condition that SUPERSEDES another is present, the superseded condition contributes 0 rather than its weight (severe liver disease replaces mild, complicated diabetes replaces uncomplicated, and so on as the spec declares)`,
+  `a superseded condition still reports its PREVALENCE in the condition rows - only its weight is withheld. Hiding the prevalence as well would let a scoring convention conceal a clinical fact`,
+  `every cohort member is scored, including those with no qualifying condition, so the mean is over the whole cohort and a score of 0 is a real value rather than a missing one`,
+  `the lookback is a fixed window relative to index; a member with less observed history has fewer chances to accrue conditions, which biases the index DOWNWARD for late enrollees unless continuous enrollment is required`,
+  `the median is comparable across the twins (PERCENTILE_CONT at p = 0.5 equals SAS PCTLDEF=5 exactly); no quartile is emitted, because the two estimators diverge away from the median`,
+];
+
+/** The parity record for a comorbidity-index twin, from consumed values. */
+export function comorbidityIndexParity(
+  an: ComorbidityIndexAnalysis,
+  consumed: { pairs: Array<{ winner: string; loser: string }>; bands: Array<{ lower: number; label: string }> },
+): ComorbidityIndexParity {
+  return {
+    id: an.id,
+    indexName: an.indexName,
+    lookback: { start: an.lookback.start, end: an.lookback.end, includesIndex: an.lookback.includesIndex },
+    conditions: an.conditions.map((c) => ({ id: c.id, codeListId: c.codeListId, weight: c.weight })),
+    supersessions: [...consumed.pairs].sort((a, b) => (a.winner + a.loser).localeCompare(b.winner + b.loser)),
+    bands: consumed.bands.map((b) => b.label),
+    supersessionEffect: "withholds_weight_keeps_prevalence",
     medianEstimator: "percentile_cont_equivalent",
   };
 }

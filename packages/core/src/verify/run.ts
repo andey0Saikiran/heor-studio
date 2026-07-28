@@ -681,6 +681,73 @@ export async function verifyGoldA(): Promise<VerificationResult> {
       detail: `mean $${Number(all?.paid_per_patient).toLocaleString()} vs median $${Number(all?.paid_median).toLocaleString()}`,
     });
 
+    /* ---- weighted comorbidity index (executed vs hand-derived) ----
+     * The hierarchy is the whole point: without it P03 scores 3 instead of 2
+     * and P05 scores 4 instead of 3, and the cohort mean reads 1.3 instead of
+     * 1.1 — a plausible number, uniformly wrong, on every adjusted estimate
+     * downstream. */
+    const cix = EXPECTED.comorbidityIndex;
+    eq(
+      `comorbidity-index rows = ${cix.rowCount} (5 conditions + 3 bands + index)`,
+      await scalar<number>(db, "SELECT count(*)::int FROM tz_study_cci"),
+      cix.rowCount,
+    );
+    const cciRow = async (component: string, category: string) =>
+      (
+        await rows<{ patients: number; denominator: number; pct: number; weight: number | null; score_mean: number | null; score_sd: number | null; score_median: number | null; score_max: number | null }>(
+          db,
+          `SELECT patients, denominator, pct::float8, weight::float8, score_mean::float8, score_sd::float8,
+                  score_median::float8, score_max::float8
+             FROM tz_study_cci WHERE component = '${component}' AND category = '${category.replace(/'/g, "''")}'`,
+        )
+      )[0];
+    for (const [label, want] of Object.entries(cix.conditions)) {
+      const r = await cciRow("condition", label);
+      const tag = `cci condition ${label}`;
+      if (!r) {
+        checks.push({ name: tag, status: "fail", detail: "row missing" });
+        continue;
+      }
+      eq(`${tag}: patients = ${want.patients}`, Number(r.patients), want.patients);
+      approx(`${tag}: weight = ${want.weight} (from the spec, not the emitter)`, Number(r.weight), want.weight, 0.00001);
+    }
+    /* Superseded conditions must still report prevalence. P03 contributed 0 for
+     * uncomplicated diabetes, but they still HAVE it — a scoring convention
+     * must not erase a clinical fact. */
+    checks.push({
+      name: "cci: a SUPERSEDED condition still reports its prevalence (P03 has uncomplicated diabetes)",
+      status: Number((await cciRow("condition", "Diabetes, uncomplicated"))?.patients) === 2 ? "pass" : "fail",
+      detail: `uncomplicated diabetes = ${(await cciRow("condition", "Diabetes, uncomplicated"))?.patients} patients (P02 and P03), though P03 contributed 0 weight for it`,
+    });
+    for (const [band, want] of Object.entries(cix.bands)) {
+      const r = await cciRow("score_band", band);
+      if (!r) {
+        checks.push({ name: `cci band ${band}`, status: "fail", detail: "row missing" });
+        continue;
+      }
+      eq(`cci band ${band}: patients = ${want}`, Number(r.patients), want);
+    }
+    const idx = await cciRow("index", "Overall");
+    if (!idx) {
+      checks.push({ name: "cci: index row exists", status: "fail", detail: "no index row" });
+    } else {
+      eq("cci: every cohort member is scored (zeros included)", Number(idx.patients), EXPECTED.finalCohortN);
+      approx(`cci: mean score = ${cix.index.mean}`, Number(idx.score_mean), cix.index.mean, 0.00001);
+      approx(`cci: score SD = ${cix.index.sd}`, Number(idx.score_sd), cix.index.sd, 0.00001);
+      approx(`cci: median score = ${cix.index.median}`, Number(idx.score_median), cix.index.median, 0.00001);
+      approx(`cci: max score = ${cix.index.max}`, Number(idx.score_max), cix.index.max, 0.00001);
+      /* Named explicitly, because a hierarchy that silently stops applying
+       * produces a number that looks entirely reasonable. */
+      checks.push({
+        name: "cci: the supersession hierarchy IS applied (mean 1.1, not the 1.3 of a flat sum)",
+        status: Math.abs(Number(idx.score_mean) - cix.index.mean) < 0.00001 ? "pass" : "fail",
+        detail:
+          Math.abs(Number(idx.score_mean) - cix.withoutHierarchy.mean) < 0.00001
+            ? `mean ${idx.score_mean} — this is EXACTLY the flat sum: severe/complicated forms are being ADDED to their milder forms instead of replacing them`
+            : `mean ${idx.score_mean} (P03 scores 2 not ${cix.withoutHierarchy.p03}; P05 scores 3 not ${cix.withoutHierarchy.p05})`,
+      });
+    }
+
     invariants.push(...(await runInvariants(db, "tz_study")));
   }
 

@@ -153,6 +153,22 @@ function sqlWindowOffset(sql: string, cmp: ">=" | "<="): string {
   return bare ? "0" : "ABSENT";
 }
 
+/** Lower bound of a pre-index lookback, from either SQL dialect. */
+function sqlLookbackOffset(sql: string): string {
+  const pg = /event_date\s*>=\s*\(c\.index_date\s*([+-])\s*(\d+)\)/i.exec(sql);
+  if (pg) return String(pg[1] === "-" ? -Number(pg[2]) : Number(pg[2]));
+  const sf = /event_date\s*>=\s*DATEADD\(\s*day\s*,\s*(-?\d+)\s*,/i.exec(sql);
+  if (sf) return String(Number(sf[1]));
+  return /event_date\s*>=\s*c\.index_date(?!\s*[+-])/i.test(sql) ? "0" : "ABSENT";
+}
+
+/** SAS twin of the above. */
+function sasLookbackOffset(sas: string): string {
+  const m = /svcdate\s*>=\s*a\.index_date\s*([+-])\s*(\d+)/i.exec(sas);
+  if (m) return String(m[1] === "-" ? -Number(m[2]) : Number(m[2]));
+  return /svcdate\s*>=\s*a\.index_date(?!\s*[+-])/i.test(sas) ? "0" : "ABSENT";
+}
+
 /** SAS twin of the above: `a.index_date`, `a.index_date + 364`. */
 function sasWindowOffset(expr: string | undefined): string {
   if (expr === undefined) return "ABSENT";
@@ -242,6 +258,29 @@ function sqlFingerprint(kind: string, raw: string): Fingerprint {
       // so matching inside it needs balancing (same trap as POWER above)
       put(fp, "imbalance_threshold", grab(sql, [/>\s*([\d.]+)\s*THEN 1/i]));
       put(fp, "reference_arm", grab(sql, [/IN \('([^']+)',/i]));
+      break;
+    }
+    case "comorbidity_index": {
+      /* The index IS its weights and its hierarchy. A dropped supersession or a
+       * shifted weight produces a score that is wrong by a plausible amount on
+       * every patient at once, so both are scraped in order. */
+      const conds = [...sql.matchAll(/SELECT '([^']+)' AS cond_id, '.*' AS cond_label, (\d+) AS weight, (\d+) AS cond_ord/g)];
+      put(fp, "condition_ids", conds.map((m) => m[1]).join(","));
+      put(fp, "condition_weights", conds.map((m) => m[2]).join(","));
+      put(fp, "supersessions",
+        [...sql.matchAll(/SELECT '([^']+)' AS winner, '([^']+)' AS loser/g)].map((m) => `${m[1]}>${m[2]}`).join(","));
+      put(fp, "lookback_lower_days", sqlLookbackOffset(sql));
+      // The hierarchy must WITHHOLD the weight, not delete the condition.
+      put(fp, "hierarchy_withholds_weight", /THEN 0 ELSE cd\.weight END AS weight_applied/i.test(sql) ? "yes" : "no");
+      /* Condition prevalence must come from `has` (everyone who HAS it), not
+       * from `applied` (whose weight survived) — otherwise a superseded
+       * condition silently reads as absent. */
+      put(fp, "superseded_prevalence_kept", /FROM cond cd LEFT JOIN has h ON h\.cond_id = cd\.cond_id/i.test(sql) ? "yes" : "no");
+      // Zeros count: the mean is over the cohort, not over the affected.
+      put(fp, "zeros_included", /FROM cohort c LEFT JOIN applied a/i.test(sql) ? "yes" : "no");
+      put(fp, "score_bands", (sql.match(/WHEN score >= (\d+) THEN '[^']*'/g) ?? []).map((m) => (/(\d+)/.exec(m) ?? [])[1]).join(","));
+      put(fp, "quantile_probabilities",
+        [...new Set((sql.match(/PERCENTILE_CONT\(([\d.]+)\)/gi) ?? []).map((m) => (/([\d.]+)/.exec(m) ?? [])[1]))].sort().join(","));
       break;
     }
     case "resource_use": {
@@ -375,6 +414,20 @@ function sasFingerprint(kind: string, rawSas: string, setup: string): Fingerprin
       put(fp, "pooled_halved_denominator", /\/\s*2\s*\)/.test(sas) ? "yes" : "no");
       put(fp, "imbalance_threshold", grab(sas, [/abs\(smd\)\s*>\s*([\d.]+)/i]));
       put(fp, "reference_arm", grab(sas, [/in \('([^']+)',/i]));
+      break;
+    }
+    case "comorbidity_index": {
+      const conds = [...sas.matchAll(/cond_id = "([^"]+)"; cond_label = "[^"]*"; weight = (\d+); cond_ord = (\d+)/g)];
+      put(fp, "condition_ids", conds.map((m) => m[1]).join(","));
+      put(fp, "condition_weights", conds.map((m) => m[2]).join(","));
+      put(fp, "supersessions",
+        [...sas.matchAll(/winner = "([^"]+)"; loser = "([^"]+)"/g)].map((m) => `${m[1]}>${m[2]}`).join(","));
+      put(fp, "lookback_lower_days", sasLookbackOffset(sas));
+      put(fp, "hierarchy_withholds_weight", /then 0 else cd\.weight end as weight_applied/i.test(sas) ? "yes" : "no");
+      put(fp, "superseded_prevalence_kept", /left join work\._\w+_has as h on h\.cond_id = cd\.cond_id/i.test(sas) ? "yes" : "no");
+      put(fp, "zeros_included", /left join work\._\w+_applied as b/i.test(sas) ? "yes" : "no");
+      put(fp, "score_bands", (sas.match(/score >= (\d+) then do/gi) ?? []).map((m) => (/(\d+)/.exec(m) ?? [])[1]).join(","));
+      put(fp, "quantile_probabilities", /pctldef=5/i.test(sas) && /median\s*=/i.test(sas) ? "0.5" : "");
       break;
     }
     case "resource_use": {
@@ -608,6 +661,27 @@ export function expectedFromStamp(kind: string, stamp: Record<string, unknown>):
       }
       break;
     }
+    case "comorbidity_index": {
+      if (Array.isArray(stamp.conditions)) {
+        const cs = stamp.conditions as Array<{ id: string; weight: number }>;
+        exp.condition_ids = cs.map((c) => c.id).join(",");
+        exp.condition_weights = cs.map((c) => String(c.weight)).join(",");
+      }
+      if (Array.isArray(stamp.supersessions))
+        exp.supersessions = (stamp.supersessions as Array<{ winner: string; loser: string }>)
+          .map((p) => `${p.winner}>${p.loser}`).join(",");
+      const lb = stamp.lookback as { start?: unknown } | undefined;
+      if (lb && typeof lb.start === "number") exp.lookback_lower_days = String(lb.start);
+      /* The stamp claims supersession only withholds the WEIGHT. The code must
+       * do exactly that — and must still report the superseded prevalence. */
+      if (stamp.supersessionEffect === "withholds_weight_keeps_prevalence") {
+        exp.hierarchy_withholds_weight = "yes";
+        exp.superseded_prevalence_kept = "yes";
+      }
+      if (stamp.medianEstimator === "percentile_cont_equivalent") exp.quantile_probabilities = "0.5";
+      exp.zeros_included = "yes";
+      break;
+    }
     case "resource_use": {
       const w = stamp.window as { start?: unknown; end?: unknown } | undefined;
       if (w && typeof w.start === "number") exp.window_lower_days = String(w.start);
@@ -704,6 +778,13 @@ const EXPECTED_CONSTANTS: Record<string, Record<"sql" | "sas", Record<string, nu
   cumulative_incidence: {
     sql: { z: 2, z2_half: 2, z2: 2, z2_quarter: 2 },
     sas: { z: 1, z2_half: 2, z2: 2, z2_quarter: 1 },
+  },
+  comorbidity_index: {
+    /* No interval anywhere — the index reports a mean, an SD and a median, none
+     * of which is a confidence interval. A z here would mean an interval was
+     * added to a weighted score without saying so. */
+    sql: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
+    sas: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
   },
   resource_use: {
     /* No interval is computed anywhere in this module — an SD is a dispersion

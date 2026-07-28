@@ -155,6 +155,24 @@ export const SUPPRESSION_SHAPES: Record<string, SuppressionShape> = {
     keepCols: ["observed_days", "cost_field", "setting_ord"],
     tieBreakCol: "setting",
   },
+  comorbidity_index: {
+    /* The score-band rows DO partition the cohort, so a lone masked band is
+     * recoverable from the others plus the index row's n. Condition rows do not
+     * partition anything (a member can have several), but they sit in the same
+     * table and a small condition cell is disclosive on its own.
+     *
+     * The WEIGHT stays visible: it is a published constant the analyst supplied,
+     * not a property of any patient, and masking it would hide the method
+     * without protecting anyone — the same call the standardization shape makes
+     * about reference weights. */
+    labelCols: ["measure", "component", "category"],
+    groupCols: ["measure", "component"],
+    countCol: "patients",
+    denomCol: "denominator",
+    maskCols: ["patients", "denominator", "pct", "score_mean", "score_sd", "score_median", "score_max"],
+    keepCols: ["ord", "weight", "index_name"],
+    tieBreakCol: "category",
+  },
   table1: {
     labelCols: ["ord", "characteristic", "category"],
     groupCols: ["characteristic"],
