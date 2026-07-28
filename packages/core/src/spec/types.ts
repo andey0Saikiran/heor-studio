@@ -322,6 +322,64 @@ export interface ResourceUseAnalysis extends AnalysisCommon {
   edPlaceOfService?: string[];
 }
 
+/* ----- Survival / time-to-event ----- */
+
+/**
+ * WHAT the event is.
+ *
+ * A discriminated union rather than a string, because one of these arms is
+ * REFUSED and a refusal that keys on a typed field cannot be evaded by
+ * rephrasing the analysis label. See specReadiness's "survival" case for the
+ * mortality argument in full.
+ */
+export type SurvivalEndpoint =
+  | { kind: "claims_event"; outcomeDefinition: OutcomeDefinition }
+  | { kind: "death"; source: "dstatus" | "ssa_master_file" | "linked_registry" };
+
+/** Survival-curve interval.
+ *  `log_log` transforms to ln(-ln S), so its limits are inside [0,1] by
+ *  construction; `linear` is Greenwood on the raw scale and needs clamping.
+ *  Both are closed form, so unlike a p-value both are executable.
+ *  Ref: Kalbfleisch & Prentice 2e (2002) §1.4; Greenwood 1926. */
+export type SurvivalCiMethod = "log_log" | "linear";
+
+/**
+ * Kaplan-Meier survival, optionally with a two-group log-rank test.
+ *
+ * Almost all of this is executable, which makes it unusual here: the
+ * product-limit estimator, Greenwood's variance, both interval forms, the
+ * median and the log-rank statistic itself are ALL closed form. Only the
+ * chi-square tail probability is not, so only the p-value is SAS-primary — a
+ * much smaller carve-out than the regression family needs.
+ *
+ * Ref: Kaplan & Meier JASA 1958;53:457; Mantel Cancer Chemother Rep 1966;50:163;
+ * Peto & Peto JRSS-A 1972;135:185.
+ */
+export interface SurvivalAnalysis extends AnalysisCommon {
+  kind: "survival";
+  endpoint: SurvivalEndpoint;
+  /** prevalent-case washout, so the curve starts from a genuinely at-risk cohort */
+  washout: RelativeWindow;
+  /** the clock. MUST censor at "outcome" — see readiness. */
+  personTimeRule: PersonTimeRule;
+  /** day marks at which S(t) is reported, ascending */
+  horizonDays: number[];
+  ciMethod: SurvivalCiMethod;
+  /** two-level exposure compared with the log-rank test; omitted = one curve */
+  groupVarId?: string;
+  /** emit the per-event-time life table. It is the most disclosive table this
+   *  project produces — most of its rows have n_event = 1, which is one
+   *  patient's event date — so it exists behind an explicit opt-in. */
+  emitLifeTable: boolean;
+}
+
+/** The outcome definition a survival endpoint carries, or null for the refused
+ *  mortality endpoint. Callers that reach the emitters never see null: readiness
+ *  blocks the death arm before any code is generated. */
+export function survivalOutcome(an: SurvivalAnalysis): OutcomeDefinition | null {
+  return an.endpoint.kind === "claims_event" ? an.endpoint.outcomeDefinition : null;
+}
+
 /* ----- Regression (one GLM emitter) ----- */
 
 /**
@@ -569,6 +627,7 @@ export type Analysis =
   | ResourceUseAnalysis
   | ComorbidityIndexAnalysis
   | RegressionAnalysis
+  | SurvivalAnalysis
   | StatisticalEngineAnalysis
   | FutureAnalysisStub;
 
@@ -990,6 +1049,64 @@ export function validateAnalyses(spec: StudySpec): string[] {
             problems.push(`${w}: exposure "${gv.id}" has no referenceLevel — without one the sign of every coefficient is arbitrary.`);
         }
         a.covariateIds.forEach((b) => requireBaseline(b, `${w} covariate`));
+        break;
+      }
+      case "survival": {
+        /* THE MORTALITY REFUSAL.
+         *
+         * This gate ships BEFORE any survival module, which is the whole point:
+         * the tool must be unable to accept a request for overall survival
+         * during the window in which overall survival is unbuildable. The
+         * failure it prevents is not a crash — it is a complete, publishable
+         * curve that answers a question nobody asked.
+         *
+         * MarketScan's only native death signal is DSTATUS on the inpatient,
+         * services and facility-header tables. It records discharge status, so
+         * it captures IN-HOSPITAL death only: a member who dies at home, in
+         * hospice or in an ED that does not admit them is indistinguishable
+         * from a member who disenrolled. And it is masked from data year 2016
+         * onward, so on any recent delivery the signal is not merely partial —
+         * it is absent.
+         *
+         * An "overall survival" curve built on it is therefore a curve of
+         * "time to in-hospital death, among deaths occurring before 2016,
+         * treating every other death as censoring". Non-informative censoring
+         * — the assumption Kaplan-Meier rests on — is violated in the exact
+         * direction that flatters survival, because dying is the most
+         * censoring-like thing a person can do. */
+        if (a.endpoint.kind === "death") {
+          problems.push(
+            `${w}: overall survival is REFUSED, not approximated. MarketScan's only native death signal is DSTATUS, which records IN-HOSPITAL death only and is masked from data year 2016 — so this curve would silently become "time to in-hospital death before 2016, with every other death censored". Censoring by death is exactly the informative censoring Kaplan-Meier assumes away, and it biases survival UPWARD. Use a claims_event endpoint (an observable diagnosis or procedure), or bring linked mortality data and a design that states its ascertainment.`,
+          );
+          break;
+        }
+        requireCodeList(a.endpoint.outcomeDefinition.codeListId, `${w} endpoint`);
+        if (a.endpoint.outcomeDefinition.minClaims < 1) problems.push(`${w}: minClaims must be >= 1.`);
+        if (a.endpoint.outcomeDefinition.minClaims >= 2 && a.endpoint.outcomeDefinition.claimSeparationDays == null)
+          problems.push(`${w}: minClaims>=2 requires claimSeparationDays.`);
+        if (a.horizonDays.length === 0) problems.push(`${w}: horizonDays[] is empty — no survival probability would be reported.`);
+        if (a.horizonDays.some((h) => !(h > 0))) problems.push(`${w}: every horizonDays entry must be > 0.`);
+        if (a.horizonDays.some((h, i) => i > 0 && h <= a.horizonDays[i - 1]))
+          problems.push(`${w}: horizonDays must be strictly increasing.`);
+        /* A time-to-event clock that does not stop at the event is not measuring
+         * time to the event. Follow-up would run to the administrative censor
+         * for everyone while the event indicator stayed set, so every survival
+         * time would be the administrative one and the curve would be a
+         * description of enrollment. */
+        if (!a.personTimeRule.censorAt.includes("outcome"))
+          problems.push(
+            `${w}: personTimeRule.censorAt must include "outcome" for a survival analysis — otherwise follow-up runs to the administrative censor for everyone, every survival time becomes the administrative one, and the curve describes enrollment rather than the endpoint.`,
+          );
+        if (a.groupVarId) {
+          const gvS = groupVars.find((g) => g.id === a.groupVarId);
+          if (!gvS) problems.push(`${w}: groupVarId "${a.groupVarId}" is not in groupVars[].`);
+          else {
+            if (gvS.levels.length !== 2)
+              problems.push(`${w}: exposure "${gvS.id}" has ${gvS.levels.length} levels — the log-rank statistic emitted here is the two-group form, so exactly 2 are required.`);
+            if (!gvS.referenceLevel)
+              problems.push(`${w}: exposure "${gvS.id}" has no referenceLevel — without one the sign of the log-rank statistic, and therefore the direction of the hazard ratio, is arbitrary.`);
+          }
+        }
         break;
       }
       case "statistical_engine": {

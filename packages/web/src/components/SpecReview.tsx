@@ -789,6 +789,7 @@ const ANALYSIS_KIND_LABELS: Record<AnalysisKind, string> = {
   resource_use: "Resource use and cost",
   comorbidity_index: "Comorbidity index",
   regression: "Regression model",
+  survival: "Survival (Kaplan-Meier / log-rank)",
   statistical_engine: "Statistical comparison",
   future_stub: "Planned (not generated yet)",
 };

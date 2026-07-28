@@ -267,6 +267,69 @@ export function verifySilenceGuards(): Check[] {
     push("guard: suppression can be explicitly disabled", !noSup, noSup ? "still emitted" : "omitted when enabled:false");
   }
 
+  /* 3f-bis. THE MORTALITY REFUSAL.
+   *
+   * docs/ANALYSIS-BUILD-PLAN.md commits to this in writing: "Overall survival is
+   * REFUSED, not approximated... The gate ships BEFORE any survival module, so
+   * the tool cannot be asked for OS while OS is unbuildable." A refusal stated
+   * only in a document is a refusal that quietly stops being true, so it is
+   * pinned here.
+   *
+   * The two halves matter equally. A gate that blocked EVERY survival analysis
+   * would also "pass" this check while making the whole family unreachable, so
+   * the claims-event twin of the same spec is asserted to stay ready. */
+  {
+    const base: StudySpec = JSON.parse(JSON.stringify(GOLD_A_SPEC));
+    const survivalAnalysis = (endpoint: unknown) => ({
+      id: "guard_km", label: "guard survival", kind: "survival", enabled: true,
+      endpoint,
+      washout: { start: -365, end: 0, includesIndex: true },
+      personTimeRule: { start: "index", censorAt: ["outcome", "disenrollment", "study_end", "max_followup"], maxFollowupDays: 365 },
+      horizonDays: [365], ciMethod: "log_log", emitLifeTable: false,
+    });
+
+    const dead: StudySpec = JSON.parse(JSON.stringify(base));
+    dead.analyses.push(survivalAnalysis({ kind: "death", source: "dstatus" }) as never);
+    const rd = specReadiness(dead);
+    const refusal = rd.problems.find((p) => p.includes("overall survival is REFUSED"));
+    push(
+      "guard: a DEATH survival endpoint is REFUSED by readiness",
+      !rd.ready && !!refusal,
+      refusal ? `blocked: ${refusal.slice(0, 96)}…` : "readiness did NOT refuse a mortality endpoint",
+    );
+    push(
+      "guard: the mortality refusal names DSTATUS and the 2016 masking",
+      !!refusal && refusal.includes("DSTATUS") && refusal.includes("2016"),
+      refusal ?? "no refusal message",
+    );
+
+    /* The refusal must be about the ENDPOINT, not about survival. Same analysis,
+     * observable claims endpoint, must not be refused for this reason. */
+    const alive: StudySpec = JSON.parse(JSON.stringify(base));
+    alive.analyses.push(
+      survivalAnalysis({
+        kind: "claims_event",
+        outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "outpatient", diagnosisPosition: "any" },
+      }) as never,
+    );
+    const ra = specReadiness(alive);
+    push(
+      "guard: a CLAIMS-EVENT survival endpoint is NOT refused",
+      !ra.problems.some((p) => p.includes("overall survival is REFUSED")),
+      ra.problems.filter((p) => p.includes("guard_km")).join("; ") || "no survival problems",
+    );
+
+    /* A survival clock that does not stop at the event measures enrollment. */
+    const noStop: StudySpec = JSON.parse(JSON.stringify(alive));
+    const last = noStop.analyses[noStop.analyses.length - 1] as { personTimeRule: { censorAt: string[] } };
+    last.personTimeRule.censorAt = last.personTimeRule.censorAt.filter((c) => c !== "outcome");
+    push(
+      "guard: survival without censorAt:\"outcome\" is blocked",
+      specReadiness(noStop).problems.some((p) => p.includes('censorAt must include "outcome"')),
+      specReadiness(noStop).problems.filter((p) => p.includes("guard_km")).join("; ") || "not blocked",
+    );
+  }
+
   /* 3g. Reproducibility provenance. "Identical spec in, identical code out" is
      only auditable against a generator VERSION and a spec identity — otherwise
      a reviewer re-running a study a year later cannot tell a legitimate emitter
