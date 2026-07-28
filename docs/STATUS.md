@@ -1,8 +1,8 @@
 # HEOR Studio — Status & Roadmap
 
 _Snapshot of what exists vs what's left. Last updated 2026-07-28 (after Analysis Waves
-1.6, 2 and 2.1 — calendar trend, the claim-line ledger, and the comorbidity-index
-engine; **561 harness checks**). See
+1.6 through 2.2 — calendar trend, the claim-line ledger, the comorbidity-index
+engine and its Table 1 / SMD wiring; **574 harness checks**). See
 `docs/NIGHT-REPORT-2026-07-26.md` for the overnight build and **`docs/PENDING.md`
 for the audited, authoritative roadmap** — a 9-agent audit found 151 pending items
 and corrected several claims previously made here)._
@@ -44,7 +44,7 @@ Everything below is committed and pushed unless noted.
 - **Outcome care-setting filter** applied in both twins (shared `outcomeSettingPlan`), with a planted inpatient negative control.
 - **Honest labeling:** unimplemented options (Clopper-Pearson, Wald, KM, competing risk, minClaims>1, dx-position) → computed-with-closest-method + visible `REVIEW` note in both languages.
 
-### Verification harness (the "machine-verified" engine) — **561 passing checks**
+### Verification harness (the "machine-verified" engine) — **574 passing checks**
 _(the figure once quoted as 207 was miscounted — a live run printed 206. Waves 0-4 took it to 308.)_
 - PGlite (real Postgres-16 wasm) executes the **actual emitted SQL** against a 12-patient synthetic MarketScan fixture with hand-computed ground truth.
 - **Gold Case A passes:** spine 12→11→10; incidence 3/8/2425/451.86/Byar CI + 6 stratum rows; point prevalence 4/10 + 7 strata; period prevalence 3/10 + 6 strata; cumulative incidence 3/8 = 0.375 Wilson (0.13684, 0.69426) + strata; plus zero-denominator and horizon-bound edge cases.
@@ -131,7 +131,7 @@ Each has a real prerequisite — deliberately left for an awake session (see NIG
 
 ## Analysis Waves 1.6 + 2 (2026-07-28) — 8 analyses now verified
 
-**Score: 10 of 69 done, 3 partial.** Harness: **561 checks, 0 failing** (was 396).
+**Score: 10 of 69 done, 4 partial.** Harness: **574 checks, 0 failing** (was 396).
 
 ### Calendar trend (`4758e5a`) — the 7th analysis
 Cochran-Armitage over calendar buckets. The statistic **z is closed form, computed
@@ -211,6 +211,33 @@ directions planted: P03 (diabetes uncomplicated + complicated) scores 2 not 3;
 P05 (liver mild + severe) scores 3 not 4; cohort mean 1.1, and the failure
 signature (1.3, the flat sum) is pinned beside it.
 
-**Still open:** wiring the per-patient score into Table 1, the SMD balance table
-and regression adjustment needs cohort-spine work — that is what unblocks the
-three families the build plan names.
+### Comorbidity index wired into Table 1 + SMD (`e79e6d7`)
+
+The index is now a **covariate**, not just a standalone analysis — the Table 1
+row and the SMD balance row the build plan said would unblock three families.
+
+**One scorer, three consumers.** Table 1 is emitted by the spine, before any
+analysis module, so it cannot read the index module's output. `emitters/comorbidity.ts`
+owns the chain; the extraction was gated on a **byte-identity diff of all 62
+generated files** (identical). A baseline characteristic of kind
+`comorbidity_index` names the index ANALYSIS by id, and readiness refuses a
+reference that does not resolve to an enabled one.
+
+Hand-derived and executed: SMD = 1/√1.3 = **0.87706**, and the cross-check that
+matters — (5×1.6 + 5×0.6)/10 = 1.1 — is exactly the cohort mean the index
+analysis reports and exactly what Table 1 prints. Three independently-emitted
+programs, three tables, one number.
+
+**Two real defects this surfaced**, both invisible until a second *continuous*
+covariate existed:
+1. The emitters keyed the source column on the **measure** (`continuous` → age),
+   so the index would have reported age's SMD twice, once mislabelled — every
+   number real, correctly computed, from the wrong variable. Now keyed on axis.
+2. The PARITY stamp carried only `{id, measure}` per covariate, so it could not
+   describe which variable a row's moments came from. It now carries the axis.
+
+Also fixed: the harness located balance rows by measure, which kept working only
+because "Age at index" sorts before "Comorbidity index".
+
+**Still open:** regression adjustment (the third family) needs the GLM emitter
+from Wave 5 of the build plan; the covariate plumbing it will consume now exists.
