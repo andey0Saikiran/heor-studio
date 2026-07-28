@@ -779,9 +779,12 @@ export async function verifyGoldA(): Promise<VerificationResult> {
      * What CAN be executed is everything they are anchored to: the design, the
      * closed form, and the fact that SQL leaves the fitted estimates NULL. */
     const rg = EXPECTED.regression;
+    /* Two regression analyses now exist, so the module is "multi" and BOTH
+     * tables carry their analysis-id suffix. */
+    const GLM_T = "tz_study_glm_a_glm";
     eq(
       `regression rows = ${rg.rowCount} (4 design + 3 crude + ${rg.adjustedTerms.length} adjusted)`,
-      await scalar<number>(db, "SELECT count(*)::int FROM tz_study_glm"),
+      await scalar<number>(db, `SELECT count(*)::int FROM ${GLM_T}`),
       rg.rowCount,
     );
     const glmRow = async (component: string, term: string, statistic: string) =>
@@ -789,7 +792,7 @@ export async function verifyGoldA(): Promise<VerificationResult> {
         await rows<{ estimate: number | null; ci_low: number | null; ci_high: number | null; se_log: number | null; method: string }>(
           db,
           `SELECT estimate::float8, ci_low::float8, ci_high::float8, se_log::float8, method
-             FROM tz_study_glm WHERE component = '${component}' AND term = '${term}' AND statistic = '${statistic}'`,
+             FROM ${GLM_T} WHERE component = '${component}' AND term = '${term}' AND statistic = '${statistic}'`,
         )
       )[0];
     eq("glm design: exposed arm n = 4", Number((await glmRow("design", "DRUG_Y", "n"))?.estimate), rg.design.exposedN);
@@ -818,7 +821,7 @@ export async function verifyGoldA(): Promise<VerificationResult> {
      * reporting an unadjusted number under an adjusted label. */
     const adj = await rows<{ term: string; estimate: number | null; method: string }>(
       db,
-      "SELECT term, estimate::float8, method FROM tz_study_glm WHERE component = 'adjusted' ORDER BY ord",
+      `SELECT term, estimate::float8, method FROM ${GLM_T} WHERE component = 'adjusted' ORDER BY ord`,
     );
     checks.push({
       name: "glm: every ADJUSTED estimate is NULL in executed SQL, with its source labeled",
@@ -832,6 +835,64 @@ export async function verifyGoldA(): Promise<VerificationResult> {
       name: "glm: the adjusted model carries the exposure AND every resolved covariate",
       status: JSON.stringify(adj.map((r) => r.term)) === JSON.stringify(rg.adjustedTerms) ? "pass" : "fail",
       detail: `terms ${adj.map((r) => r.term).join(", ")}`,
+    });
+
+    /* ---- POISSON regression: the same exposure, a person-time denominator ----
+     * The offset is the load-bearing part. It must reconcile to the person-time
+     * every rate module already pins (1395 + 1030 = 2425) — a feeder that
+     * disagrees with the incidence table cannot pass. */
+    const rp = EXPECTED.regressionPoisson;
+    const T = "tz_study_glm_a_glm_pois";
+    eq(
+      `poisson regression rows = ${rp.rowCount} (8 design + 2 crude + ${rp.adjustedTerms.length} adjusted)`,
+      await scalar<number>(db, `SELECT count(*)::int FROM ${T}`),
+      rp.rowCount,
+    );
+    const poisRow = async (component: string, term: string, statistic: string) =>
+      (
+        await rows<{ estimate: number | null; ci_low: number | null; ci_high: number | null; se_log: number | null; method: string }>(
+          db,
+          `SELECT estimate::float8, ci_low::float8, ci_high::float8, se_log::float8, method
+             FROM ${T} WHERE component = '${component}' AND term = '${term}' AND statistic = '${statistic}'`,
+        )
+      )[0];
+    for (const [arm, want] of [["DRUG_Y", rp.design.exposed], ["DRUG_X", rp.design.reference]] as const) {
+      eq(`poisson design ${arm}: n = ${want.n}`, Number((await poisRow("design", arm, "n"))?.estimate), want.n);
+      eq(`poisson design ${arm}: events = ${want.events}`, Number((await poisRow("design", arm, "events"))?.estimate), want.events);
+      eq(`poisson design ${arm}: person-days = ${want.personDays}`, Number((await poisRow("design", arm, "person_days"))?.estimate), want.personDays);
+      approx(`poisson design ${arm}: rate = ${want.ratePer1000py}/1000PY`, Number((await poisRow("design", arm, "rate_per_1000py"))?.estimate), want.ratePer1000py, 0.00001);
+    }
+    /* The cross-check that makes the offset trustworthy: the model's own
+     * person-time must add up to the incidence module's pinned total. */
+    const ptSum = rp.design.exposed.personDays + rp.design.reference.personDays;
+    checks.push({
+      name: "poisson: the model's person-time reconciles to the incidence module's 2425",
+      status:
+        Number((await poisRow("design", "DRUG_Y", "person_days"))?.estimate) +
+          Number((await poisRow("design", "DRUG_X", "person_days"))?.estimate) === EXPECTED.personDays
+          ? "pass" : "fail",
+      detail: `1395 + 1030 = ${ptSum}, and the rate table pins ${EXPECTED.personDays}`,
+    });
+    const rrRow = await poisRow("crude", "Index drug", "rate_ratio");
+    approx("poisson crude RR = 103/279 EXACTLY (hand-computed)", Number(rrRow?.estimate), rp.rateRatio.estimate, 0.00001);
+    approx(`poisson RR CI low = ${rp.rateRatio.ciLow}`, Number(rrRow?.ci_low), rp.rateRatio.ciLow, 0.00001);
+    approx(`poisson RR CI high = ${rp.rateRatio.ciHigh}`, Number(rrRow?.ci_high), rp.rateRatio.ciHigh, 0.00001);
+    approx("poisson SE(log RR) = sqrt(1.5) — event counts only", Number(rrRow?.se_log), rp.rateRatio.seLog, 0.00001);
+    approx("poisson rate difference = -447.39534/1000PY", Number((await poisRow("crude", "Index drug", "rate_difference_per_1000py"))?.estimate), rp.rateDifference, 0.00001);
+    checks.push({
+      name: "poisson: the saturated anchor value is ln(103/279) — what the SAS MLE must reproduce",
+      status: Math.abs(Math.log(Number(rrRow?.estimate)) - rp.logRr) < 0.0001 ? "pass" : "fail",
+      detail: `ln(${rrRow?.estimate}) = ${Math.log(Number(rrRow?.estimate)).toFixed(7)}, expected ${rp.logRr}`,
+    });
+    /* A Poisson coefficient labelled "odds_ratio" reads as correct and is not.
+     * The label follows the FAMILY, and this pins it. */
+    const adjP = await rows<{ term: string; statistic: string; estimate: number | null; method: string }>(
+      db, `SELECT term, statistic, estimate::float8, method FROM ${T} WHERE component = 'adjusted' ORDER BY ord`,
+    );
+    checks.push({
+      name: "poisson: adjusted rows are labeled rate_ratio (NOT odds_ratio) and sourced to PROC GENMOD",
+      status: adjP.length > 0 && adjP.every((r) => r.statistic === "rate_ratio" && r.method === "sas_proc_genmod" && r.estimate === null) ? "pass" : "fail",
+      detail: `${adjP.length} terms, statistic "${adjP[0]?.statistic}", method "${adjP[0]?.method}", all NULL in SQL`,
     });
 
     /* ---- Table 1 comorbidity-index row (executed) ----

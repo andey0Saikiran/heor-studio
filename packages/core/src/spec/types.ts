@@ -351,6 +351,10 @@ export interface RegressionAnalysis extends AnalysisCommon {
   /** two-level exposure -> GroupVariable.id; its referenceLevel is the baseline
    *  category, so the reported effect is for the OTHER level */
   groupVarId: string;
+  /** REQUIRED for count families: how each subject's person-time (the model's
+   *  log offset) is accrued. Shared with the rate modules via rate-core's
+   *  censoring plan, so the offset cannot disagree with the incidence table. */
+  personTimeRule?: PersonTimeRule;
   /** baseline characteristics entering the ADJUSTED model (SAS-primary) */
   covariateIds: string[];
 }
@@ -921,16 +925,21 @@ export function validateAnalyses(spec: StudySpec): string[] {
          * half-emitted, because each needs a feeder this emitter does not
          * construct and would otherwise produce a complete-looking model of the
          * wrong thing. */
-        if (a.family !== "logistic")
+        if (a.family !== "logistic" && a.family !== "poisson")
           problems.push(
-            `${w}: regression family "${a.family}" is not emitted yet — only "logistic" is built. ` +
-              (a.family === "poisson" || a.family === "negative_binomial"
-                ? `A count model needs a person-time offset per subject, and negative binomial needs a dispersion parameter with no closed form. `
+            `${w}: regression family "${a.family}" is not emitted yet — "logistic" and "poisson" are built. ` +
+              (a.family === "negative_binomial"
+                ? `Negative binomial needs a dispersion parameter, which has no closed form and therefore no saturated anchor to check the fit against. `
                 : a.family === "gamma_log"
                   ? `A cost model needs the claim-line ledger's per-subject totals as its response, which this emitter does not build. `
                   : `An OLS model needs a continuous response, which this emitter does not construct. `) +
-              `Set family:"logistic", or disable the analysis to keep it visible as planned work.`
+              `Set family:"logistic" or "poisson", or disable the analysis to keep it visible as planned work.`
           );
+        /* A count model without person-time would silently become a model of
+         * the COUNT rather than the RATE — same coefficients, different
+         * estimand, no way to tell from the output. */
+        if (a.family === "poisson" && !a.personTimeRule)
+          problems.push(`${w}: a poisson regression requires personTimeRule — without it the log offset is undefined and the model would fit counts, not rates.`);
         const gv = groupVars.find((g) => g.id === a.groupVarId);
         if (!gv) problems.push(`${w}: groupVarId "${a.groupVarId}" is not in groupVars[].`);
         else {

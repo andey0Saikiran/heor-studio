@@ -545,6 +545,39 @@ export const EXPECTED = {
     /** terms of the adjusted model, in emission order */
     adjustedTerms: ["Index drug", "Age at index", "Sex", "Comorbidity index"],
   },
+  /* Poisson regression, hand-derived. Same at-risk set and same events as the
+   * logistic model; what changes is the denominator — person-time, not persons.
+   *
+   *                events   person-days
+   *   DRUG_Y (exposed)   1        1395
+   *   DRUG_X (reference) 2        1030
+   *
+   * 1395 + 1030 = 2425, the person-time every rate module already pins, so a
+   * Poisson offset that disagrees with the incidence table cannot pass.
+   *
+   *   rate_Y = 1 x 1000 x 365.25 / 1395 = 261.82796 per 1000 PY
+   *   rate_X = 2 x 1000 x 365.25 / 1030 = 709.22330 per 1000 PY
+   *   RR     = (1/1395) / (2/1030) = 1030/2790 = 103/279 = 0.36918
+   *   ln(RR) = -0.99648
+   *   SE     = sqrt(1/1 + 1/2) = sqrt(1.5) = 1.22474   <- events only; the
+   *            person-time enters the estimate, not the variance
+   *   95% CI = exp(-0.99648 +/- 1.96*1.22474) = (0.03347, 4.07152)
+   *   rate difference = 261.82796 - 709.22330 = -447.39534 per 1000 PY
+   *
+   * The SATURATED ANCHOR holds here too: a Poisson model with one binary
+   * predictor and a log person-time offset is saturated for this two-cell
+   * table, so its MLE is exactly ln(103/279). */
+  regressionPoisson: {
+    rowCount: 14, // 8 design + 2 crude + 4 adjusted terms
+    design: {
+      exposed: { n: 4, events: 1, personDays: 1395, ratePer1000py: 261.82796 },
+      reference: { n: 4, events: 2, personDays: 1030, ratePer1000py: 709.2233 },
+    },
+    rateRatio: { estimate: 0.36918, ciLow: 0.03347, ciHigh: 4.07152, seLog: 1.22474 },
+    rateDifference: -447.39534,
+    logRr: -0.99648,
+    adjustedTerms: ["Index drug", "Age at index", "Sex", "Comorbidity index"],
+  },
   /* SMD balance, DRUG_X (reference) vs DRUG_Y, over the 10-patient cohort.
    *   ages X = 40,45,50,55,60 -> mean 50, sample variance 62.5
    *   ages Y = 45,50,55,60,65 -> mean 55, sample variance 62.5
@@ -825,6 +858,20 @@ export const GOLD_A_SPEC: StudySpec = {
       outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "outpatient", diagnosisPosition: "any" },
       washout: { start: -365, end: 0, includesIndex: true },
       horizonDays: 365,
+      groupVarId: "g_arm",
+      covariateIds: ["b_age", "b_sex", "b_cci"],
+    },
+    /* POISSON regression of the same incident AE on the same exposure, with
+     * person-time as the log offset. The person-time rule is the incidence
+     * analysis's, so the offset must reconcile to the pinned 2425 person-days —
+     * a feeder that disagrees with the rate table fails immediately. */
+    {
+      id: "a_glm_pois", label: "Adjusted rate of incident AE", kind: "regression", enabled: true,
+      family: "poisson",
+      outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "outpatient", diagnosisPosition: "any" },
+      washout: { start: -365, end: 0, includesIndex: true },
+      horizonDays: 365,
+      personTimeRule: { start: "index", censorAt: ["outcome", "disenrollment", "study_end", "max_followup"], maxFollowupDays: 365 },
       groupVarId: "g_arm",
       covariateIds: ["b_age", "b_sex", "b_cci"],
     },

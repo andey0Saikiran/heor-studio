@@ -48,6 +48,10 @@ interface Mutation {
   apply: (text: string) => string;
   /** mutate 00_setup.sas instead of the analysis program */
   setup?: boolean;
+  /** when a KIND has several analyses (two regressions, say), pick the program
+   *  whose path matches. Without this every mutation lands on the first one and
+   *  a pattern meant for the second reads as vacuous. */
+  pathMatch?: RegExp;
 }
 
 /** Corruptions that MUST be caught. Each mirrors a real failure mode:
@@ -167,49 +171,64 @@ const MUTATIONS: Mutation[] = [
     apply: (t) => t.replace(/round\(t_stat \/ sqrt\(var_t\)/, "round(t_stat / (var_t)"),
   },
   {
+    /* THE ESTIMAND SWAP: dividing counts instead of rates turns a rate ratio
+     * into a risk-of-count ratio. The person-time is still computed, still
+     * reported, and simply stops being used. */
+    name: "SQL poisson rate ratio divides COUNTS instead of rates (the offset stops mattering)",
+    kind: "regression", lang: "sql", pathMatch: /glm_a_glm_pois/,
+    apply: (t) => t.replace(/LN\(\(a_ee \* 1\.0 \/ pt_exp\) \/ \(c_ue \* 1\.0 \/ pt_unexp\)\)/, "LN((a_ee * 1.0) / (c_ue * 1.0))"),
+  },
+  {
+    // The Poisson SE depends on event counts alone; adding person-time terms
+    // shrinks it and narrows every interval.
+    name: "SAS poisson standard error pulls in person-time (interval silently narrows)",
+    kind: "regression", lang: "sas", pathMatch: /glm_a_glm_pois/,
+    apply: (t) => t.replace(/sqrt\(1\/a_ee \+ 1\/c_ue\)/, "sqrt(1/a_ee + 1/c_ue + 1/pt_exp + 1/pt_unexp)"),
+  },
+  {
     /* The cross-product inverted: OR becomes its own reciprocal. Still a
      * perfectly plausible odds ratio, pointing the opposite way. */
     name: "SQL odds ratio inverts the cross product (a*d / b*c becomes b*c / a*d)",
-    kind: "regression", lang: "sql",
+    kind: "regression", lang: "sql", pathMatch: /glm_a_glm\./,
     apply: (t) => t.replace(/LN\(\(a_ee \* 1\.0 \* d_un\) \/ \(b_en \* 1\.0 \* c_ue\)\)/, "LN((b_en * 1.0 * c_ue) / (a_ee * 1.0 * d_un))"),
   },
   {
     // Exposure and reference swap, flipping the sign of every reported effect.
     name: "SAS regression flips which arm is the exposure",
-    kind: "regression", lang: "sas",
+    kind: "regression", lang: "sas", pathMatch: /glm_a_glm\./,
     apply: (t) => t.replace(/when a\.arm = 'DRUG_Y' then 1/, "when a.arm = 'DRUG_X' then 1"),
   },
   {
     // A shorter horizon drops later events; the model answers a different question.
     name: "SQL regression horizon shortened (365 -> 180 days)",
-    kind: "regression", lang: "sql",
+    kind: "regression", lang: "sql", pathMatch: /glm_a_glm\./,
     apply: (t) => t.replace(/fu_date <= \(s\.index_date \+ 365\)/, "fu_date <= (s.index_date + 180)"),
   },
   {
     /* The Woolf SE loses a term: the interval narrows and the estimate looks
      * more precise than the data supports. */
     name: "SAS Woolf standard error drops a cell (1/d_un lost)",
-    kind: "regression", lang: "sas",
+    kind: "regression", lang: "sas", pathMatch: /glm_a_glm\./,
     apply: (t) => t.replace(/sqrt\(1\/a_ee \+ 1\/b_en \+ 1\/c_ue \+ 1\/d_un\)/, "sqrt(1/a_ee + 1/b_en + 1/c_ue)"),
   },
   {
     /* A zero cell silently continuity-corrected instead of returning NULL —
      * the estimand changes and nothing says so. */
     name: "SQL adds a continuity correction instead of returning NULL on a zero cell",
-    kind: "regression", lang: "sql",
+    kind: "regression", lang: "sql", pathMatch: /glm_a_glm\./,
     apply: (t) => t.replace(/CASE WHEN b_en > 0 AND c_ue > 0 AND a_ee > 0 AND d_un > 0/, "CASE WHEN 1 = 1"),
   },
   {
     // The SAS twin stops fitting, leaving a column of NULLs in both languages.
     name: "SAS regression stops fitting the adjusted model",
-    kind: "regression", lang: "sas",
+    kind: "regression", lang: "sas", pathMatch: /glm_a_glm\./,
     apply: (t) => t.replace(/_adj_pe/g, "_adj_skipped"),
   },
   {
     /* THE ANCHOR REMOVED. Without the saturated self-check the fitted estimates
      * are simply trusted — the one validation the site could actually see. */
     name: "SAS regression drops the saturated-design anchor check",
-    kind: "regression", lang: "sas",
+    kind: "regression", lang: "sas", pathMatch: /glm_a_glm\./,
     apply: (t) => t.replace(/anchor_verdict/g, "unused_note"),
   },
   {
@@ -322,10 +341,15 @@ interface Program {
   stamp: Record<string, unknown>;
 }
 
-/** First emitted program carrying a stamp of the given kind, per language. */
-function programsByKind(files: Array<{ path: string; content: string }>): Map<string, Program> {
+/** First emitted program carrying a stamp of the given kind, per language.
+ *  `pathMatch` narrows to a specific analysis when a kind has several. */
+function programsByKind(
+  files: Array<{ path: string; content: string }>,
+  pathMatch?: RegExp,
+): Map<string, Program> {
   const out = new Map<string, Program>();
   for (const f of files) {
+    if (pathMatch && !pathMatch.test(f.path)) continue;
     for (const s of parseParityStamps(f.content)) {
       if (!out.has(s.kind)) out.set(s.kind, { content: f.content, kind: s.kind, stamp: s.values });
     }
@@ -343,8 +367,8 @@ export function mutationChecks(): Check[] {
   const sasByKind = programsByKind(sasFiles);
 
   for (const m of MUTATIONS) {
-    const sqlProg = sqlByKind.get(m.kind);
-    const sasProg = sasByKind.get(m.kind);
+    const sqlProg = (m.pathMatch ? programsByKind(sqlFiles, m.pathMatch) : sqlByKind).get(m.kind);
+    const sasProg = (m.pathMatch ? programsByKind(sasFiles, m.pathMatch) : sasByKind).get(m.kind);
     if (!sqlProg || !sasProg) {
       checks.push({ name: `mutation: ${m.name}`, status: "fail", detail: `no ${m.kind} program emitted in both languages` });
       continue;

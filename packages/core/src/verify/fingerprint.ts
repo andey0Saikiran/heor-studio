@@ -310,9 +310,21 @@ function sqlFingerprint(kind: string, raw: string): Fingerprint {
        * study reports an estimate nobody chose. */
       put(fp, "zero_cell_returns_null", /CASE WHEN b_en > 0 AND c_ue > 0 AND a_ee > 0 AND d_un > 0/i.test(sql) ? "yes" : "no");
       put(fp, "model_terms", (sql.match(/SELECT 'adjusted', '([^']*)'/g) ?? []).map((m) => (/'adjusted', '([^']*)'/.exec(m) ?? [])[1]).join(","));
+      // the effect the coefficient IS — a Poisson coefficient labelled
+      // "odds_ratio" reads as correct and is not
+      put(fp, "effect_statistic", grab(sql, [/SELECT 'adjusted', '[^']*', '(\w+)'/i]));
+      /* Count families only. The offset is what makes the model a RATE model;
+       * without it the same coefficients describe counts. */
+      if (/person_days/i.test(sql)) {
+        put(fp, "rate_ratio_is_rate_over_rate",
+          /LN\(\(a_ee \* 1\.0 \/ pt_exp\) \/ \(c_ue \* 1\.0 \/ pt_unexp\)\)/i.test(sql) ? "yes" : "no");
+        put(fp, "poisson_se_uses_events_only",
+          /SQRT\(1\.0\/a_ee \+ 1\.0\/c_ue\)/i.test(sql) ? "yes" : "no");
+        put(fp, "offset_censor_bounds", censorBoundsSql(sql));
+      }
       // SAS-PRIMARY (language-local): the fitted estimates must be NULL here.
       put(fp, "adjusted_null_in_sql",
-        /SELECT 'adjusted', '[^']*', 'odds_ratio', \d+, CAST\(NULL AS NUMERIC\)/i.test(sql) ? "yes" : "no");
+        /SELECT 'adjusted', '[^']*', '\w+', \d+, CAST\(NULL AS NUMERIC\)/i.test(sql) ? "yes" : "no");
       break;
     }
     case "comorbidity_index": {
@@ -490,12 +502,21 @@ function sasFingerprint(kind: string, rawSas: string, setup: string): Fingerprin
       put(fp, "woolf_se", /sqrt\(1\/a_ee \+ 1\/b_en \+ 1\/c_ue \+ 1\/d_un\)/i.test(sas) ? "yes" : "no");
       put(fp, "zero_cell_returns_null", /if a_ee > 0 and b_en > 0 and c_ue > 0 and d_un > 0/i.test(sas) ? "yes" : "no");
       put(fp, "model_terms", (sas.match(/term="([^"]*)"; ord=2\d;/g) ?? []).map((m) => (/term="([^"]*)"/.exec(m) ?? [])[1]).join(","));
+      put(fp, "effect_statistic", grab(sas, [/component='adjusted'; statistic='(\w+)'/i]));
+      if (/person_days/i.test(sas)) {
+        put(fp, "rate_ratio_is_rate_over_rate",
+          /log\(\(a_ee \/ pt_exp\) \/ \(c_ue \/ pt_unexp\)\)/i.test(sas) ? "yes" : "no");
+        put(fp, "poisson_se_uses_events_only",
+          /sqrt\(1\/a_ee \+ 1\/c_ue\)/i.test(sas) ? "yes" : "no");
+        put(fp, "offset_censor_bounds", censorBoundsSas(sas));
+      }
       /* SAS-PRIMARY (language-local), plus the ANCHOR. The saturated model and
        * the self-check are what make the fitted estimates trustworthy at all;
        * losing either leaves a column of numbers nothing ever validated. */
-      put(fp, "adjusted_fitted_in_sas", /proc logistic/i.test(sas) && /_adj_pe/i.test(sas) ? "yes" : "no");
+      // logistic fits with PROC LOGISTIC, poisson with PROC GENMOD
+      put(fp, "adjusted_fitted_in_sas", /proc (logistic|genmod)/i.test(sas) && /_adj_pe/i.test(sas) ? "yes" : "no");
       put(fp, "saturated_anchor_present",
-        /model y = exposed;/i.test(sas) && /anchor_verdict/i.test(sas) ? "yes" : "no");
+        /model y = exposed\s*(;|\/)/i.test(sas) && /anchor_verdict/i.test(sas) ? "yes" : "no");
       break;
     }
     case "comorbidity_index": {
@@ -758,14 +779,25 @@ export function expectedFromStamp(kind: string, stamp: Record<string, unknown>):
       if (typeof stamp.referenceLevel === "string" && typeof stamp.exposedLevel === "string")
         exp.arm_levels = `${stamp.referenceLevel},${stamp.exposedLevel}`;
       if (Array.isArray(stamp.terms)) exp.model_terms = (stamp.terms as string[]).join(",");
+      if (typeof stamp.effectStatistic === "string") exp.effect_statistic = stamp.effectStatistic;
+      /* The stamp says the model carries an offset; the code must build the
+       * rate ratio from rates and take its SE from event counts alone. */
+      if (stamp.offset !== null && typeof stamp.offset === "object") {
+        exp.rate_ratio_is_rate_over_rate = "yes";
+        exp.poisson_se_uses_events_only = "yes";
+      }
       /* The stamp CLAIMS a closed-form crude effect and a saturated anchor; the
-       * code has to actually be those things. */
+       * code has to actually be those things — but WHICH closed form depends on
+       * the family. An offset in the stamp means a rate model, and a rate model
+       * must not be checked against the odds-ratio algebra. */
       if (stamp.crudeEffect === "closed_form_2x2") {
         exp.cell_a = "yes";
         exp.cell_d = "yes";
-        exp.log_or_is_cross_product = "yes";
-        exp.woolf_se = "yes";
-        exp.zero_cell_returns_null = "yes";
+        if (stamp.offset === null) {
+          exp.log_or_is_cross_product = "yes";
+          exp.woolf_se = "yes";
+          exp.zero_cell_returns_null = "yes";
+        }
       }
       break;
     }
@@ -998,7 +1030,7 @@ export const LANGUAGE_LOCAL_KEYS: Record<string, { language: "sql" | "sas"; must
   trend_p_null_in_sql: { language: "sql", must: "yes", means: "the trend p-value is NULL in SQL, not guessed" },
   trend_p_computed_in_sas: { language: "sas", must: "yes", means: "the trend p-value is genuinely computed in SAS" },
   adjusted_null_in_sql: { language: "sql", must: "yes", means: "fitted GLM coefficients are NULL in SQL, not approximated" },
-  adjusted_fitted_in_sas: { language: "sas", must: "yes", means: "fitted GLM coefficients are genuinely produced by PROC LOGISTIC" },
+  adjusted_fitted_in_sas: { language: "sas", must: "yes", means: "fitted GLM coefficients are genuinely produced by a SAS modelling procedure" },
   saturated_anchor_present: { language: "sas", must: "yes", means: "the saturated model and its self-check against the closed form are emitted" },
 };
 

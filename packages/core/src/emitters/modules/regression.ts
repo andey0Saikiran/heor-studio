@@ -39,12 +39,13 @@ import type { GeneratedFile } from "../types";
 import type { AnalysisModule, SqlCtx, SasCtx, SqlModuleFile } from "./types";
 import { oneLine, q, describeWindow, windowConds } from "../sql-base";
 import { cmt, header, levelCheck, sq, windowConds as sasWindowConds, INCLUDE_SETUP } from "../sas-base";
-import { rateCoreSqlCtes } from "../rate-core";
+import { rateCoreSqlCtes, censorPlan, renderCensorSql, renderCensorSas } from "../rate-core";
 import { comorbidityScoreSasScore, comorbidityScoreSasSteps, comorbidityScoreSqlCtes, indexAnalysisFor } from "../comorbidity";
 import {
   balanceCovariates,
   outcomeSettingPlan,
   parityStamp,
+  renderDaysPerYear,
   regressionLimitations,
   regressionParity,
   stratLabel,
@@ -54,7 +55,19 @@ import {
 
 const MEASURE = "regression";
 /** Label on the adjusted rows, naming what produces them. */
-const ADJ_METHOD = "sas_proc_logistic";
+const ADJ_METHOD_BY_FAMILY: Record<string, string> = {
+  logistic: "sas_proc_logistic",
+  poisson: "sas_proc_genmod",
+};
+const adjMethod = (family: string) => ADJ_METHOD_BY_FAMILY[family] ?? "sas_primary";
+/** The effect a family's exponentiated coefficient IS. Labelling a Poisson
+ *  coefficient "odds_ratio" would be a mislabeled statistic — the worst kind,
+ *  because it reads as correct. */
+const ADJ_STATISTIC_BY_FAMILY: Record<string, string> = {
+  logistic: "odds_ratio",
+  poisson: "rate_ratio",
+};
+const adjStatistic = (family: string) => ADJ_STATISTIC_BY_FAMILY[family] ?? "effect";
 
 /** Resolve exposure levels and the covariates the model can actually build. */
 function plan(ctx: SqlCtx | SasCtx, an: RegressionAnalysis) {
@@ -98,12 +111,22 @@ function sqlRegression(ctx: SqlCtx, an: RegressionAnalysis, suffix: string): Sql
   const wc = windowConds(an.washout, "a.event_date", "c.index_date", d);
   const washoutPred = wc.length > 0 ? wc.join("\n      AND ") : "TRUE";
   const horizonEnd = d.offset("s.index_date", an.horizonDays);
+  const isCount = an.family === "poisson";
+  const censor = an.personTimeRule ? censorPlan(spec, an.personTimeRule) : null;
+  const censorFinal = censor?.atOutcome
+    ? `LEAST(COALESCE(fu_date, DATE '9999-12-31'), admin_censor)`
+    : `admin_censor`;
+  const Y = renderDaysPerYear(spec);
 
   const L: string[] = [];
   L.push(
     `-- ${parityStamp(
       "regression",
-      regressionParity(an, { referenceLevel: p.referenceLevel, exposedLevel: p.exposedLevel, terms: modelTerms, settingFilter: setting.stamped }),
+      regressionParity(an, {
+        referenceLevel: p.referenceLevel, exposedLevel: p.exposedLevel, terms: modelTerms,
+        settingFilter: setting.stamped, effectStatistic: adjStatistic(an.family),
+        offset: censor ? { applied: censor.applied, dataCut: censor.dataCut } : null,
+      }),
     )}`,
   );
   const limits = regressionLimitations(an, listSystem, p.covariates.map((c) => c.label), p.droppedCovs);
@@ -156,6 +179,22 @@ function sqlRegression(ctx: SqlCtx, an: RegressionAnalysis, suffix: string): Sql
     const sc = comorbidityScoreSqlCtes(ctx, { wp, an: cciAn, cohortCte: "atrisk", prefix: "cci_" });
     L.push(...sc.lines);
   }
+  /* Person-time, for count families only. Censored by the SAME plan the
+   * incidence twins render (rate-core.censorPlan), so the model's offset cannot
+   * disagree with the rate table it sits beside. */
+  if (isCount && censor) {
+    L.push(`ptc0 AS (   -- censoring: ${censor.applied.join(" / ")}${censor.dataCut ? ` / data cut ${censor.dataCut}` : ``}`);
+    L.push(`  SELECT c.enrolid, c.index_date, ${renderCensorSql(ctx, censor)} AS admin_censor, f.fu_date`);
+    L.push(`  FROM atrisk c`);
+    L.push(`  JOIN ${wp}_enroll_episodes ep`);
+    L.push(`    ON ep.enrolid = c.enrolid AND c.index_date BETWEEN ep.episode_start AND ep.episode_end`);
+    L.push(`  LEFT JOIN first_fu f ON f.enrolid = c.enrolid`);
+    L.push(`),`);
+    L.push(`ptc AS (`);
+    L.push(`  SELECT enrolid, ${d.daysBetween(censorFinal, "index_date")} AS person_days`);
+    L.push(`  FROM ptc0`);
+    L.push(`),`);
+  }
   L.push(`subj AS (   -- the ANALYTIC DATASET: one row per at-risk subject`);
   L.push(`  SELECT s.enrolid,`);
   L.push(`         CASE WHEN s.arm = '${q(p.exposedLevel)}' THEN 1 ELSE 0 END AS exposed,`);
@@ -163,7 +202,9 @@ function sqlRegression(ctx: SqlCtx, an: RegressionAnalysis, suffix: string): Sql
   L.push(`         CASE WHEN f.fu_date IS NOT NULL AND f.fu_date <= ${horizonEnd} THEN 1 ELSE 0 END AS y,`);
   L.push(`         CAST(${d.year("s.index_date")} - dm.dobyr AS NUMERIC) AS age_val,`);
   L.push(`         CASE WHEN dm.sex = '1' THEN 1.0 ELSE 0.0 END AS sex_male${cciCov && cciAn ? `,` : ``}`);
-  if (cciCov && cciAn) L.push(`         CAST(COALESCE(cs.score, 0) AS NUMERIC) AS cci_val`);
+  if (cciCov && cciAn) L.push(`         CAST(COALESCE(cs.score, 0) AS NUMERIC) AS cci_val${isCount ? `,` : ``}`);
+  // the model's OFFSET: log person-time. A count model without it fits counts.
+  if (isCount) L.push(`         CAST(COALESCE(pt.person_days, 0) AS NUMERIC) AS person_days`);
   L.push(`  FROM (SELECT a.enrolid, a.index_date, ${armExpr} AS arm FROM atrisk a`);
   L.push(`        JOIN ${wp}_cohort ch ON ch.enrolid = a.enrolid`);
   if (viaNdc) {
@@ -174,13 +215,18 @@ function sqlRegression(ctx: SqlCtx, an: RegressionAnalysis, suffix: string): Sql
   L.push(`  LEFT JOIN first_fu f ON f.enrolid = s.enrolid`);
   L.push(`  LEFT JOIN demo1 dm ON dm.enrolid = s.enrolid`);
   if (cciCov && cciAn) L.push(`  LEFT JOIN cci_per_pt cs ON cs.enrolid = s.enrolid`);
+  if (isCount) L.push(`  LEFT JOIN ptc pt ON pt.enrolid = s.enrolid`);
   L.push(`  WHERE s.arm IN ('${q(p.referenceLevel)}', '${q(p.exposedLevel)}')`);
   L.push(`),`);
-  L.push(`cells AS (   -- the 2x2 the closed form is computed from`);
+  L.push(`cells AS (   -- the table the closed form is computed from`);
   L.push(`  SELECT SUM(CASE WHEN exposed = 1 AND y = 1 THEN 1 ELSE 0 END) AS a_ee,`);
   L.push(`         SUM(CASE WHEN exposed = 1 AND y = 0 THEN 1 ELSE 0 END) AS b_en,`);
   L.push(`         SUM(CASE WHEN exposed = 0 AND y = 1 THEN 1 ELSE 0 END) AS c_ue,`);
-  L.push(`         SUM(CASE WHEN exposed = 0 AND y = 0 THEN 1 ELSE 0 END) AS d_un`);
+  L.push(`         SUM(CASE WHEN exposed = 0 AND y = 0 THEN 1 ELSE 0 END) AS d_un${isCount ? `,` : ``}`);
+  if (isCount) {
+    L.push(`         SUM(CASE WHEN exposed = 1 THEN person_days ELSE 0 END) AS pt_exp,`);
+    L.push(`         SUM(CASE WHEN exposed = 0 THEN person_days ELSE 0 END) AS pt_unexp`);
+  }
   L.push(`  FROM subj`);
   L.push(`),`);
   /* A zero cell makes the log-odds interval undefined. The program returns
@@ -189,11 +235,22 @@ function sqlRegression(ctx: SqlCtx, an: RegressionAnalysis, suffix: string): Sql
    * chose. */
   L.push(`eff AS (`);
   L.push(`  SELECT a_ee, b_en, c_ue, d_un,`);
-  L.push(`         (a_ee + b_en) AS n_exp, (c_ue + d_un) AS n_unexp,`);
-  L.push(`         CASE WHEN b_en > 0 AND c_ue > 0 AND a_ee > 0 AND d_un > 0`);
-  L.push(`              THEN LN((a_ee * 1.0 * d_un) / (b_en * 1.0 * c_ue)) END AS log_or,`);
-  L.push(`         CASE WHEN a_ee > 0 AND b_en > 0 AND c_ue > 0 AND d_un > 0`);
-  L.push(`              THEN SQRT(1.0/a_ee + 1.0/b_en + 1.0/c_ue + 1.0/d_un) END AS se_log_or`);
+  L.push(`         (a_ee + b_en) AS n_exp, (c_ue + d_un) AS n_unexp,${isCount ? `` : ``}`);
+  if (isCount) {
+    L.push(`         pt_exp, pt_unexp,`);
+    /* The Poisson closed form: a ratio of RATES, not of odds. Its standard
+     * error depends only on the EVENT counts — person-time enters the point
+     * estimate and not the variance. */
+    L.push(`         CASE WHEN a_ee > 0 AND c_ue > 0 AND pt_exp > 0 AND pt_unexp > 0`);
+    L.push(`              THEN LN((a_ee * 1.0 / pt_exp) / (c_ue * 1.0 / pt_unexp)) END AS log_rr,`);
+    L.push(`         CASE WHEN a_ee > 0 AND c_ue > 0`);
+    L.push(`              THEN SQRT(1.0/a_ee + 1.0/c_ue) END AS se_log_rr`);
+  } else {
+    L.push(`         CASE WHEN b_en > 0 AND c_ue > 0 AND a_ee > 0 AND d_un > 0`);
+    L.push(`              THEN LN((a_ee * 1.0 * d_un) / (b_en * 1.0 * c_ue)) END AS log_or,`);
+    L.push(`         CASE WHEN a_ee > 0 AND b_en > 0 AND c_ue > 0 AND d_un > 0`);
+    L.push(`              THEN SQRT(1.0/a_ee + 1.0/b_en + 1.0/c_ue + 1.0/d_un) END AS se_log_or`);
+  }
   L.push(`  FROM cells`);
   L.push(`)`);
   L.push(`SELECT '${MEASURE}' AS measure, component, term, statistic, ord,`);
@@ -207,35 +264,60 @@ function sqlRegression(ctx: SqlCtx, an: RegressionAnalysis, suffix: string): Sql
   L.push(designRow(0, q(p.exposedLevel), "n", "n_exp"));
   L.push(`  UNION ALL`);
   L.push(designRow(1, q(p.exposedLevel), "events", "a_ee"));
+  if (isCount) {
+    L.push(`  UNION ALL`);
+    L.push(designRow(2, q(p.exposedLevel), "person_days", "pt_exp"));
+    L.push(`  UNION ALL`);
+    L.push(designRow(3, q(p.exposedLevel), "rate_per_1000py", `ROUND(CAST(a_ee * 1000.0 * ${Y} / NULLIF(pt_exp, 0) AS NUMERIC), 5)`));
+  }
   L.push(`  UNION ALL`);
-  L.push(designRow(2, q(p.referenceLevel), "n", "n_unexp"));
+  L.push(designRow(isCount ? 4 : 2, q(p.referenceLevel), "n", "n_unexp"));
   L.push(`  UNION ALL`);
-  L.push(designRow(3, q(p.referenceLevel), "events", "c_ue"));
+  L.push(designRow(isCount ? 5 : 3, q(p.referenceLevel), "events", "c_ue"));
+  if (isCount) {
+    L.push(`  UNION ALL`);
+    L.push(designRow(6, q(p.referenceLevel), "person_days", "pt_unexp"));
+    L.push(`  UNION ALL`);
+    L.push(designRow(7, q(p.referenceLevel), "rate_per_1000py", `ROUND(CAST(c_ue * 1000.0 * ${Y} / NULLIF(pt_unexp, 0) AS NUMERIC), 5)`));
+  }
   // 2. the crude effect, closed form, in BOTH twins
   const crude = (ord: number, stat: string, est: string, lo: string, hi: string, se: string) =>
     `  SELECT 'crude', '${q(stratLabel(gvLabel))}', '${stat}', ${ord},` +
     ` ${est}, ${lo}, ${hi}, ${se}, CAST('closed_form_2x2' AS VARCHAR) FROM eff`;
-  L.push(`  UNION ALL`);
-  L.push(crude(10, "odds_ratio",
-    d.roundN(`EXP(log_or)`, 5),
-    d.roundN(`EXP(log_or - 1.96 * se_log_or)`, 5),
-    d.roundN(`EXP(log_or + 1.96 * se_log_or)`, 5),
-    d.roundN(`se_log_or`, 5)));
-  L.push(`  UNION ALL`);
-  L.push(crude(11, "risk_ratio",
-    d.roundN(`(a_ee * 1.0 / NULLIF(n_exp, 0)) / NULLIF(c_ue * 1.0 / NULLIF(n_unexp, 0), 0)`, 5),
-    `CAST(NULL AS NUMERIC)`, `CAST(NULL AS NUMERIC)`, `CAST(NULL AS NUMERIC)`));
-  L.push(`  UNION ALL`);
-  L.push(crude(12, "risk_difference",
-    d.roundN(`a_ee * 1.0 / NULLIF(n_exp, 0) - c_ue * 1.0 / NULLIF(n_unexp, 0)`, 5),
-    `CAST(NULL AS NUMERIC)`, `CAST(NULL AS NUMERIC)`, `CAST(NULL AS NUMERIC)`));
+  if (isCount) {
+    L.push(`  UNION ALL`);
+    L.push(crude(10, "rate_ratio",
+      d.roundN(`EXP(log_rr)`, 5),
+      d.roundN(`EXP(log_rr - 1.96 * se_log_rr)`, 5),
+      d.roundN(`EXP(log_rr + 1.96 * se_log_rr)`, 5),
+      d.roundN(`se_log_rr`, 5)));
+    L.push(`  UNION ALL`);
+    L.push(crude(11, "rate_difference_per_1000py",
+      d.roundN(`a_ee * 1000.0 * ${Y} / NULLIF(pt_exp, 0) - c_ue * 1000.0 * ${Y} / NULLIF(pt_unexp, 0)`, 5),
+      `CAST(NULL AS NUMERIC)`, `CAST(NULL AS NUMERIC)`, `CAST(NULL AS NUMERIC)`));
+  } else {
+    L.push(`  UNION ALL`);
+    L.push(crude(10, "odds_ratio",
+      d.roundN(`EXP(log_or)`, 5),
+      d.roundN(`EXP(log_or - 1.96 * se_log_or)`, 5),
+      d.roundN(`EXP(log_or + 1.96 * se_log_or)`, 5),
+      d.roundN(`se_log_or`, 5)));
+    L.push(`  UNION ALL`);
+    L.push(crude(11, "risk_ratio",
+      d.roundN(`(a_ee * 1.0 / NULLIF(n_exp, 0)) / NULLIF(c_ue * 1.0 / NULLIF(n_unexp, 0), 0)`, 5),
+      `CAST(NULL AS NUMERIC)`, `CAST(NULL AS NUMERIC)`, `CAST(NULL AS NUMERIC)`));
+    L.push(`  UNION ALL`);
+    L.push(crude(12, "risk_difference",
+      d.roundN(`a_ee * 1.0 / NULLIF(n_exp, 0) - c_ue * 1.0 / NULLIF(n_unexp, 0)`, 5),
+      `CAST(NULL AS NUMERIC)`, `CAST(NULL AS NUMERIC)`, `CAST(NULL AS NUMERIC)`));
+  }
   // 3. the adjusted model — SAS-primary, declared and NULL
   modelTerms.forEach((t, i) => {
     L.push(`  UNION ALL`);
     L.push(
-      `  SELECT 'adjusted', '${q(t)}', 'odds_ratio', ${20 + i},` +
+      `  SELECT 'adjusted', '${q(t)}', '${adjStatistic(an.family)}', ${20 + i},` +
         ` CAST(NULL AS NUMERIC), CAST(NULL AS NUMERIC), CAST(NULL AS NUMERIC), CAST(NULL AS NUMERIC),` +
-        ` CAST('${ADJ_METHOD}' AS VARCHAR) FROM eff`,
+        ` CAST('${adjMethod(an.family)}' AS VARCHAR) FROM eff`,
     );
   });
   L.push(`) u`);
@@ -280,6 +362,9 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
   const cciCov = p.covariates.find((c) => c.axis === "comorbidity_index");
   const cciAn = indexAnalysisFor(spec, cciCov?.analysisId);
   const cciScore = cciCov && cciAn ? comorbidityScoreSasSteps(ctx, { an: cciAn, num, cohT, evOf: ctx.evOf }) : null;
+  const isCountS = an.family === "poisson";
+  const censorS = an.personTimeRule ? censorPlan(spec, an.personTimeRule) : null;
+  const YS = ctx.daysPerYearLit;
   const indexListIdS = spec.indexEvent.codeListId;
   const viaNdcS = findCodeList(spec, indexListIdS)?.system === "drug_name";
   const ndcT = ctx.ndcOf(indexListIdS);
@@ -297,7 +382,11 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
     ]),
     `/* ${parityStamp(
       "regression",
-      regressionParity(an, { referenceLevel: p.referenceLevel, exposedLevel: p.exposedLevel, terms: modelTerms, settingFilter: setting.stamped }),
+      regressionParity(an, {
+        referenceLevel: p.referenceLevel, exposedLevel: p.exposedLevel, terms: modelTerms,
+        settingFilter: setting.stamped, effectStatistic: adjStatistic(an.family),
+        offset: censorS ? { applied: censorS.applied, dataCut: censorS.dataCut } : null,
+      }),
     )} */`,
     ``,
   ];
@@ -367,6 +456,36 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
     `quit;`,
     ``,
     ...(cciScore ? [...cciScore.lines, ...comorbidityScoreSasScore(num, cohT)] : []),
+    ...(isCountS && censorS
+      ? [
+          `/*-------------------- person-time (the model's log offset) ------------------`,
+          `  Censored by the SAME plan the incidence twins render (rate-core.censorPlan),`,
+          `  so this offset cannot disagree with the rate table beside it. */`,
+          `proc sql;`,
+          `  create table work._${num}_pt0 as`,
+          `  select a.enrolid, a.index_date,`,
+          `         ${renderCensorSas(censorS)} as admin_censor format=date9.,`,
+          `         f.fu_date`,
+          `  from work._${num}_atrisk as a`,
+          `  inner join ${ctx.tbl("050_epi")} as ep`,
+          `    on  ep.enrolid = a.enrolid`,
+          `    and a.index_date between ep.dtstart and ep.dtend`,
+          `  left join work._${num}_fu as f on f.enrolid = a.enrolid;`,
+          `quit;`,
+          ``,
+          `data work._${num}_pt;`,
+          `  set work._${num}_pt0;`,
+          ...(censorS.atOutcome
+            ? [`  /* follow-up stops at the earliest of outcome and admin censoring */`,
+               `  censor_date = min(coalesce(fu_date, '31DEC9999'd), admin_censor);`]
+            : [`  /* follow-up runs to the admin censor date (no censoring at outcome) */`,
+               `  censor_date = admin_censor;`]),
+          `  person_days = censor_date - index_date;`,
+          `  keep enrolid person_days;`,
+          `run;`,
+          ``,
+        ]
+      : []),
     `/*-------------------- the ANALYTIC DATASET ----------------------------------*/`,
     `proc sql;`,
     `  create table work._${num}_subj as`,
@@ -375,13 +494,15 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
     `         (case when f.enrolid is not null then 1 else 0 end) as y,`,
     `         (year(a.index_date) - b.dobyr) as age_val,`,
     `         (case when b.sex = '1' then 1 else 0 end) as sex_male${cciScore ? "," : ""}`,
-    ...(cciScore ? [`         coalesce(s.score, 0) as cci_val`] : []),
+    ...(cciScore ? [`         coalesce(s.score, 0) as cci_val${isCountS ? "," : ""}`] : []),
+    ...(isCountS ? [`         coalesce(pt.person_days, 0) as person_days`] : []),
     `  from work._${num}_atrisk as a`,
     `  left join work._${num}_fu as f on f.enrolid = a.enrolid`,
     `  left join (select enrolid, min(dobyr) as dobyr, min(sex) as sex`,
     `             from ${enrT} group by enrolid) as b`,
     `    on b.enrolid = a.enrolid`,
     ...(cciScore ? [`  left join ${cciScore.scoreTable} as s on s.enrolid = a.enrolid`] : []),
+    ...(isCountS ? [`  left join work._${num}_pt as pt on pt.enrolid = a.enrolid`] : []),
     `  ;`,
     `quit;`,
     ``,
@@ -395,7 +516,13 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
     `  select sum(case when exposed = 1 and y = 1 then 1 else 0 end) as a_ee,`,
     `         sum(case when exposed = 1 and y = 0 then 1 else 0 end) as b_en,`,
     `         sum(case when exposed = 0 and y = 1 then 1 else 0 end) as c_ue,`,
-    `         sum(case when exposed = 0 and y = 0 then 1 else 0 end) as d_un`,
+    `         sum(case when exposed = 0 and y = 0 then 1 else 0 end) as d_un${isCountS ? "," : ""}`,
+    ...(isCountS
+      ? [
+          `         sum(case when exposed = 1 then person_days else 0 end) as pt_exp,`,
+          `         sum(case when exposed = 0 then person_days else 0 end) as pt_unexp`,
+        ]
+      : []),
     `  from work._${num}_subj;`,
     `quit;`,
     ``,
@@ -403,10 +530,21 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
     `  set work._${num}_cells;`,
     `  n_exp   = a_ee + b_en;`,
     `  n_unexp = c_ue + d_un;`,
-    `  if a_ee > 0 and b_en > 0 and c_ue > 0 and d_un > 0 then do;`,
-    `    log_or     = log((a_ee * d_un) / (b_en * c_ue));`,
-    `    se_log_or  = sqrt(1/a_ee + 1/b_en + 1/c_ue + 1/d_un);`,
-    `  end;`,
+    ...(isCountS
+      ? [
+          `  /* the Poisson closed form: a ratio of RATES. Person-time enters the`,
+          `     point estimate; the standard error depends only on event counts. */`,
+          `  if a_ee > 0 and c_ue > 0 and pt_exp > 0 and pt_unexp > 0 then do;`,
+          `    log_rr    = log((a_ee / pt_exp) / (c_ue / pt_unexp));`,
+          `    se_log_rr = sqrt(1/a_ee + 1/c_ue);`,
+          `  end;`,
+        ]
+      : [
+          `  if a_ee > 0 and b_en > 0 and c_ue > 0 and d_un > 0 then do;`,
+          `    log_or     = log((a_ee * d_un) / (b_en * c_ue));`,
+          `    se_log_or  = sqrt(1/a_ee + 1/b_en + 1/c_ue + 1/d_un);`,
+          `  end;`,
+        ]),
     `run;`,
     ``,
     `/*----------------------------------------------------------------------------`,
@@ -418,15 +556,34 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
     `  fitting machinery that does not require trusting it.`,
     `  descending: model the probability that y = 1, not y = 0.`,
     `----------------------------------------------------------------------------*/`,
-    `ods output ParameterEstimates = work._${num}_anchor_pe;`,
-    `proc logistic data=work._${num}_subj descending;`,
-    `  model y = exposed;`,
-    `run;`,
+    ...(isCountS
+      ? [
+          `data work._${num}_subj;`,
+          `  set work._${num}_subj;`,
+          `  /* the OFFSET. person_days = 0 cannot be logged, and a subject with no`,
+          `     observed time contributes nothing to a rate, so it is set missing`,
+          `     and GENMOD drops the row rather than silently treating it as 1 day. */`,
+          `  if person_days > 0 then log_pt = log(person_days);`,
+          `  else log_pt = .;`,
+          `run;`,
+          ``,
+          `ods output ParameterEstimates = work._${num}_anchor_pe;`,
+          `proc genmod data=work._${num}_subj;`,
+          `  model y = exposed / dist=poisson link=log offset=log_pt;`,
+          `run;`,
+        ]
+      : [
+          `ods output ParameterEstimates = work._${num}_anchor_pe;`,
+          `proc logistic data=work._${num}_subj descending;`,
+          `  model y = exposed;`,
+          `run;`,
+        ]),
     ``,
     `data work._${num}_anchor;`,
     `  merge work._${num}_anchor_pe (where=(upcase(Variable) = 'EXPOSED') rename=(Estimate = fitted_log_or))`,
-    `        work._${num}_eff (keep=log_or);`,
+    `        work._${num}_eff (keep=${isCountS ? "log_rr" : "log_or"});`,
     `  length anchor_verdict $48;`,
+    ...(isCountS ? [`  log_or = log_rr;`] : []),
     `  _gap = abs(fitted_log_or - log_or);`,
     `  if log_or = . then anchor_verdict = 'NOT CHECKABLE (a zero cell)';`,
     `  else if _gap < 1e-6 then anchor_verdict = 'PASS: saturated MLE = closed form';`,
@@ -442,10 +599,19 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
     `/*-------------------- the ADJUSTED model (SAS-primary) ----------------------*/`,
     `/* These estimates exist ONLY here: the SQL twin emits them NULL because`,
     `   fitting needs iteratively reweighted least squares. */`,
-    `ods output ParameterEstimates = work._${num}_adj_pe;`,
-    `proc logistic data=work._${num}_subj descending;`,
-    `  model y = exposed${p.covariates.length > 0 ? " " + p.covariates.map(sasVar).join(" ") : ""};`,
-    `run;`,
+    ...(isCountS
+      ? [
+          `ods output ParameterEstimates = work._${num}_adj_pe;`,
+          `proc genmod data=work._${num}_subj;`,
+          `  model y = exposed${p.covariates.length > 0 ? " " + p.covariates.map(sasVar).join(" ") : ""} / dist=poisson link=log offset=log_pt;`,
+          `run;`,
+        ]
+      : [
+          `ods output ParameterEstimates = work._${num}_adj_pe;`,
+          `proc logistic data=work._${num}_subj descending;`,
+          `  model y = exposed${p.covariates.length > 0 ? " " + p.covariates.map(sasVar).join(" ") : ""};`,
+          `run;`,
+        ]),
     ``,
     `title "Adjusted ${cmt(an.family)} model: ${label}";`,
     `proc print data=work._${num}_adj_pe noobs;`,
@@ -460,32 +626,65 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
     `  /* design */`,
     `  component='design'; term="${sq(p.exposedLevel)}";    statistic='n';      ord=0; estimate=n_exp;   method='observed'; ci_low=.; ci_high=.; se_log=.; output;`,
     `  component='design'; term="${sq(p.exposedLevel)}";    statistic='events'; ord=1; estimate=a_ee;    method='observed'; output;`,
-    `  component='design'; term="${sq(p.referenceLevel)}";  statistic='n';      ord=2; estimate=n_unexp; method='observed'; output;`,
-    `  component='design'; term="${sq(p.referenceLevel)}";  statistic='events'; ord=3; estimate=c_ue;    method='observed'; output;`,
+    ...(isCountS
+      ? [
+          `  component='design'; term="${sq(p.exposedLevel)}"; statistic='person_days'; ord=2; estimate=pt_exp; method='observed'; output;`,
+          `  component='design'; term="${sq(p.exposedLevel)}"; statistic='rate_per_1000py'; ord=3;`,
+          `  if pt_exp > 0 then estimate = round(a_ee * 1000 * ${YS} / pt_exp, 0.00001); else estimate = .; output;`,
+        ]
+      : []),
+    `  component='design'; term="${sq(p.referenceLevel)}";  statistic='n';      ord=${isCountS ? 4 : 2}; estimate=n_unexp; method='observed'; output;`,
+    `  component='design'; term="${sq(p.referenceLevel)}";  statistic='events'; ord=${isCountS ? 5 : 3}; estimate=c_ue;    method='observed'; output;`,
+    ...(isCountS
+      ? [
+          `  component='design'; term="${sq(p.referenceLevel)}"; statistic='person_days'; ord=6; estimate=pt_unexp; method='observed'; output;`,
+          `  component='design'; term="${sq(p.referenceLevel)}"; statistic='rate_per_1000py'; ord=7;`,
+          `  if pt_unexp > 0 then estimate = round(c_ue * 1000 * ${YS} / pt_unexp, 0.00001); else estimate = .; output;`,
+        ]
+      : []),
     `  /* crude, closed form - identical arithmetic to the SQL twin */`,
     `  component='crude'; term="${sq(stratLabel(gvLabel))}"; method='closed_form_2x2';`,
-    `  statistic='odds_ratio'; ord=10;`,
-    `  if log_or ne . then do;`,
-    `    estimate = round(exp(log_or), 0.00001);`,
-    `    ci_low   = round(exp(log_or - 1.96 * se_log_or), 0.00001);`,
-    `    ci_high  = round(exp(log_or + 1.96 * se_log_or), 0.00001);`,
-    `    se_log   = round(se_log_or, 0.00001);`,
-    `  end;`,
-    `  output;`,
-    `  ci_low=.; ci_high=.; se_log=.;`,
-    `  statistic='risk_ratio'; ord=11;`,
-    `  if n_exp > 0 and n_unexp > 0 and c_ue > 0`,
-    `    then estimate = round((a_ee / n_exp) / (c_ue / n_unexp), 0.00001);`,
-    `    else estimate = .;`,
-    `  output;`,
-    `  statistic='risk_difference'; ord=12;`,
-    `  if n_exp > 0 and n_unexp > 0`,
-    `    then estimate = round(a_ee / n_exp - c_ue / n_unexp, 0.00001);`,
-    `    else estimate = .;`,
-    `  output;`,
+    ...(isCountS
+      ? [
+          `  statistic='rate_ratio'; ord=10;`,
+          `  if log_rr ne . then do;`,
+          `    estimate = round(exp(log_rr), 0.00001);`,
+          `    ci_low   = round(exp(log_rr - 1.96 * se_log_rr), 0.00001);`,
+          `    ci_high  = round(exp(log_rr + 1.96 * se_log_rr), 0.00001);`,
+          `    se_log   = round(se_log_rr, 0.00001);`,
+          `  end;`,
+          `  output;`,
+          `  ci_low=.; ci_high=.; se_log=.;`,
+          `  statistic='rate_difference_per_1000py'; ord=11;`,
+          `  if pt_exp > 0 and pt_unexp > 0`,
+          `    then estimate = round(a_ee * 1000 * ${YS} / pt_exp - c_ue * 1000 * ${YS} / pt_unexp, 0.00001);`,
+          `    else estimate = .;`,
+          `  output;`,
+        ]
+      : [
+          `  statistic='odds_ratio'; ord=10;`,
+          `  if log_or ne . then do;`,
+          `    estimate = round(exp(log_or), 0.00001);`,
+          `    ci_low   = round(exp(log_or - 1.96 * se_log_or), 0.00001);`,
+          `    ci_high  = round(exp(log_or + 1.96 * se_log_or), 0.00001);`,
+          `    se_log   = round(se_log_or, 0.00001);`,
+          `  end;`,
+          `  output;`,
+          `  ci_low=.; ci_high=.; se_log=.;`,
+          `  statistic='risk_ratio'; ord=11;`,
+          `  if n_exp > 0 and n_unexp > 0 and c_ue > 0`,
+          `    then estimate = round((a_ee / n_exp) / (c_ue / n_unexp), 0.00001);`,
+          `    else estimate = .;`,
+          `  output;`,
+          `  statistic='risk_difference'; ord=12;`,
+          `  if n_exp > 0 and n_unexp > 0`,
+          `    then estimate = round(a_ee / n_exp - c_ue / n_unexp, 0.00001);`,
+          `    else estimate = .;`,
+          `  output;`,
+        ]),
     `  /* adjusted - the estimates PROC LOGISTIC above produced */`,
     `  estimate=.; ci_low=.; ci_high=.; se_log=.;`,
-    `  component='adjusted'; statistic='odds_ratio'; method="${ADJ_METHOD}";`,
+    `  component='adjusted'; statistic='${adjStatistic(an.family)}'; method="${adjMethod(an.family)}";`,
     ...modelTerms.map((t, i) => `  term="${sq(t)}"; ord=${20 + i}; output;`),
     `  keep measure component term statistic ord estimate ci_low ci_high se_log method;`,
     `run;`,

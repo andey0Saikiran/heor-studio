@@ -280,6 +280,7 @@ function checkAnalysis(p: Problems, v: unknown, path: string): void {
       checkWindow(p, v.washout, `${path}.washout`);
       needNum(p, v, "horizonDays", path, { min: 1 });
       needStr(p, v, "groupVarId", path, { nonEmpty: true });
+      if (v.personTimeRule !== undefined) checkPersonTimeRule(p, v.personTimeRule, `${path}.personTimeRule`);
       if (!Array.isArray(v.covariateIds)) p.push(`${path}.covariateIds`, `expected an array of baseline ids, got ${typeOf(v.covariateIds)}`);
       else v.covariateIds.forEach((x, j) => need(p, `${path}.covariateIds[${j}]`, isStr(x), `expected a baseline id string, got ${typeOf(x)}`));
       break;

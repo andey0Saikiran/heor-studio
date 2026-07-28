@@ -1036,6 +1036,12 @@ export interface RegressionParity {
   /** adjusted-model terms in order, exposure first */
   terms: string[];
   settingFilter: string;
+  /** the effect the exponentiated coefficient IS — labelling a Poisson
+   *  coefficient "odds_ratio" would be a mislabeled statistic, so the label is
+   *  stamped and compared */
+  effectStatistic: string;
+  /** censoring bounds for the log offset, when the family needs one */
+  offset: { applied: string[]; dataCut: string | null } | null;
   /** what each twin actually produces */
   crudeEffect: "closed_form_2x2";
   adjustedSource: "sas_primary";
@@ -1055,6 +1061,8 @@ export function regressionLimitations(an: RegressionAnalysis, listSystem: CodeSy
   if (covLabels.length === 0)
     out.push(`no covariates resolved, so the "adjusted" model is identical to the crude one - it is still emitted, and at that point its MLE MUST reproduce the closed-form estimate exactly`);
   out.push(`NO variable selection, interaction, spline or collinearity diagnostic is emitted - the model is exactly the terms listed, in the order listed`);
+  if (an.family === "poisson")
+    out.push(`the Poisson model assumes the variance equals the mean. Overdispersion is NOT tested for and NOT corrected - an overdispersed outcome will produce standard errors that are too small and intervals that are too narrow, with nothing in the output to say so`);
   out.push(`the crude interval is the WOOLF (log-odds) Wald interval; it is poor at small cell counts and is not an exact interval. Any zero cell makes it undefined, and the program returns NULL rather than adding a continuity correction, because a correction silently changes the estimand`);
   return out;
 }
@@ -1072,7 +1080,10 @@ export const REGRESSION_METHOD_NOTES = [
 /** The parity record for a regression twin, from consumed values. */
 export function regressionParity(
   an: RegressionAnalysis,
-  consumed: { referenceLevel: string; exposedLevel: string; terms: string[]; settingFilter: string },
+  consumed: {
+    referenceLevel: string; exposedLevel: string; terms: string[]; settingFilter: string;
+    effectStatistic: string; offset: { applied: string[]; dataCut: string | null } | null;
+  },
 ): RegressionParity {
   return {
     id: an.id,
@@ -1085,6 +1096,8 @@ export function regressionParity(
     exposedLevel: consumed.exposedLevel,
     terms: consumed.terms,
     settingFilter: consumed.settingFilter,
+    effectStatistic: consumed.effectStatistic,
+    offset: consumed.offset,
     crudeEffect: "closed_form_2x2",
     adjustedSource: "sas_primary",
     saturatedAnchor: "unadjusted_mle_equals_closed_form_log_or",
