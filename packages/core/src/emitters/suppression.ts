@@ -134,6 +134,27 @@ export const SUPPRESSION_SHAPES: Record<string, SuppressionShape> = {
     keepCols: ["bucket_ord", "b_start", "b_end", "is_partial", "ci_method", "trend_method", "trend_p_method"],
     tieBreakCol: "bucket",
   },
+  resource_use: {
+    /* Settings do not partition PATIENTS (one member can use several), but the
+     * combined ALL row IS the sum of their encounters and payments, so a lone
+     * masked setting is recoverable by subtraction. Complementary suppression
+     * therefore applies, with ALL in the same group as its components.
+     *
+     * Every derived statistic masks with its row: a mean, an SD and a max over
+     * a cell of two people are each as disclosive as the count. observed_days
+     * stays visible - it is a property of enrollment, not of who used care. */
+    labelCols: ["measure", "setting"],
+    groupCols: ["measure"],
+    countCol: "users",
+    denomCol: "denominator",
+    maskCols: [
+      "users", "denominator", "users_pct", "encounters", "enc_per_patient", "enc_sd",
+      "enc_median", "enc_max", "enc_per_person_year", "paid_total", "paid_per_patient",
+      "paid_sd", "paid_median", "paid_max", "paid_per_person_year",
+    ],
+    keepCols: ["observed_days", "cost_field", "setting_ord"],
+    tieBreakCol: "setting",
+  },
   table1: {
     labelCols: ["ord", "characteristic", "category"],
     groupCols: ["characteristic"],

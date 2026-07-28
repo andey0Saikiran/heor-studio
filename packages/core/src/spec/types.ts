@@ -285,6 +285,38 @@ export interface CalendarTrendAnalysis extends AnalysisCommon {
   stratifyBy: Stratifier[];
 }
 
+/* ----- Resource use and cost (claim-line ledger) ----- */
+
+/** The four encounter classes the ledger recognizes. `ed` is carved out of
+ *  outpatient by place of service — MarketScan has no ED table. */
+export type LedgerSetting = "inpatient" | "ed" | "outpatient" | "pharmacy";
+
+/**
+ * Healthcare resource use and cost over a window relative to index.
+ *
+ * Counts and payments come from the SAME encounter ledger, which is why they
+ * are one analysis rather than two: an encounter count and a cost total that
+ * disagree about what an encounter IS are worse than either alone.
+ *
+ * Ref: Manning & Mullahy JHE 2001;20:461 (cost distributions); Hanley et al.
+ * on the classic inpatient double-count (admission totals and service lines are
+ * not additive).
+ */
+export interface ResourceUseAnalysis extends AnalysisCommon {
+  kind: "resource_use";
+  /** window relative to index, INCLUSIVE of both endpoints (so a 365-day
+   *  follow-up is {start: 0, end: 364}) */
+  ascertainmentWindow: RelativeWindow;
+  settings: LedgerSetting[];
+  /** payment column treated as "cost" — MarketScan carries several */
+  costField: "paytot" | "netpay";
+  /** also emit a combined row across the chosen settings */
+  includeCombined: boolean;
+  /** place-of-service codes classified as an emergency department
+   *  (default ["23"], the standard ED POS) */
+  edPlaceOfService?: string[];
+}
+
 /* ----- P1 engine: first-class StudySpec sibling entities (referenced by id) ----- */
 
 /** Ref: Manning & Mullahy JHE 2001;20:461 (gamma-log for cost). */
@@ -429,6 +461,7 @@ export type Analysis =
   | IncidenceRateAnalysis
   | StandardizationAnalysis
   | CalendarTrendAnalysis
+  | ResourceUseAnalysis
   | StatisticalEngineAnalysis
   | FutureAnalysisStub;
 
@@ -451,6 +484,7 @@ export const EMITTABLE_ANALYSIS_KINDS: ReadonlySet<AnalysisKind> = new Set<Analy
   "standardization",
   "statistical_engine",
   "calendar_trend",
+  "resource_use",
 ]);
 
 export type DescriptiveAnalysis =
@@ -737,6 +771,17 @@ export function validateAnalyses(spec: StudySpec): string[] {
         if (a.trend.bucket === "calendar_month" && a.trend.method === "cochran_armitage")
           problems.push(`${w}: monthly buckets with a Cochran-Armitage trend are usually a mistake — the test scores buckets 0,1,2,... and assumes equal spacing, so dozens of sparse monthly cells give it almost no power. Use calendar_year or calendar_quarter, or state the intent explicitly.`);
         checkStratifiers(a.stratifyBy, w);
+        break;
+      }
+      case "resource_use": {
+        if (a.settings.length === 0) problems.push(`${w}: settings[] is empty — nothing would be counted.`);
+        const win = a.ascertainmentWindow;
+        if (typeof win.start === "number" && typeof win.end === "number" && win.end < win.start)
+          problems.push(`${w}: ascertainmentWindow ends (day ${win.end}) before it starts (day ${win.start}).`);
+        if (win.start === "anytime_before" || win.end === "anytime_after")
+          problems.push(
+            `${w}: an unbounded resource-use window cannot be costed — the per-patient denominator is the observed days INSIDE the window, and "anytime" has no length. Give the window explicit day bounds.`
+          );
         break;
       }
       case "statistical_engine": {

@@ -21,6 +21,7 @@ import type {
   PeriodPrevalenceAnalysis,
   PointPrevalenceAnalysis,
   RelativeWindow,
+  ResourceUseAnalysis,
   Stratifier,
   TrendSpec,
 } from "../spec/types";
@@ -625,6 +626,18 @@ export function ascertainmentWindow(spec: StudySpec): AscertainmentWindow {
     if (a.kind === "incidence_rate" && a.personTimeRule.maxFollowupDays && a.personTimeRule.maxFollowupDays > fwdDays) {
       fwdDays = a.personTimeRule.maxFollowupDays; reasons.push(`analysis "${a.id}" max follow-up ${a.personTimeRule.maxFollowupDays}d`);
     }
+    /* The resource-use window is the same hazard the studyPeriod truncation
+     * defect was: a 2-year cost window with a 1-year enrollment requirement
+     * would pull only the first year of claims and report the shortfall as
+     * low utilization. It only ever widens the pull. */
+    if (a.kind === "resource_use") {
+      const w = a.ascertainmentWindow;
+      if (w.start === "anytime_before") { unbounded = true; reasons.push(`analysis "${a.id}" resource-use window has no lower bound`); }
+      else if (w.start < 0) consider(-w.start, `analysis "${a.id}" resource-use lookback ${-w.start}d`);
+      if (typeof w.end === "number" && w.end > fwdDays) {
+        fwdDays = w.end; reasons.push(`analysis "${a.id}" resource-use window ends day ${w.end}`);
+      }
+    }
     if (a.kind === "period_prevalence") {
       if (!latestFixed || a.prevalencePeriod.end > latestFixed) latestFixed = a.prevalencePeriod.end;
       reasons.push(`analysis "${a.id}" prevalence period ends ${a.prevalencePeriod.end}`);
@@ -838,5 +851,75 @@ export function calendarTrendParity(
     ciMethod: "wilson",
     settingFilter: consumed.settingFilter,
     pValueSource: "sas_primary",
+  };
+}
+
+/* ================================================================== *
+ *  Resource use and cost
+ * ================================================================== */
+
+/** The parameter set a resource-use twin must consume identically. */
+export interface ResourceUseParity {
+  id: string;
+  window: { start: number | "anytime_before"; end: number | "anytime_after"; includesIndex: boolean };
+  /** observed-day denominator length implied by the window */
+  windowDays: number | null;
+  settings: string[];
+  costField: string;
+  edPlaceOfService: string[];
+  includeCombined: boolean;
+  /** the inpatient rule actually implemented */
+  inpatientRule: "admission_total_lines_excluded";
+  /** encounter grain, per family */
+  encounterGrain: { inpatient: string; ambulatory: string; pharmacy: string };
+  daysPerYear: string;
+  /** the quantile estimator actually used (see RESOURCE_USE_METHOD_NOTES) */
+  medianEstimator: "percentile_cont_equivalent";
+}
+
+/** Spec options the resource-use twins do NOT implement yet. */
+export function resourceUseLimitations(an: ResourceUseAnalysis): string[] {
+  const out: string[] = [];
+  if (an.costField === "netpay")
+    out.push(`costField "netpay" is emitted as requested, but NETPAY nets out coordination-of-benefits and is NOT comparable across plan types - PAYTOT is the usual choice for a total-cost-of-care figure`);
+  if (!an.settings.includes("ed") && an.settings.includes("outpatient"))
+    out.push(`ED visits are NOT separated - without "ed" in settings[] every emergency visit is counted as an ordinary outpatient visit, which understates acute utilization`);
+  out.push(`no inflation adjustment is applied - payments are in NOMINAL dollars of their service year, so a multi-year window mixes them. CostMeasurement.inflationAdjustment is not consumed yet`);
+  out.push(`the ledger counts ENCOUNTERS, not claim lines or units of service; procedure-level and length-of-stay measures are not emitted`);
+  return out;
+}
+
+/** Method notes ALWAYS emitted (describe what IS computed). */
+export const RESOURCE_USE_METHOD_NOTES = [
+  `INPATIENT DOUBLE COUNT: an admission carries a stay-level total AND its own service lines, which already roll up into that total. This program takes the admission record and DROPS its service lines. Summing both is the classic error and inflates the largest cost component in most studies`,
+  `service lines with NO matching admission record are kept as stays in their own right (matched by CASEID where present, by admission date where not) - dropping them would silently lose stays that straddle a year-file boundary`,
+  `a stay is dated at ADMISSION, so a stay that began before the window is not counted even when its service lines fall inside it`,
+  `encounter grain: inpatient = one per stay; ambulatory = one per member per service date per class; pharmacy = one per member per date per NDC (two different products on one day are two fills)`,
+  `denominators are the WHOLE cohort, not users - a member with no encounters contributes a zero, so the mean is a per-member figure and not a per-user one. "users" is reported separately`,
+  `MEDIAN is comparable across the twins; QUARTILES would not be. SQL's PERCENTILE_CONT and SAS's PCTLDEF=5 agree exactly at p=0.5 for every n (both return the average of the two central order statistics when n is even, and the central one when odd) but diverge elsewhere, so no quartile is emitted`,
+  `costs are NOMINAL and un-discounted; skew is expected. The mean and the median are both reported precisely because they disagree in cost data, and the mean is the one that drives budget impact`,
+];
+
+/** The parity record for a resource-use twin, from consumed values. */
+export function resourceUseParity(
+  an: ResourceUseAnalysis,
+  consumed: { settings: string[]; edPlaces: string[]; windowDays: number | null; daysPerYear: string },
+): ResourceUseParity {
+  return {
+    id: an.id,
+    window: { start: an.ascertainmentWindow.start, end: an.ascertainmentWindow.end, includesIndex: an.ascertainmentWindow.includesIndex },
+    windowDays: consumed.windowDays,
+    settings: consumed.settings,
+    costField: an.costField,
+    edPlaceOfService: consumed.edPlaces,
+    includeCombined: an.includeCombined,
+    inpatientRule: "admission_total_lines_excluded",
+    encounterGrain: {
+      inpatient: "one_per_stay_at_admission",
+      ambulatory: "one_per_member_date_class",
+      pharmacy: "one_per_member_date_ndc",
+    },
+    daysPerYear: consumed.daysPerYear,
+    medianEstimator: "percentile_cont_equivalent",
   };
 }

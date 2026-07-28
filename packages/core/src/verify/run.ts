@@ -611,6 +611,76 @@ export async function verifyGoldA(): Promise<VerificationResult> {
       });
     }
 
+    /* ---- resource use and cost (executed vs hand-derived ledger truth) ----
+     * Every value below was derived claim by claim before the module ran; see
+     * EXPECTED.resourceUse for the derivation. */
+    const ru = EXPECTED.resourceUse;
+    eq(
+      `resource-use rows = ${ru.rowCount} (ALL + IP + ED + OP + RX)`,
+      await scalar<number>(db, "SELECT count(*)::int FROM tz_study_hcru"),
+      ru.rowCount,
+    );
+    const hcruRow = async (setting: string) =>
+      (
+        await rows<{ users: number; denominator: number; encounters: number; enc_per_patient: number; enc_sd: number; enc_median: number; enc_max: number; observed_days: number; paid_total: number; paid_per_patient: number; paid_sd: number; paid_median: number; paid_max: number }>(
+          db,
+          `SELECT users, denominator, encounters, enc_per_patient::float8, enc_sd::float8, enc_median::float8,
+                  enc_max, observed_days, paid_total::float8, paid_per_patient::float8, paid_sd::float8,
+                  paid_median::float8, paid_max::float8
+             FROM tz_study_hcru WHERE setting = '${setting}'`,
+        )
+      )[0];
+    for (const [setting, want] of Object.entries(ru.bySetting)) {
+      const r = await hcruRow(setting);
+      const tag = `hcru ${setting}`;
+      if (!r) {
+        checks.push({ name: tag, status: "fail", detail: "row missing" });
+        continue;
+      }
+      eq(`${tag}: users = ${want.users}`, Number(r.users), want.users);
+      eq(`${tag}: denominator = whole cohort (10)`, Number(r.denominator), EXPECTED.finalCohortN);
+      eq(`${tag}: encounters = ${want.encounters}`, Number(r.encounters), want.encounters);
+      approx(`${tag}: encounters per member = ${want.encMean}`, Number(r.enc_per_patient), want.encMean, 0.00001);
+      approx(`${tag}: encounter SD = ${want.encSd}`, Number(r.enc_sd), want.encSd, 0.00001);
+      approx(`${tag}: encounter median = ${want.encMedian}`, Number(r.enc_median), want.encMedian, 0.00001);
+      eq(`${tag}: max encounters = ${want.encMax}`, Number(r.enc_max), want.encMax);
+      eq(`${tag}: observed days = ${ru.observedDaysTotal}`, Number(r.observed_days), ru.observedDaysTotal);
+      approx(`${tag}: paid total = ${want.paidTotal}`, Number(r.paid_total), want.paidTotal, 0.01);
+      approx(`${tag}: paid per member = ${want.paidMean}`, Number(r.paid_per_patient), want.paidMean, 0.01);
+      approx(`${tag}: paid SD = ${want.paidSd}`, Number(r.paid_sd), want.paidSd, 0.01);
+      approx(`${tag}: paid median = ${want.paidMedian}`, Number(r.paid_median), want.paidMedian, 0.01);
+      approx(`${tag}: paid max = ${want.paidMax}`, Number(r.paid_max), want.paidMax, 0.01);
+    }
+
+    /* The single most consequential number in the ledger, called out on its own
+     * because getting it wrong is silent, plausible, and inflates the largest
+     * cost component in most studies. */
+    const ipPaid = Number((await hcruRow("IP"))?.paid_total);
+    checks.push({
+      name: "hcru: inpatient cost takes the ADMISSION total, not admission + its own service lines",
+      status: Math.abs(ipPaid - ru.bySetting.IP.paidTotal) < 0.01 ? "pass" : "fail",
+      detail:
+        Math.abs(ipPaid - ru.bySetting.IP.paidTotal) < 0.01
+          ? `$${ipPaid.toLocaleString()} = P04's $10,000 stay + P05's $5,000 orphan line; a double-counting ledger would report $${ru.ipDoubleCountWouldBe.toLocaleString()}`
+          : `got $${ipPaid.toLocaleString()}, expected $${ru.bySetting.IP.paidTotal.toLocaleString()}${Math.abs(ipPaid - ru.ipDoubleCountWouldBe) < 0.01 ? " — this is EXACTLY the double count (admission totals summed with their own service lines)" : ""}`,
+    });
+    /* P05 is the orphan-line case: a service line whose admission record is
+     * absent. Dropping every unmatched line would lose the stay entirely and
+     * would still look like a working ledger. */
+    checks.push({
+      name: "hcru: an inpatient service line with NO admission record still counts as a stay (P05)",
+      status: Number((await hcruRow("IP"))?.users) === 2 ? "pass" : "fail",
+      detail: `IP users = ${(await hcruRow("IP"))?.users} (P04 via its admission record, P05 via an orphan line)`,
+    });
+    /* Skew is the reason both statistics are reported. If a change ever made
+     * them agree on this fixture, the fixture stopped exercising cost data. */
+    const all = await hcruRow("ALL");
+    checks.push({
+      name: "hcru: the cost distribution is right-skewed, so mean and median disagree by design",
+      status: Number(all?.paid_per_patient) > Number(all?.paid_median) * 2 ? "pass" : "fail",
+      detail: `mean $${Number(all?.paid_per_patient).toLocaleString()} vs median $${Number(all?.paid_median).toLocaleString()}`,
+    });
+
     invariants.push(...(await runInvariants(db, "tz_study")));
   }
 

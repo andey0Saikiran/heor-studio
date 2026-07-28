@@ -30,8 +30,12 @@ const RECURRENCE = new Set(["first_only", "all_events"]);
 const DEMO_AXES = new Set(["age_band", "sex", "region", "plan_type", "year"]);
 const ANALYSIS_KINDS = new Set([
   "attrition", "table1", "point_prevalence", "period_prevalence", "cumulative_incidence",
-  "incidence_rate", "standardization", "calendar_trend", "statistical_engine", "future_stub",
+  "incidence_rate", "standardization", "calendar_trend", "resource_use",
+  "statistical_engine", "future_stub",
 ]);
+
+const LEDGER_SETTINGS = new Set(["inpatient", "ed", "outpatient", "pharmacy"]);
+const COST_FIELDS = new Set(["paytot", "netpay"]);
 
 /** Generous DoS caps — real studies sit far below these. */
 const MAX = { codeLists: 200, codesPerList: 5000, criteria: 200, baseline: 200, analyses: 100, stratifiers: 25 };
@@ -235,6 +239,21 @@ function checkAnalysis(p: Problems, v: unknown, path: string): void {
       break;
     // Not emittable yet — readiness blocks them when enabled; shape only needs
     // the common header (checked above) to hold.
+    case "resource_use": {
+      checkWindow(p, v.ascertainmentWindow, `${path}.ascertainmentWindow`);
+      if (!Array.isArray(v.settings)) p.push(`${path}.settings`, `expected an array of care settings, got ${typeOf(v.settings)}`);
+      else {
+        if (v.settings.length === 0) p.push(`${path}.settings`, "expected at least one setting — an empty list would count nothing");
+        v.settings.forEach((x, j) => need(p, `${path}.settings[${j}]`, LEDGER_SETTINGS.has(x as string), `expected one of [${[...LEDGER_SETTINGS].join(", ")}], got ${JSON.stringify(x)}`));
+      }
+      needEnum(p, v, "costField", path, COST_FIELDS);
+      needBool(p, v, "includeCombined", path);
+      if (v.edPlaceOfService !== undefined) {
+        if (!Array.isArray(v.edPlaceOfService)) p.push(`${path}.edPlaceOfService`, "expected an array of place-of-service codes");
+        else v.edPlaceOfService.forEach((x, j) => need(p, `${path}.edPlaceOfService[${j}]`, isStr(x) && SAFE_CODE.test(x), `expected a printable code string, got ${typeOf(x)}`));
+      }
+      break;
+    }
     case "standardization":
     case "calendar_trend":
     case "statistical_engine":

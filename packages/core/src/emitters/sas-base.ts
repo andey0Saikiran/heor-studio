@@ -151,6 +151,29 @@ export function header(spec: StudySpec, program: string, purpose: string[]): str
   ];
 }
 
+/**
+ * Wrap a raw-table pull in the per-year driver macro (or emit it once, when the
+ * site's delivery is a single table rather than yearly files).
+ *
+ * Lives here rather than in sas.ts because analysis MODULES need it too: the
+ * resource-use ledger reads the O/S/I/D claim families directly, not a spine
+ * table, and a module that re-implemented this loop would be a second place for
+ * the year range to drift.
+ */
+export function yearWrap(site: SiteNaming, macroName: string, body: string[]): string[] {
+  if (!site.yearLoop) return body;
+  return [
+    `%macro ${macroName};`,
+    `  %do yr = &start_year. %to &end_year.;`,
+    ``,
+    ...body.map((l) => (l === "" ? l : `    ${l}`)),
+    `  %end;`,
+    `%mend ${macroName};`,
+    ``,
+    `%${macroName};`,
+  ];
+}
+
 export const INCLUDE_SETUP = [
   `%include "00_setup.sas";   /* EDIT: use the full site path to 00_setup.sas */`,
   ``,

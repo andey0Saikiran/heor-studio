@@ -136,6 +136,31 @@ function sasDateToIso(lit: string | undefined): string | undefined {
   return mm ? `${m[3]}-${mm}-${m[1]}` : lit;
 }
 
+/** Day offset of an index-relative window bound, read from EITHER SQL dialect.
+ *
+ *  Postgres emits `x >= (c.index_date - 30)` and `x <= (c.index_date + 364)`;
+ *  Snowflake emits `x >= DATEADD(day, -30, c.index_date)`. A zero offset has no
+ *  arithmetic at all in Postgres (`x >= c.index_date`), which is why a single
+ *  optional-group regex silently produced an empty string here — the bug this
+ *  helper exists to remove. */
+function sqlWindowOffset(sql: string, cmp: ">=" | "<="): string {
+  const c = cmp === ">=" ? ">=" : "<=";
+  const pg = new RegExp(`(?:admdate|svcdate)\\s*${c}\\s*\\(c\\.index_date\\s*([+-])\\s*(\\d+)\\)`, "i").exec(sql);
+  if (pg) return String(pg[1] === "-" ? -Number(pg[2]) : Number(pg[2]));
+  const sf = new RegExp(`(?:admdate|svcdate)\\s*${c}\\s*DATEADD\\(\\s*day\\s*,\\s*(-?\\d+)\\s*,`, "i").exec(sql);
+  if (sf) return String(Number(sf[1]));
+  const bare = new RegExp(`(?:admdate|svcdate)\\s*${c}\\s*c\\.index_date(?!\\s*[+-])`, "i").test(sql);
+  return bare ? "0" : "ABSENT";
+}
+
+/** SAS twin of the above: `a.index_date`, `a.index_date + 364`. */
+function sasWindowOffset(expr: string | undefined): string {
+  if (expr === undefined) return "ABSENT";
+  const m = /index_date\s*([+-])\s*(\d+)/i.exec(expr);
+  if (!m) return "0";
+  return String(m[1] === "-" ? -Number(m[2]) : Number(m[2]));
+}
+
 /* ------------------------------------------------------------------ *
  *  SQL extraction — patterns match the Postgres/Snowflake emission.
  * ------------------------------------------------------------------ */
@@ -217,6 +242,36 @@ function sqlFingerprint(kind: string, raw: string): Fingerprint {
       // so matching inside it needs balancing (same trap as POWER above)
       put(fp, "imbalance_threshold", grab(sql, [/>\s*([\d.]+)\s*THEN 1/i]));
       put(fp, "reference_arm", grab(sql, [/IN \('([^']+)',/i]));
+      break;
+    }
+    case "resource_use": {
+      /* The ledger's correctness lives in four places, and each one produces a
+       * complete, plausible table when it breaks — so each is scraped from the
+       * emitted text rather than trusted. */
+      // Bounds must read the SAME in both dialects: Postgres writes
+      // `(c.index_date + 364)`, Snowflake `DATEADD(day, 364, c.index_date)`.
+      put(fp, "window_lower_days", sqlWindowOffset(sql, ">="));
+      put(fp, "window_upper_days", sqlWindowOffset(sql, "<="));
+      // IP double-count guard: service lines must be filtered by NOT EXISTS
+      put(fp, "ip_lines_excluded_when_admission_exists",
+        /NOTEXISTS\(/i.test(sql.replace(/\s+/g, "")) && /i2\.caseid\s*=\s*s\.caseid/i.test(sql) ? "yes" : "no");
+      put(fp, "ip_orphan_fallback_on_admdate", /i2\.admdate\s*=\s*s\.admdate/i.test(sql) ? "yes" : "no");
+      put(fp, "ip_dated_at_admission", /i\.admdate AS service_date/i.test(sql) ? "yes" : "no");
+      // Encounter grain, per family
+      put(fp, "rx_key_includes_ndc", /ndcnum/i.test(sql) && /svcdate AS VARCHAR\) \|\| ':'/i.test(sql) ? "yes" : "no");
+      put(fp, "amb_key_is_service_date", /CAST\(o\.svcdate AS VARCHAR\) AS enc_id/i.test(sql) ? "yes" : "no");
+      put(fp, "encounter_collapse_key", /GROUP BY enrolid, setting, enc_id/i.test(sql) ? "yes" : "no");
+      // ED carve-out places, in order
+      put(fp, "ed_places", (sql.match(/CAST\(o\.stdplac AS VARCHAR\) IN \(([^)]*)\)/i)?.[1] ?? "").replace(/['\s]/g, ""));
+      // Quantile estimator: ONLY the median may be taken (see the module header)
+      /* The DISTINCT set of probabilities taken, sorted. Deduped because the
+       * module takes the median of two variables and SAS names the estimator
+       * once; adding a quartile still shows up as "0.25,0.5" != "0.5". */
+      put(fp, "quantile_probabilities",
+        [...new Set((sql.match(/PERCENTILE_CONT\(([\d.]+)\)/gi) ?? []).map((m) => (/([\d.]+)/.exec(m) ?? [])[1]))].sort().join(","));
+      put(fp, "denominator_is_whole_cohort", /CROSS JOIN settings_list/i.test(sql) ? "yes" : "no");
+      put(fp, "cost_field", grab(sql, [/'(paytot|netpay)' AS cost_field/i]));
+      put(fp, "days_per_year", grab(sql, [/encounters \* ([\d.]+) \/ NULLIF\(\s*s\.observed_days/i]));
       break;
     }
     case "calendar_trend": {
@@ -320,6 +375,29 @@ function sasFingerprint(kind: string, rawSas: string, setup: string): Fingerprin
       put(fp, "pooled_halved_denominator", /\/\s*2\s*\)/.test(sas) ? "yes" : "no");
       put(fp, "imbalance_threshold", grab(sas, [/abs\(smd\)\s*>\s*([\d.]+)/i]));
       put(fp, "reference_arm", grab(sas, [/in \('([^']+)',/i]));
+      break;
+    }
+    case "resource_use": {
+      // Same values, scraped from the SAS twin's own text.
+      const bounds = /between (a\.index_date(?:\s*[+-]\s*\d+)?) and (a\.index_date(?:\s*[+-]\s*\d+)?)/i.exec(sas);
+      put(fp, "window_lower_days", sasWindowOffset(bounds?.[1]));
+      put(fp, "window_upper_days", sasWindowOffset(bounds?.[2]));
+      put(fp, "ip_lines_excluded_when_admission_exists",
+        /notexists\(/i.test(sas.replace(/\s+/g, "")) && /i2\.caseid\s*=\s*s\.caseid/i.test(sas) ? "yes" : "no");
+      put(fp, "ip_orphan_fallback_on_admdate", /i2\.admdate\s*=\s*s\.admdate/i.test(sas) ? "yes" : "no");
+      put(fp, "ip_dated_at_admission", /b\.admdate as service_date/i.test(sas) ? "yes" : "no");
+      put(fp, "rx_key_includes_ndc", /ndcnum/i.test(sas) && /\|\| ':' \|\|/i.test(sas) ? "yes" : "no");
+      put(fp, "amb_key_is_service_date", /put\(o\.svcdate, yymmdd10\.\) as enc_id/i.test(sas) ? "yes" : "no");
+      put(fp, "encounter_collapse_key", /group by enrolid, setting, enc_id/i.test(sas) ? "yes" : "no");
+      put(fp, "ed_places", (sas.match(/vvalue\(o\.stdplac\)\) in \(([^)]*)\)/i)?.[1] ?? "").replace(/['\s]/g, ""));
+      /* SAS names the estimator instead of a probability. PCTLDEF=5 is the only
+       * definition that reproduces PERCENTILE_CONT(0.5), so it is pinned here
+       * as "0.5" — the SAME token the SQL twin yields — and a site default
+       * left implicit would read as MISSING. */
+      put(fp, "quantile_probabilities", /pctldef=5/i.test(sas) && /median\s*=/i.test(sas) ? "0.5" : "");
+      put(fp, "denominator_is_whole_cohort", /cross join work\._\w+_settings/i.test(sas) ? "yes" : "no");
+      put(fp, "cost_field", grab(sas, [/cost_field = "(paytot|netpay)"/i]));
+      put(fp, "days_per_year", grab(sas, [/encounters \* ([\d.]+) \/ observed_days/i]));
       break;
     }
     case "calendar_trend": {
@@ -530,6 +608,27 @@ export function expectedFromStamp(kind: string, stamp: Record<string, unknown>):
       }
       break;
     }
+    case "resource_use": {
+      const w = stamp.window as { start?: unknown; end?: unknown } | undefined;
+      if (w && typeof w.start === "number") exp.window_lower_days = String(w.start);
+      if (w && typeof w.end === "number") exp.window_upper_days = String(w.end);
+      if (Array.isArray(stamp.edPlaceOfService)) exp.ed_places = (stamp.edPlaceOfService as string[]).join(",");
+      if (typeof stamp.costField === "string") exp.cost_field = stamp.costField;
+      if (typeof stamp.daysPerYear === "string") exp.days_per_year = stamp.daysPerYear;
+      /* The stamp CLAIMS these rules; the code must implement them. This is
+       * where the inpatient double count would be caught: the stamp says
+       * "admission_total_lines_excluded" and the NOT EXISTS clause is what
+       * makes that true. */
+      if (stamp.inpatientRule === "admission_total_lines_excluded") {
+        exp.ip_lines_excluded_when_admission_exists = "yes";
+        exp.ip_orphan_fallback_on_admdate = "yes";
+        exp.ip_dated_at_admission = "yes";
+      }
+      if (stamp.medianEstimator === "percentile_cont_equivalent") exp.quantile_probabilities = "0.5";
+      exp.encounter_collapse_key = "yes";
+      exp.denominator_is_whole_cohort = "yes";
+      break;
+    }
     case "calendar_trend": {
       /* The stamp lists every bucket; the code must contain exactly those
        * boundaries, in that order, plus the overall span on the Trend row.
@@ -605,6 +704,15 @@ const EXPECTED_CONSTANTS: Record<string, Record<"sql" | "sas", Record<string, nu
   cumulative_incidence: {
     sql: { z: 2, z2_half: 2, z2: 2, z2_quarter: 2 },
     sas: { z: 1, z2_half: 2, z2: 2, z2_quarter: 1 },
+  },
+  resource_use: {
+    /* No interval is computed anywhere in this module — an SD is a dispersion
+     * statistic, not a confidence interval. A z appearing here would mean
+     * someone added an interval to a cost mean without saying so, which for a
+     * distribution this skewed would be a normal approximation on data that
+     * badly violates it. */
+    sql: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
+    sas: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
   },
   calendar_trend: {
     /* Per-bucket Wilson intervals, structured exactly like the prevalence

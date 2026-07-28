@@ -786,6 +786,7 @@ const ANALYSIS_KIND_LABELS: Record<AnalysisKind, string> = {
   cumulative_incidence: "Cumulative incidence (risk)",
   standardization: "Age/sex standardization",
   calendar_trend: "Calendar trend",
+  resource_use: "Resource use and cost",
   statistical_engine: "Statistical comparison",
   future_stub: "Planned (not generated yet)",
 };

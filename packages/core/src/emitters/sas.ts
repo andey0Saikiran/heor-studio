@@ -35,6 +35,7 @@ import {
   sasName,
   sq,
   windowConds,
+  yearWrap,
   INCLUDE_SETUP,
 } from "./sas-base";
 import type { Ctx, ListKind, PulledList, SiteNaming } from "./sas-base";
@@ -190,20 +191,9 @@ function makeSite(naming: TableNamingStrategy, database: string): SiteNaming {
   };
 }
 
-/** wrap a pull body in the per-year driver macro (or emit once for single tables) */
-function yearWrap(site: SiteNaming, macroName: string, body: string[]): string[] {
-  if (!site.yearLoop) return body;
-  return [
-    `%macro ${macroName};`,
-    `  %do yr = &start_year. %to &end_year.;`,
-    ``,
-    ...body.map((l) => (l === "" ? l : `    ${l}`)),
-    `  %end;`,
-    `%mend ${macroName};`,
-    ``,
-    `%${macroName};`,
-  ];
-}
+/* yearWrap moved to sas-base.ts so analysis MODULES can pull raw claim
+ * families too (the resource-use ledger needs O/S/I/D directly, not a spine
+ * table). Re-exported here is unnecessary — sas.ts imports it below. */
 
 /* ================================================================== *
  *  spec digestion

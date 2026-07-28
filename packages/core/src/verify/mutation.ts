@@ -165,6 +165,56 @@ const MUTATIONS: Mutation[] = [
     kind: "calendar_trend", lang: "sas",
     apply: (t) => t.replace(/round\(t_stat \/ sqrt\(var_t\)/, "round(t_stat / (var_t)"),
   },
+  {
+    /* THE INPATIENT DOUBLE COUNT. Breaking the CASEID match lets a stay's own
+     * service lines back in alongside the admission total that already contains
+     * them — on the fixture, $15,000 becomes $22,000, and every number in the
+     * table stays perfectly well-formed. */
+    name: "SQL ledger double counts inpatient (admission total summed WITH its own service lines)",
+    kind: "resource_use", lang: "sql",
+    apply: (t) => t.replace(/i2\.caseid = s\.caseid/, "1 = 0"),
+  },
+  {
+    // SAS loses the admission-date fallback, so a service line with no CASEID
+    // is treated differently in the two twins.
+    name: "SAS ledger loses the admission-date fallback for lines with no CASEID",
+    kind: "resource_use", lang: "sas",
+    apply: (t) => t.replace(/i2\.admdate = s\.admdate/, "1 = 0"),
+  },
+  {
+    // Keying ambulatory encounters on something line-unique turns one visit
+    // with three lines into three visits.
+    name: "SQL ambulatory encounters keyed per claim LINE instead of per service date",
+    kind: "resource_use", lang: "sql",
+    apply: (t) => t.replace(/CAST\(o\.svcdate AS VARCHAR\) AS enc_id/, "CAST(o.svcdate AS VARCHAR) || CAST(o.paytot AS VARCHAR) AS enc_id"),
+  },
+  {
+    // Dropping the NDC collapses two different drugs dispensed on one day into
+    // a single fill, understating pharmacy utilization.
+    name: "SAS pharmacy fills collapse to one per day (NDC dropped from the encounter key)",
+    kind: "resource_use", lang: "sas",
+    apply: (t) => t.replace(/put\(r\.svcdate, yymmdd10\.\) \|\| ':' \|\| strip\(r\.ndcnum\)/, "put(r.svcdate, yymmdd10.)"),
+  },
+  {
+    /* A quartile looks harmless and is not: PERCENTILE_CONT and PCTLDEF=5 agree
+     * ONLY at p = 0.5. Adding one produces a number the SAS twin cannot
+     * reproduce, and nothing else in the suite would notice. */
+    name: "SQL adds a quartile beside the median (an estimator SAS cannot reproduce)",
+    kind: "resource_use", lang: "sql",
+    apply: (t) => t.replace(/PERCENTILE_CONT\(0\.5\) WITHIN GROUP \(ORDER BY CAST\(paid AS DOUBLE PRECISION\)\) AS paid_median/,
+      "PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY CAST(paid AS DOUBLE PRECISION)) AS paid_median"),
+  },
+  {
+    // Leaving PCTLDEF implicit makes the median depend on a site option.
+    name: "SAS leaves PCTLDEF to the site default (median silently becomes site-dependent)",
+    kind: "resource_use", lang: "sas",
+    apply: (t) => t.replace(/ pctldef=5/, ""),
+  },
+  {
+    name: "SQL resource-use window shortened (364 -> 180 days)",
+    kind: "resource_use", lang: "sql",
+    apply: (t) => t.replace(/index_date \+ 364\)/g, "index_date + 180)"),
+  },
 ];
 
 interface Program {

@@ -33,24 +33,28 @@ DROP TABLE IF EXISTS ccaeo_all;
 CREATE TABLE ccaeo_all (
   enrolid BIGINT, svcdate DATE, dxver VARCHAR,
   dx1 VARCHAR, dx2 VARCHAR, dx3 VARCHAR, dx4 VARCHAR,
-  proc1 VARCHAR, proctyp VARCHAR, stdplac VARCHAR
+  proc1 VARCHAR, proctyp VARCHAR, stdplac VARCHAR,
+  paytot NUMERIC, netpay NUMERIC, copay NUMERIC, deduct NUMERIC, coins NUMERIC
 );
 DROP TABLE IF EXISTS ccaes_all;
 CREATE TABLE ccaes_all (
   enrolid BIGINT, admdate DATE, svcdate DATE, dxver VARCHAR, pdx VARCHAR,
   dx1 VARCHAR, dx2 VARCHAR, dx3 VARCHAR, dx4 VARCHAR,
-  pproc VARCHAR, proc1 VARCHAR, proctyp VARCHAR
+  pproc VARCHAR, proc1 VARCHAR, proctyp VARCHAR,
+  caseid BIGINT, paytot NUMERIC, netpay NUMERIC
 );
 DROP TABLE IF EXISTS ccaei_all;
 CREATE TABLE ccaei_all (
   enrolid BIGINT, admdate DATE, disdate DATE, dxver VARCHAR, pdx VARCHAR,
   dx1 VARCHAR, dx2 VARCHAR, dx3 VARCHAR, dx4 VARCHAR, dx5 VARCHAR, dx6 VARCHAR,
   dx7 VARCHAR, dx8 VARCHAR, dx9 VARCHAR, dx10 VARCHAR, dx11 VARCHAR, dx12 VARCHAR,
-  dx13 VARCHAR, dx14 VARCHAR, dx15 VARCHAR, pproc VARCHAR, proc1 VARCHAR
+  dx13 VARCHAR, dx14 VARCHAR, dx15 VARCHAR, pproc VARCHAR, proc1 VARCHAR,
+  caseid BIGINT, los INT, paytot NUMERIC, netpay NUMERIC
 );
 DROP TABLE IF EXISTS ccaed_all;
 CREATE TABLE ccaed_all (
-  enrolid BIGINT, svcdate DATE, ndcnum VARCHAR, daysupp INT, qty NUMERIC
+  enrolid BIGINT, svcdate DATE, ndcnum VARCHAR, daysupp INT, qty NUMERIC,
+  paytot NUMERIC, netpay NUMERIC, copay NUMERIC, deduct NUMERIC, coins NUMERIC
 );
 DROP TABLE IF EXISTS redbook;
 CREATE TABLE redbook ( ndcnum VARCHAR, gennme VARCHAR, prodnme VARCHAR );
@@ -128,6 +132,47 @@ const AE_IP: Array<[number, string]> = [[5, "2019-03-01"]];
  * pinned gold number; it is asserted directly against the events table. */
 const IP_STAY_ADMIT = "2019-05-01";
 const IP_STAY_SERVICE = "2019-05-04";
+/** CASEID linking P14's admission record to its service line (see the ledger). */
+const IP_STAY_CASEID = 14001;
+
+/* ---------------- resource-use / cost claims (ledger fixtures) ----------------
+ *
+ * Every row below is DELIBERATELY NEUTRAL to the existing gold numbers: the
+ * diagnoses are 'Z0000' (not in the ae_dx list, which is E11.9 only) and the
+ * extra drug fill uses an NDC absent from `redbook`, so it can never resolve to
+ * DRUG_X/DRUG_Y and cannot become anyone's index event. Nothing in the spine or
+ * the six existing analyses reads a raw claim count or a payment column.
+ *
+ * That is an argument, not a proof — the proof is that every pinned number in
+ * EXPECTED must still verify after these rows land, which the harness re-checks
+ * on every run.
+ *
+ * Costs are chosen so the totals are hand-computable AND so the classic
+ * MarketScan inpatient double-count is FALSIFIABLE: P04's stay carries a
+ * $10,000 admission total plus $3,000 + $4,000 of service lines for the SAME
+ * stay. A ledger that sums both reports $17,000. The correct answer is $10,000,
+ * and the harness pins it.
+ */
+const NEUTRAL_DX = "Z0000";
+const NDC_OTHER = "99999999999"; // deliberately absent from `redbook`
+const PLACE_OFFICE = "11";
+const PLACE_ED = "23";
+
+/** extra OUTPATIENT claims: [enrolid, date, stdplac, paytot] */
+const HCRU_OP: Array<[number, string, string, number]> = [
+  [2, "2019-05-01", PLACE_OFFICE, 200], // P02 -> 3 OP visits in the window
+  [2, "2019-05-15", PLACE_OFFICE, 200],
+  [8, "2019-06-10", PLACE_ED, 1500],    // P08 -> the only ED visit
+];
+
+/** extra PHARMACY fill: P03 gets a second, non-index fill. */
+const HCRU_RX: Array<[number, string, number]> = [[3, "2019-02-01", 100]];
+
+/** P04's inpatient stay: ONE admission, three payment-bearing rows.
+ *  caseid 4001 links the admission record to both service lines. */
+const P04_CASEID = 4001;
+const P04_ADMIT = "2019-08-01";
+const P04_DISCH = "2019-08-05";
 
 function q(v: string | number): string {
   return typeof v === "number" ? String(v) : `'${v}'`;
@@ -145,28 +190,41 @@ export function fixtureSeedSql(): string {
     `INSERT INTO ccaet_all (enrolid,dtstart,dtend,rx,drugcovg,dobyr,age,sex,region,plantyp,egeoloc) VALUES\n  ${enrollVals};`,
   );
 
-  const drugVals = DRUG.map(([id, ndc]) => `(${id}, DATE '2019-01-01', '${ndc}', 30, 30)`).join(",\n  ");
-  lines.push(`INSERT INTO ccaed_all (enrolid,svcdate,ndcnum,daysupp,qty) VALUES\n  ${drugVals};`);
+  const drugVals = [
+    ...DRUG.map(([id, ndc]) => `(${id}, DATE '2019-01-01', '${ndc}', 30, 30, 100)`),
+    ...HCRU_RX.map(([id, dt, pay]) => `(${id}, DATE '${dt}', '${NDC_OTHER}', 30, 30, ${pay})`),
+  ].join(",\n  ");
+  lines.push(`INSERT INTO ccaed_all (enrolid,svcdate,ndcnum,daysupp,qty,paytot) VALUES\n  ${drugVals};`);
 
-  const aeVals = AE.map(([id, d]) => `(${id}, DATE '${d}', '0', 'E119', NULL, NULL, NULL, NULL, NULL, NULL)`).join(",\n  ");
+  const opVals = [
+    ...AE.map(([id, d]) => `(${id}, DATE '${d}', '0', 'E119', NULL, NULL, NULL, NULL, NULL, '${PLACE_OFFICE}', 200)`),
+    ...HCRU_OP.map(([id, d, place, pay]) => `(${id}, DATE '${d}', '0', '${NEUTRAL_DX}', NULL, NULL, NULL, NULL, NULL, '${place}', ${pay})`),
+  ].join(",\n  ");
   lines.push(
-    `INSERT INTO ccaeo_all (enrolid,svcdate,dxver,dx1,dx2,dx3,dx4,proc1,proctyp,stdplac) VALUES\n  ${aeVals};`,
+    `INSERT INTO ccaeo_all (enrolid,svcdate,dxver,dx1,dx2,dx3,dx4,proc1,proctyp,stdplac,paytot) VALUES\n  ${opVals};`,
   );
 
-  const aeIpVals = AE_IP.map(
-    ([id, d]) => `(${id}, DATE '${d}', DATE '${d}', '0', 'E119', NULL, NULL, NULL, NULL, NULL, NULL, NULL)`,
-  ).join(",\n  ");
+  /* Inpatient SERVICE lines. P05's carries NO caseid — an orphan line with no
+   * admission record, which the ledger must still count as one stay rather than
+   * drop. P14's and P04's DO link to admission records, so the ledger must drop
+   * them in favour of the admission-level total (else the cost double counts). */
+  const sVals = [
+    ...AE_IP.map(([id, d]) => `(${id}, DATE '${d}', DATE '${d}', '0', 'E119', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 5000)`),
+    `(14, DATE '${IP_STAY_ADMIT}', DATE '${IP_STAY_SERVICE}', '0', 'E119', NULL, NULL, NULL, NULL, NULL, NULL, NULL, ${IP_STAY_CASEID}, 2000)`,
+    `(4, DATE '${P04_ADMIT}', DATE '${P04_ADMIT}', '0', '${NEUTRAL_DX}', NULL, NULL, NULL, NULL, NULL, NULL, NULL, ${P04_CASEID}, 3000)`,
+    `(4, DATE '${P04_ADMIT}', DATE '2019-08-03', '0', '${NEUTRAL_DX}', NULL, NULL, NULL, NULL, NULL, NULL, NULL, ${P04_CASEID}, 4000)`,
+  ].join(",\n  ");
   lines.push(
-    `INSERT INTO ccaes_all (enrolid,admdate,svcdate,dxver,pdx,dx1,dx2,dx3,dx4,pproc,proc1,proctyp) VALUES\n  ${aeIpVals},\n` +
-      // P14's service line: dated 3 days after admission (see IP_STAY_* above)
-      `  (14, DATE '${IP_STAY_ADMIT}', DATE '${IP_STAY_SERVICE}', '0', 'E119', NULL, NULL, NULL, NULL, NULL, NULL, NULL);`,
+    `INSERT INTO ccaes_all (enrolid,admdate,svcdate,dxver,pdx,dx1,dx2,dx3,dx4,pproc,proc1,proctyp,caseid,paytot) VALUES\n  ${sVals};`,
   );
 
-  // P14's admission record — the SAME stay and diagnosis, at the case level.
+  // Admission records. P14's is the SAME stay and diagnosis as its service line;
+  // P04's carries a NEUTRAL diagnosis so it cannot disturb any outcome count.
+  const nulls15 = Array(15).fill("NULL").join(", ");
   lines.push(
-    `INSERT INTO ccaei_all (enrolid,admdate,disdate,dxver,pdx,dx1,dx2,dx3,dx4,dx5,dx6,dx7,dx8,dx9,dx10,dx11,dx12,dx13,dx14,dx15,pproc,proc1) VALUES\n` +
-      // dx1..dx15 (15) + pproc + proc1
-      `  (14, DATE '${IP_STAY_ADMIT}', DATE '2019-05-06', '0', 'E119', ${Array(15).fill("NULL").join(", ")}, NULL, NULL);`,
+    `INSERT INTO ccaei_all (enrolid,admdate,disdate,dxver,pdx,dx1,dx2,dx3,dx4,dx5,dx6,dx7,dx8,dx9,dx10,dx11,dx12,dx13,dx14,dx15,pproc,proc1,caseid,paytot) VALUES\n` +
+      `  (14, DATE '${IP_STAY_ADMIT}', DATE '2019-05-06', '0', 'E119', ${nulls15}, NULL, NULL, ${IP_STAY_CASEID}, 8000),\n` +
+      `  (4, DATE '${P04_ADMIT}', DATE '${P04_DISCH}', '0', '${NEUTRAL_DX}', ${nulls15}, NULL, NULL, ${P04_CASEID}, 10000);`,
   );
 
   lines.push(
@@ -366,6 +424,38 @@ export const EXPECTED = {
     } as Record<string, { patients: number; denominator: number; prevalence: number; pct: number; ci: [number, number] }>,
     // person-BUCKET sums on the Trend row, not distinct patients
     trend: { patients: 5, denominator: 30, prevalence: 0.16667, z: -1.2, method: "cochran_armitage" },
+  },
+  /* Resource use and cost over day 0..364 (365 observed days x 10 members =
+   * 3650), hand-derived claim by claim BEFORE the module was executed.
+   *
+   * Encounters per member:
+   *   RX  P03 = 2 (index fill + a second, non-index NDC), everyone else 1  -> 11
+   *   OP  P02 = 3 (its AE claim + two neutral visits), P03 = 1, P07 = 1    ->  5
+   *   ED  P08 = 1 (place of service 23)                                   ->  1
+   *   IP  P04 = 1 (one stay), P05 = 1 (orphan service line, no admission)  ->  2
+   *   ALL                                                                 -> 19
+   *
+   * THE DOUBLE COUNT. P04's stay is $10,000 at the admission record with
+   * $3,000 + $4,000 of service lines beneath it. P05's orphan line is $5,000.
+   * The correct inpatient total is 10,000 + 5,000 = 15,000. A ledger that sums
+   * admission totals together with their own service lines reports 22,000 —
+   * which is why that number is written down here as the failure to detect.
+   *
+   * The cost distribution is deliberately right-skewed: mean 1,860 against a
+   * median of 350, so any module that reported only one of them would be
+   * visibly reporting the wrong thing. */
+  resourceUse: {
+    rowCount: 5, // ALL + IP + ED + OP + RX
+    observedDaysTotal: 3650,
+    // the number a double-counting ledger would produce for IP paid_total
+    ipDoubleCountWouldBe: 22000,
+    bySetting: {
+      ALL: { users: 10, encounters: 19, encMean: 1.9,  encSd: 0.99443, encMedian: 2, encMax: 4, paidTotal: 18600, paidMean: 1860, paidSd: 3278.96, paidMedian: 350, paidMax: 10100 },
+      IP:  { users: 2,  encounters: 2,  encMean: 0.2,  encSd: 0.42164, encMedian: 0, encMax: 1, paidTotal: 15000, paidMean: 1500, paidSd: 3374.74, paidMedian: 0,   paidMax: 10000 },
+      ED:  { users: 1,  encounters: 1,  encMean: 0.1,  encSd: 0.31623, encMedian: 0, encMax: 1, paidTotal: 1500,  paidMean: 150,  paidSd: 474.34,  paidMedian: 0,   paidMax: 1500 },
+      OP:  { users: 3,  encounters: 5,  encMean: 0.5,  encSd: 0.97183, encMedian: 0, encMax: 3, paidTotal: 1000,  paidMean: 100,  paidSd: 194.37,  paidMedian: 0,   paidMax: 600 },
+      RX:  { users: 10, encounters: 11, encMean: 1.1,  encSd: 0.31623, encMedian: 1, encMax: 2, paidTotal: 1100,  paidMean: 110,  paidSd: 31.62,   paidMedian: 100, paidMax: 200 },
+    } as Record<string, { users: number; encounters: number; encMean: number; encSd: number; encMedian: number; encMax: number; paidTotal: number; paidMean: number; paidSd: number; paidMedian: number; paidMax: number }>,
   },
   /* SMD balance, DRUG_X (reference) vs DRUG_Y, over the 10-patient cohort.
    *   ages X = 40,45,50,55,60 -> mean 50, sample variance 62.5
@@ -582,6 +672,19 @@ export const GOLD_A_SPEC: StudySpec = {
       trend: { bucket: "calendar_year", method: "cochran_armitage", reportPerBucket: true },
       ciMethod: "wilson",
       stratifyBy: [],
+    },
+    /* Resource use and cost over the first year of follow-up, all four care
+     * settings plus the combined row. The window is day 0..364 INCLUSIVE, so
+     * every member contributes exactly 365 observed days (their enrollment
+     * covers it by construction — continuous enrollment is an inclusion
+     * criterion, which is also why the disenrollment clip cannot be exercised
+     * by this cohort and is stated as such rather than fake-tested). */
+    {
+      id: "a_hcru", label: "Resource use and cost, first year", kind: "resource_use", enabled: true,
+      ascertainmentWindow: { start: 0, end: 364, includesIndex: true },
+      settings: ["inpatient", "ed", "outpatient", "pharmacy"],
+      costField: "paytot",
+      includeCombined: true,
     },
     /* Covariate balance between the exposure arms. Age is deliberately
      * IMBALANCED (SMD -0.63246, |SMD| > 0.1) and sex is deliberately BALANCED
