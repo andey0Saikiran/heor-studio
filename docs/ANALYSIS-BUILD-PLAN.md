@@ -5,7 +5,7 @@ analyses, 1 sequencer, and 2 adversarial reviewers (a MarketScan methodologist a
 a code-truth reviewer reading the actual repo). Both reviewers' corrections are
 folded in below and marked **[CORRECTION]**._
 
-**Status: 19 done, 4 partial (updated 2026-07-28 — see docs/STATUS.md).**
+**Status: 20 done, 4 partial (updated 2026-07-28 — see docs/STATUS.md).**
 
 ---
 
@@ -141,6 +141,12 @@ Stated up front so no one has to discover it later.
 - **Bootstrap CIs need an RNG and break byte-stable emission outright.**
 - **Greedy / nearest-neighbour PS matching is order-dependent** and cannot be
   byte-stable. Ship deterministic frequency matching or imported match sets.
+  **[ACTIONED — Wave 7.0]** Both matching methods are now refused in readiness
+  with their reasons, and IPTW shipped instead (`228b417`). The plan assumed the
+  SCORE would also be out of reach; it is not, provided the model is saturated
+  over categorical cells, in which case the fitted probability is the cell
+  fraction and the whole pipeline executes. A continuous covariate is refused
+  rather than silently downgraded.
 - **Runtime data-dependent test routing must be refused by design.** A SAS `%IF` on a
   Shapiro-Wilk p has no SQL counterpart; the twins would silently disagree about which
   test ran.

@@ -321,6 +321,49 @@ The statistic now follows the family and is stamped and asserted.
 
 Overdispersion is an emitted limitation, not a silent assumption.
 
+### Propensity scores (Wave 7.0) — the 20th, and two things that were wrong
+
+**The family posed a problem the others did not.** A propensity score is a fitted
+logistic probability, so the Wave 6.4 rule makes the coefficients SAS-primary —
+but unlike Cox, *everything downstream depends on it*. Carve out the score and
+the SQL twin is empty.
+
+**The saturated score resolves it**: over categorical cells the MLE fitted
+probability *is* the observed treated fraction, so `ps = treated/members` exactly
+and the whole pipeline executes. Third time this trick has been what makes a
+family verifiable. A continuous covariate is **refused**, not downgraded.
+
+**The matching refusals** are properties of the algorithm. Greedy nearest-neighbour
+is order-dependent — the same data in a different row order gives a different
+estimate, which byte-stable emission cannot rescue. Optimal matching is an
+assignment problem. PS stratification is named **unbuilt** rather than refused,
+and a guard asserts the message says which, because "not emitted" reads
+identically for a gap and for a principled no.
+
+**A false claim, shipped and corrected.** This module asserted — in the core, in
+the method notes users read, and in the emitted SQL — that the two
+pseudo-populations "agree if and only if every cell contains both arms". The
+*if* is right; the *only if* is not. Gold Case A scored on region × sex has
+**seven cells, four single-arm, and a gap of exactly zero**. A nonzero gap proves
+a violation; a zero gap proves nothing. `subjects_off_support` is now stated as
+authoritative everywhere the claim appeared.
+
+I found it only because a mutation wouldn't fire — a one-axis score emits no cell
+separator, and adding the second axis to make that test meaningful produced the
+counterexample.
+
+**A coverage guard passing vacuously.** `expectedFromStamp` sets `setting_filter`
+before its switch, and the guard only asked whether the result was non-empty — so
+a kind with **no case at all** still "returned something". **Three modules shipped
+that way**: cox, fine_gray and competing_risks had never had their PARITY stamps
+cross-checked. Only propensity_score exposed it, because its stamp carries no
+`settingFilter`. The guard now counts kind-specific keys; all four cases written.
+
+**And the result worth reading first**: weighting on region makes age **worse**
+(−0.63246 → −0.76234) and **breaks sex**, which was exactly balanced at 0 and
+comes out at 0.04527. Both are correct. A module reporting only the after-value
+would present that 0.045 as an achievement.
+
 ### Fine-Gray (Wave 6.4) — the 19th, and a correction to my own refusal
 
 Wave 6.3 filed this beside Gray's test under "refused, not approximated". Half
