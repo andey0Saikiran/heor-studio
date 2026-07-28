@@ -154,3 +154,58 @@ Stated up front so no one has to discover it later.
   The pull window is now derived from what the spec asks for and only ever widens.
 - **Prevalent-case washout row closed** (`0b862f7`, `b824f8e`) — toggle test, zero-check
   and attrition addendum.
+
+---
+
+## Next up: the Poisson family (designed, hand-derived, NOT built)
+
+The GLM emitter (`1e4c015`) built `logistic`. `poisson` is the next slot and the
+groundwork is done — this section exists so it can be picked up without
+re-deriving anything.
+
+**Why it is the next one.** The saturated anchor holds for Poisson too. A model
+`log E[Y] = b0 + b1·exposed + log(PT)` with one binary predictor and an offset is
+saturated for the two-cell (events, person-time) table, so its MLE is EXACTLY
+`ln(rate ratio)` — the same self-check the logistic path already emits, with no
+new verification machinery.
+
+**The feeder it needs** is per-subject person-time. That is now unblocked:
+`rate-core.censorPlan()` + `renderCensorSql` / `renderCensorSas` (added in
+`3cdda71`) decide censoring once and render it per language, so the regression
+module can build person-time that provably agrees with the incidence module's
+rather than re-deriving it. `RegressionAnalysis` needs a `personTimeRule`,
+required when the family is `poisson` or `negative_binomial`.
+
+**Hand-derived Gold Case A truth** (person-time from the incidence module's
+pinned `personDaysByArm`, so the two must agree by construction):
+
+| | DRUG_Y (exposed) | DRUG_X (reference) |
+|---|---|---|
+| subjects | 4 | 4 |
+| events | 1 | 2 |
+| person-days | 1395 | 1030 |
+| rate / 1000 PY | 261.82796 | 709.22330 |
+
+    RR      = (1/1395) / (2/1030) = 1030/2790 = 103/279 = 0.36918
+    ln(RR)  = -0.99648
+    SE      = sqrt(1/1 + 1/2) = sqrt(1.5) = 1.22474
+    95% CI  = exp(-0.99648 +/- 1.96*1.22474) = (0.03347, 4.07152)
+    rate difference = 261.82796 - 709.22330 = -447.39534 per 1000 PY
+
+Note `1395 + 1030 = 2425`, the person-time every rate module already pins — so a
+Poisson feeder that disagrees with the incidence module fails immediately.
+
+**Row shape** (the logistic path emits 4 design + 3 crude + N adjusted; Poisson
+differs because the design carries person-time):
+
+- `design`: n, events, person_days, rate_per_1000py per arm — 8 rows
+- `crude`: rate_ratio (with CI and SE), rate_difference — 2 rows
+- `adjusted`: exposure + covariates, NULL in SQL, `sas_proc_genmod` — N rows
+
+**SAS side**: `PROC GENMOD` with `dist=poisson link=log offset=log_pt`, plus the
+same anchor step the logistic path uses (unadjusted model, closed form
+recomputed from its own data, PASS/FAIL printed).
+
+**Still refused after this**: `negative_binomial` (a dispersion parameter with no
+closed form and therefore no anchor), `gamma_log` (needs the ledger's
+per-subject totals as the response), `ols` (needs a continuous response).

@@ -2,7 +2,7 @@
 
 _Snapshot of what exists vs what's left. Last updated 2026-07-28 (after Analysis Waves
 1.6 through 3 — calendar trend, the claim-line ledger, the comorbidity-index
-engine and its Table 1 / SMD wiring, and the GLM emitter; **607 harness
+engine and its Table 1 / SMD wiring, and the GLM emitter; **613 harness
 checks**). See
 `docs/NIGHT-REPORT-2026-07-26.md` for the overnight build and **`docs/PENDING.md`
 for the audited, authoritative roadmap** — a 9-agent audit found 151 pending items
@@ -45,7 +45,7 @@ Everything below is committed and pushed unless noted.
 - **Outcome care-setting filter** applied in both twins (shared `outcomeSettingPlan`), with a planted inpatient negative control.
 - **Honest labeling:** unimplemented options (Clopper-Pearson, Wald, KM, competing risk, minClaims>1, dx-position) → computed-with-closest-method + visible `REVIEW` note in both languages.
 
-### Verification harness (the "machine-verified" engine) — **607 passing checks**
+### Verification harness (the "machine-verified" engine) — **613 passing checks**
 _(the figure once quoted as 207 was miscounted — a live run printed 206. Waves 0-4 took it to 308.)_
 - PGlite (real Postgres-16 wasm) executes the **actual emitted SQL** against a 12-patient synthetic MarketScan fixture with hand-computed ground truth.
 - **Gold Case A passes:** spine 12→11→10; incidence 3/8/2425/451.86/Byar CI + 6 stratum rows; point prevalence 4/10 + 7 strata; period prevalence 3/10 + 6 strata; cumulative incidence 3/8 = 0.375 Wilson (0.13684, 0.69426) + strata; plus zero-denominator and horizon-bound edge cases.
@@ -132,7 +132,7 @@ Each has a real prerequisite — deliberately left for an awake session (see NIG
 
 ## Analysis Waves 1.6 + 2 (2026-07-28) — 8 analyses now verified
 
-**Score: 11 of 69 done, 4 partial.** Harness: **607 checks, 0 failing** (was 396).
+**Score: 11 of 69 done, 4 partial.** Harness: **613 checks, 0 failing** (was 396).
 
 ### Calendar trend (`4758e5a`) — the 7th analysis
 Cochran-Armitage over calendar buckets. The statistic **z is closed form, computed
@@ -272,6 +272,28 @@ LOGISTIC's ParameterEstimates), and the mutation runner never evaluated
 language-local keys — so "SAS stops fitting" and "the anchor is deleted" read as
 NOT CAUGHT while the parity pass genuinely checked them. Both fixed generally.
 
-**Still open:** the remaining regression families need their feeders (a
-per-subject person-time offset for count models; the ledger's per-subject totals
-as the response for cost models). The GLM structure they slot into now exists.
+### A silent SAS/SQL divergence, found and fixed (`3cdda71`)
+
+Found while extracting the person-time chain the Poisson family needs.
+`meta.dataCutDate` was applied by the SQL incidence builder and **ignored** by
+the SAS one, so a study declaring a data cut got two different person-times from
+one bundle — SQL censored at the cut, SAS ran to the study end.
+
+Nothing caught it, and that is the more interesting part: the PARITY stamp
+recorded `censorAt`, which both twins read from the same spec field, so the
+stamps agreed by construction; the fingerprints scraped the max-follow-up
+offset, not the censor bound; and Gold Case A declares no cut, so no fixture ran
+the path. The data-cut feature exists specifically to stop the immature tail
+being counted as event-free person-time — so this silently disabled a
+correctness control in half of every bundle that used it.
+
+Fixed structurally: `rate-core.censorPlan()` decides the terms once and each
+language only renders them, so a twin cannot omit a term it never chose. Three
+layers stop it returning — `dataCut` in the stamp, a `censor_bounds` fingerprint
+compared across languages, and a guard that emits a spec **declaring a cut** and
+asserts both twins bound at it. The guard carries a self-test that strips the cut
+from SAS and confirms the comparison goes red.
+
+**Next:** the Poisson family — designed, hand-derived and unblocked, but NOT
+built. See the end of `docs/ANALYSIS-BUILD-PLAN.md` for the feeder, the row
+shape, and the Gold Case A numbers (RR = 103/279 = 0.36918, SE = √1.5).
