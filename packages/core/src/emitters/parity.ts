@@ -25,9 +25,11 @@ import type {
   RelativeWindow,
   ResourceUseAnalysis,
   Stratifier,
+  SurvivalAnalysis,
   TrendSpec,
 } from "../spec/types";
 import type { StudySpec } from "../spec/types";
+import { survivalOutcome } from "../spec/types";
 
 /** Default mean days per year — internally consistent (rate/person-years/CI all
  *  agree). Overridable per study via spec.meta.daysPerYear (e.g. 365 for the HEOR
@@ -1106,5 +1108,100 @@ export function regressionParity(
     crudeEffect: "closed_form_2x2",
     adjustedSource: "sas_primary",
     saturatedAnchor: "unadjusted_mle_equals_closed_form_log_or",
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ *  Survival / time-to-event
+ * ------------------------------------------------------------------ */
+
+export interface SurvivalParity {
+  id: string;
+  /** the endpoint's code list. The DEATH endpoint never reaches an emitter —
+   *  readiness refuses it — so this is always a claims event. */
+  codeListId: string;
+  washout: { start: number | "anytime_before"; end: number | "anytime_after"; includesIndex: boolean };
+  /** censorAt values actually honored, and the delivery cut if one applies */
+  censorTerms: string[];
+  dataCut: string | null;
+  /** day marks S(t) is reported at, in order */
+  horizonDays: number[];
+  ciMethod: string;
+  settingFilter: string;
+  /** every stratum whose curve is emitted, 'Overall' first */
+  strata: string[];
+  referenceLevel: string | null;
+  exposedLevel: string | null;
+  /** the log-rank statistic is emitted (needs a two-level exposure) */
+  logRank: boolean;
+  emitLifeTable: boolean;
+  /** what each twin actually produces. Note how little is SAS-primary here
+   *  compared with the regression family: the estimator, its variance, both
+   *  interval forms, the median AND the log-rank statistic are all closed
+   *  form — only the chi-square tail probability is not. */
+  estimator: "product_limit";
+  variance: "greenwood";
+  logRankStatistic: "closed_form_mantel";
+  logRankPValue: "sas_primary";
+  kmAnchor: "lifetest_equals_closed_form_product_limit";
+}
+
+/** Spec options the survival twins do NOT implement. */
+export function survivalLimitations(an: SurvivalAnalysis, listSystem: CodeSystem, spec?: StudySpec): string[] {
+  const out: string[] = [];
+  const od = survivalOutcome(an);
+  if (od) {
+    const settingNote = outcomeSettingPlan(od, listSystem).note;
+    if (settingNote) out.push(settingNote);
+    if (od.minClaims > 1)
+      out.push(`endpoint minClaims=${od.minClaims} is NOT yet enforced - any single qualifying claim counts as the event, so the survival time is the FIRST claim's date rather than the date a multi-claim definition would be satisfied`);
+  }
+  if (an.personTimeRule.censorAt.includes("death")) out.push(DEATH_CENSOR_NOTE);
+  if (spec && !dataCutLimit(spec)) out.push(NO_DATA_CUT_NOTE);
+  /* The interval that is NOT emitted, named. A median with no interval reads as
+   * a point estimate somebody chose not to qualify. */
+  out.push(`NO confidence interval is emitted for the MEDIAN. The Brookmeyer-Crowley interval is the set of times whose confidence band covers one half, which is derivable from the band this program already computes - it is simply not built yet, and a median is reported without one rather than with an invented one`);
+  out.push(`the curves are UNADJUSTED. No stratified, weighted or covariate-adjusted survival is emitted, so a difference between arms carries every confounder the arms differ on`);
+  out.push(`CENSORING IS ASSUMED NON-INFORMATIVE. Nothing in claims data can test that, and the assumption fails hardest exactly when a member leaves the plan BECAUSE of their disease - which biases survival UPWARD`);
+  return out;
+}
+
+/** Method notes ALWAYS emitted (describe what IS computed). */
+export const SURVIVAL_METHOD_NOTES = [
+  `almost everything here is EXECUTED in both twins: the product-limit estimator, Greenwood's variance, both interval forms, the median and the log-rank statistic are all closed form. The p-value is the ONLY SAS-primary column, because it is the only quantity needing a distribution function warehouse SQL does not have`,
+  `KAPLAN-MEIER ANCHOR: the SAS twin also runs PROC LIFETEST and compares it, row by row, against the closed form it computed itself. Unlike a fitted GLM the product-limit estimator has a closed form, so the procedure can be CHECKED rather than trusted - and no reference number ships with the program`,
+  `the LOG-RANK DECISION at alpha = 0.05 is emitted without a p-value: for one degree of freedom the critical value is z^2, so a decision needs only a comparison against a constant. The exact p-value stays SAS-primary`,
+  `follow-up starts at each subject's own index date and stops at the earliest of the endpoint and the administrative censor, so time is measured from the same origin for everyone regardless of calendar date`,
+  `the endpoint is INCIDENT: prevalent cases are removed by the washout before the curve starts, so the curve describes time to NEW-ONSET disease and not time to a first observed claim for existing disease`,
+  `a NULL median is a RESULT, not a gap - it means more than half of the arm was still event-free when follow-up ended, and the row is emitted rather than omitted so it cannot read as a failed computation`,
+];
+
+/** The parity record for a survival twin, from consumed values. */
+export function survivalParity(
+  an: SurvivalAnalysis,
+  consumed: {
+    settingFilter: string; censorTerms: string[]; dataCut: string | null;
+    strata: string[]; referenceLevel: string | null; exposedLevel: string | null; logRank: boolean;
+  },
+): SurvivalParity {
+  return {
+    id: an.id,
+    codeListId: survivalOutcome(an)?.codeListId ?? "",
+    washout: { start: an.washout.start, end: an.washout.end, includesIndex: an.washout.includesIndex },
+    censorTerms: consumed.censorTerms,
+    dataCut: consumed.dataCut,
+    horizonDays: an.horizonDays,
+    ciMethod: an.ciMethod,
+    settingFilter: consumed.settingFilter,
+    strata: consumed.strata,
+    referenceLevel: consumed.referenceLevel,
+    exposedLevel: consumed.exposedLevel,
+    logRank: consumed.logRank,
+    emitLifeTable: an.emitLifeTable,
+    estimator: "product_limit",
+    variance: "greenwood",
+    logRankStatistic: "closed_form_mantel",
+    logRankPValue: "sas_primary",
+    kmAnchor: "lifetest_equals_closed_form_product_limit",
   };
 }

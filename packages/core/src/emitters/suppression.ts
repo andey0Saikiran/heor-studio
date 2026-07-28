@@ -61,6 +61,17 @@ export interface SuppressionShape {
   keepCols: string[];
   /** deterministic tiebreaker when two cells are equally small */
   tieBreakCol: string;
+  /** A THIRD identity column for the results contract, for tables whose rows
+   *  are not identified by two labels.
+   *
+   *  Every shape until survival was identified by (group, level) — a stratifier
+   *  and its stratum, a term and its statistic. A life table is not: its rows
+   *  are one curve at many TIMES, so (stratum, statistic) repeats down the
+   *  whole table and the long-format deliverable would carry rows nothing could
+   *  tell apart. Rather than distort the module into a two-column identity,
+   *  the contract grew a nullable third column. Shapes that do not need it
+   *  emit NULL, which is why the "fully labeled" check does not require it. */
+  rowDetailCol?: string;
 }
 
 const ANALYSIS_COMMON = {
@@ -188,6 +199,37 @@ export const SUPPRESSION_SHAPES: Record<string, SuppressionShape> = {
     maskCols: ["estimate", "ci_low", "ci_high", "se_log"],
     keepCols: ["ord", "method"],
     tieBreakCol: "term",
+  },
+  survival: {
+    /* THE LIFE TABLE IS THE MOST DISCLOSIVE TABLE THIS PROJECT PRODUCES, and
+     * saying so is more useful than quietly masking it. Nearly every row of a
+     * Kaplan-Meier life table carries n_event = 1 — that row is one patient's
+     * event date, to the day. At the default threshold of 11 the whole
+     * component masks, which is the correct answer and not a defect: the
+     * releasable form of a survival curve is S(t) at a handful of fixed
+     * horizons, where n_risk is a group rather than an individual.
+     *
+     * Grouping is per CURVE (measure, component, stratum). Within one curve the
+     * life-table rows partition that arm's events and sum to its total, so a
+     * lone masked row is recoverable by subtraction and complementary
+     * suppression applies. Across curves they are not siblings — two arms at
+     * day 200 do not sum to anything — so they are not grouped together.
+     *
+     * n_risk is the denominator because a small RISK SET is disclosive on its
+     * own: "3 still at risk, 1 event" identifies a person as surely as the
+     * event count does, and the survival drop reveals the numerator anyway.
+     * The median, log-rank and hazard-ratio rows carry no counts, so they are
+     * not primary-suppressed — but each is computed FROM the whole curve, and
+     * an arm small enough to mask is an arm whose median is as identifying as
+     * the cells it came from. */
+    labelCols: ["measure", "component", "time_days", "stratum", "statistic"],
+    groupCols: ["measure", "component", "stratum"],
+    rowDetailCol: "time_days",
+    countCol: "n_event",
+    denomCol: "n_risk",
+    maskCols: ["n_risk", "n_event", "n_censor", "estimate", "se", "ci_low", "ci_high"],
+    keepCols: ["ord", "method"],
+    tieBreakCol: "time_days",
   },
   table1: {
     labelCols: ["ord", "characteristic", "category"],
@@ -350,8 +392,11 @@ export function suppressionSasFor(t: SuppressionTarget, p: SuppressionPolicy, wo
  * spreadsheet export needs ONE predictable shape to read from rather than a
  * different column layout per analysis. This is that shape:
  *
- *   table_id | analysis_label | row_group | row_level | stat | value
- *            | suppressed | suppression_rule
+ *   table_id | analysis_label | row_group | row_level | row_detail | stat
+ *            | value | suppressed | suppression_rule
+ *
+ * row_detail is NULL for every shape whose rows are identified by two labels;
+ * it carries the time index for a life table, whose rows are not.
  *
  * It is built from the *_released tables, so masked cells arrive as NULL with
  * suppressed = 1 and the rule attached — a shell can then print "<11" or "—"
@@ -366,8 +411,10 @@ export function resultsContractSql(targets: SuppressionTarget[], p: SuppressionP
   for (const t of targets) {
     const s = SUPPRESSION_SHAPES[t.shapeKey];
     if (!s) continue;
-    // the last two label columns are the row identity in every shape
+    // the last two label columns are the row identity in every shape; a
+    // time-indexed table adds a third (see rowDetailCol)
     const [rowGroup, rowLevel] = s.labelCols.slice(-2);
+    const rowDetail = s.rowDetailCol ? `CAST(${s.rowDetailCol} AS VARCHAR)` : `CAST(NULL AS VARCHAR)`;
     for (const stat of s.maskCols) {
       blocks.push(
         [
@@ -375,6 +422,7 @@ export function resultsContractSql(targets: SuppressionTarget[], p: SuppressionP
           `       '${t.label.replace(/'/g, "''")}' AS analysis_label,`,
           `       CAST(${rowGroup} AS VARCHAR) AS row_group,`,
           `       CAST(${rowLevel} AS VARCHAR) AS row_level,`,
+          `       ${rowDetail} AS row_detail,`,
           `       '${stat}' AS stat,`,
           `       CAST(${stat} AS NUMERIC) AS value,`,
           `       suppressed,`,

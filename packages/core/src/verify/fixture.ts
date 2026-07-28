@@ -402,6 +402,111 @@ export const EXPECTED = {
   /* Cumulative incidence (risk) — naive at-risk denominator (event-free at
    * index after washout = 8), Wilson CI. Numerator = first OUTPATIENT event
    * within the horizon. */
+  /* ---------------- survival (Kaplan-Meier / log-rank) ---------------- *
+   *
+   * All hand-derived before execution. The at-risk 8 carry events at days 100
+   * (P02), 200 (P03) and 300 (P07); the other five are censored at 365.
+   *
+   *   Overall  S = 7/8, then x6/7 = 3/4, then x5/6 = 5/8
+   *   Greenwood sums  1/56, 1/56+1/42 = 1/24, +1/30 = 3/40  (EXACTLY 0.075)
+   *   se = S * sqrt(sum) -> 0.11693, 0.15309, 0.17116
+   *
+   * THE CROSS-MODULE CHECK. Nobody is censored before the last event, so the
+   * product-limit estimator and the naive at-risk risk must agree EXACTLY:
+   * 1 - S(365) = 1 - 5/8 = 0.375 = EXPECTED.cumulativeIncidence.ci365 3/8.
+   * Two modules, two algorithms, one number - and asserted as such in
+   * verify/run.ts rather than left as a coincidence for a reader to notice.
+   *
+   * THE MEDIAN BOUNDARY. The reference arm's curve is 3/4 then EXACTLY 1/2, so
+   * its median sits precisely on the "S(t) <= 0.5" boundary the definition is
+   * evaluated at. The exposed arm never reaches one half, so its median is
+   * legitimately NULL - one defined and one not, in the same table.
+   *
+   * THE LOG-RANK, accumulated for the EXPOSED arm (DRUG_Y):
+   *   t=100  n=8 n_Y=4 d=1 d_Y=0  E=1/2      V=1/4
+   *   t=200  n=7 n_Y=4 d=1 d_Y=0  E=4/7      V=12/49
+   *   t=300  n=6 n_Y=4 d=1 d_Y=1  E=2/3      V=2/9
+   *   O=1  E=73/42=1.7381  V=1265/1764=0.71712
+   *   chi^2 = (O-E)^2/V = 961/1265 = 0.75968, well below 3.8416 -> do NOT reject
+   *   Peto ln(HR) = (O-E)/V = -1.02925 -> HR 0.35728, se 1/sqrt(V) = 1.18088
+   * The direction agrees with the logistic module, which reports OR = 1/3 for
+   * the same arm on the same data: fewer events under DRUG_Y than expected. */
+  survival: {
+    rowCount: 25, // 6 life table + 9 horizon + 3 median + 6 logrank + 1 hazard ratio
+    lifeTable: {
+      Overall: [
+        { t: 100, nRisk: 8, nEvent: 1, surv: 0.875, se: 0.11693, ci: [0.38699, 0.98139] as [number, number] },
+        { t: 200, nRisk: 7, nEvent: 1, surv: 0.75,  se: 0.15309, ci: [0.3148,  0.9309]  as [number, number] },
+        { t: 300, nRisk: 6, nEvent: 1, surv: 0.625, se: 0.17116, ci: [0.22933, 0.8607]  as [number, number] },
+      ],
+      DRUG_X: [
+        { t: 100, nRisk: 4, nEvent: 1, surv: 0.75, se: 0.21651, ci: [0.12794, 0.96055] as [number, number] },
+        { t: 200, nRisk: 3, nEvent: 1, surv: 0.5,  se: 0.25,    ci: [0.05784, 0.84486] as [number, number] },
+      ],
+      DRUG_Y: [
+        { t: 300, nRisk: 4, nEvent: 1, surv: 0.75, se: 0.21651, ci: [0.12794, 0.96055] as [number, number] },
+      ],
+    } as Record<string, Array<{ t: number; nRisk: number; nEvent: number; surv: number; se: number; ci: [number, number] }>>,
+    /* S(t) at the reported horizons. n_risk is the count still being observed AT
+     * the horizon, so it falls 8 -> 7 -> 5 as subjects fail and are censored. */
+    horizons: {
+      Overall: [
+        { t: 90,  nRisk: 8, surv: 1 },
+        { t: 180, nRisk: 7, surv: 0.875 },
+        { t: 365, nRisk: 5, surv: 0.625 },
+      ],
+      DRUG_X: [
+        { t: 90,  nRisk: 4, surv: 1 },
+        { t: 180, nRisk: 3, surv: 0.75 },
+        { t: 365, nRisk: 2, surv: 0.5 },
+      ],
+      DRUG_Y: [
+        { t: 90,  nRisk: 4, surv: 1 },
+        { t: 180, nRisk: 4, surv: 1 },
+        { t: 365, nRisk: 3, surv: 0.75 },
+      ],
+    } as Record<string, Array<{ t: number; nRisk: number; surv: number }>>,
+    median: { Overall: null, DRUG_X: 200, DRUG_Y: null } as Record<string, number | null>,
+    logRank: {
+      comparison: "DRUG_Y vs DRUG_X",
+      observed: 1,
+      expected: 1.7381,
+      variance: 0.71712,
+      chiSquare: 0.75968,
+      /* 0 = do not reject at alpha 0.05. The decision uses 3.8416 = z^2 at the
+       * repo-wide z, NOT a p-value: SQL has no chi-square CDF, and a decision
+       * against a fixed critical value needs none. */
+      reject: 0,
+    },
+    petoHr: { estimate: 0.35728, se: 1.18088, ci: [0.0353, 3.61563] as [number, number] },
+    /* a_km_lin: the LINEAR interval, ungrouped. Greenwood on the raw scale is
+     * not bounded by [0,1] - at day 100 the upper limit computes to
+     * 0.875 + 1.96*0.11693 = 1.10418 and at day 200 to 1.05006, both CLAMPED to
+     * 1. At day 300 it lands at 0.96048 and is not clamped. That is the whole
+     * argument for log_log being the default, pinned rather than asserted. */
+    linear: {
+      rowCount: 6, // 3 life table + 2 horizon + 1 median
+      clamped: [
+        { t: 100, ciLow: 0.64582, ciHigh: 1 },
+        { t: 200, ciLow: 0.44994, ciHigh: 1 },
+      ],
+      unclamped: { t: 300, ciLow: 0.28952, ciHigh: 0.96048 },
+    },
+    /* a_km_none: an endpoint that never occurs. The CHF list's only claims are
+     * P01's and P06's, both inside the washout, so both wash out as prevalent
+     * and nothing happens to the remaining 8 afterwards. Every edge this
+     * exercises is a divide-by-zero or an empty-set path that a curve WITH
+     * events can never reach. */
+    noEvents: {
+      rowCount: 13, // 0 life table + 3 horizon + 3 median + 6 logrank + 1 hazard ratio
+      lifeTableRows: 0, // there is no event time to tabulate
+      survAtHorizon: 1, // nobody had the event, so survival is 1 - not missing
+      nRiskOverall: 8,
+      /* every term of an undefined test is NULL TOGETHER. "0 observed" beside a
+       * NULL expectation would read as a result rather than as an absence. */
+      logRankAllNull: true,
+    },
+  },
   cumulativeIncidence: {
     // a_ci_365: horizon 365d. Cases in (index, index+365]: P02(100),P03(200),
     // P07(300) → 3/8 = 0.375, reproducing EXPECTED.wilsonCi from this module.
@@ -1039,6 +1144,69 @@ export const GOLD_A_SPEC: StudySpec = {
       continuousResponse: { source: "comorbidity_index", comorbidityIndexAnalysisId: "a_cci" },
       groupVarId: "g_arm",
       covariateIds: ["b_age", "b_sex"],
+    },
+    /* SURVIVAL. Three analyses, because the interesting behaviour of a
+     * Kaplan-Meier curve lives at its edges rather than in the middle.
+     *
+     * a_km — the main curve, by arm, with the log-log interval SAS defaults to.
+     *   The at-risk 8 have events at days 100 (P02), 200 (P03) and 300 (P07),
+     *   and nobody is censored before the last event, which makes the CROSS-
+     *   MODULE check exact: 1 - S(365) = 1 - 5/8 = 0.375, the same number the
+     *   cumulative-incidence module reaches as 3/8 by a completely different
+     *   route. The reference arm's curve lands on EXACTLY one half at day 200 —
+     *   the boundary the median's "S(t) <= 0.5" is evaluated at, planted there
+     *   on purpose — while the exposed arm never reaches it, so one median is
+     *   defined and one is legitimately NULL.
+     *
+     * a_km_lin — the same endpoint with the LINEAR interval and no grouping.
+     *   Greenwood on the raw scale is not bounded by [0,1]: at day 100 the
+     *   upper limit computes to 1.104 and has to be clamped. That clamp is the
+     *   whole argument for log_log being the default, so it is pinned rather
+     *   than described.
+     *
+     * a_km_none — a curve with NO events at all. The CHF list's only claims are
+     *   P01's and P06's, both inside the washout, so both are excluded as
+     *   prevalent and nothing happens afterwards to the remaining 8. The life
+     *   table is EMPTY (there is no event time to tabulate), S(t) = 1 at every
+     *   horizon, the median is NULL, and the log-rank variance is zero — so the
+     *   chi-square must be NULL rather than a divide-by-zero or a confident 0. */
+    {
+      id: "a_km", label: "Time to incident AE, by arm", kind: "survival", enabled: true,
+      endpoint: {
+        kind: "claims_event",
+        outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "outpatient", diagnosisPosition: "any" },
+      },
+      washout: { start: -365, end: 0, includesIndex: true },
+      personTimeRule: { start: "index", censorAt: ["outcome", "disenrollment", "study_end", "max_followup"], maxFollowupDays: 365 },
+      horizonDays: [90, 180, 365],
+      ciMethod: "log_log",
+      groupVarId: "g_arm",
+      emitLifeTable: true,
+    },
+    {
+      id: "a_km_lin", label: "Time to incident AE, linear interval", kind: "survival", enabled: true,
+      endpoint: {
+        kind: "claims_event",
+        outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "outpatient", diagnosisPosition: "any" },
+      },
+      washout: { start: -365, end: 0, includesIndex: true },
+      personTimeRule: { start: "index", censorAt: ["outcome", "disenrollment", "study_end", "max_followup"], maxFollowupDays: 365 },
+      horizonDays: [100, 365],
+      ciMethod: "linear",
+      emitLifeTable: true,
+    },
+    {
+      id: "a_km_none", label: "Time to incident CHF (no events occur)", kind: "survival", enabled: true,
+      endpoint: {
+        kind: "claims_event",
+        outcomeDefinition: { codeListId: "cci_chf_dx", minClaims: 1, setting: "any", diagnosisPosition: "any" },
+      },
+      washout: { start: -365, end: 0, includesIndex: true },
+      personTimeRule: { start: "index", censorAt: ["outcome", "disenrollment", "study_end", "max_followup"], maxFollowupDays: 365 },
+      horizonDays: [365],
+      ciMethod: "log_log",
+      groupVarId: "g_arm",
+      emitLifeTable: true,
     },
     /* Covariate balance between the exposure arms. Age is deliberately
      * IMBALANCED (SMD -0.63246, |SMD| > 0.1) and sex is deliberately BALANCED

@@ -31,8 +31,10 @@ const DEMO_AXES = new Set(["age_band", "sex", "region", "plan_type", "year"]);
 const ANALYSIS_KINDS = new Set([
   "attrition", "table1", "point_prevalence", "period_prevalence", "cumulative_incidence",
   "incidence_rate", "standardization", "calendar_trend", "resource_use",
-  "comorbidity_index", "regression", "statistical_engine", "future_stub",
+  "comorbidity_index", "regression", "survival", "statistical_engine", "future_stub",
 ]);
+const SURVIVAL_CI = new Set(["log_log", "linear"]);
+const SURVIVAL_ENDPOINTS = new Set(["claims_event", "death"]);
 
 const LEDGER_SETTINGS = new Set(["inpatient", "ed", "outpatient", "pharmacy"]);
 const COST_FIELDS = new Set(["paytot", "netpay"]);
@@ -302,6 +304,27 @@ function checkAnalysis(p: Problems, v: unknown, path: string): void {
       }
       if (!Array.isArray(v.covariateIds)) p.push(`${path}.covariateIds`, `expected an array of baseline ids, got ${typeOf(v.covariateIds)}`);
       else v.covariateIds.forEach((x, j) => need(p, `${path}.covariateIds[${j}]`, isStr(x), `expected a baseline id string, got ${typeOf(x)}`));
+      break;
+    }
+    case "survival": {
+      /* The endpoint is shape-checked but NOT refused here: shape validation
+       * says whether untrusted JSON has the right FORM, and readiness says
+       * whether the study can be run. A mortality endpoint is well-formed and
+       * unbuildable, so it must reach specReadiness to be refused there with
+       * its reason, rather than being rejected here as malformed. */
+      const ep = `${path}.endpoint`;
+      if (!isObj(v.endpoint)) p.push(ep, `expected {kind, ...}, got ${typeOf(v.endpoint)}`);
+      else {
+        needEnum(p, v.endpoint, "kind", ep, SURVIVAL_ENDPOINTS);
+        if (v.endpoint.kind === "claims_event") checkOutcomeDefinition(p, v.endpoint.outcomeDefinition, `${ep}.outcomeDefinition`);
+      }
+      checkWindow(p, v.washout, `${path}.washout`);
+      checkPersonTimeRule(p, v.personTimeRule, `${path}.personTimeRule`);
+      needEnum(p, v, "ciMethod", path, SURVIVAL_CI);
+      need(p, `${path}.emitLifeTable`, typeof v.emitLifeTable === "boolean", `expected a boolean, got ${typeOf(v.emitLifeTable)}`);
+      if (v.groupVarId !== undefined) needStr(p, v, "groupVarId", path, { nonEmpty: true });
+      if (!Array.isArray(v.horizonDays)) p.push(`${path}.horizonDays`, `expected an array of day marks, got ${typeOf(v.horizonDays)}`);
+      else v.horizonDays.forEach((x, j) => need(p, `${path}.horizonDays[${j}]`, typeof x === "number" && Number.isFinite(x), `expected a number, got ${typeOf(x)}`));
       break;
     }
     case "standardization":

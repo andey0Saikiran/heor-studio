@@ -88,7 +88,7 @@ The final script in each SQL folder writes a \`*_released\` table beside every
 result table, with small cells masked (${suppressionPolicy(spec).ruleLabel}) and a
 \`suppression_rule\` footnote on every row. It also builds \`<prefix>_results\` —
 one tidy long-format table over every released result
-(\`table_id, analysis_label, row_group, row_level, stat, value, suppressed,
+(\`table_id, analysis_label, row_group, row_level, row_detail, stat, value, suppressed,
 suppression_rule\`) for table shells and report writers to read from.
 
 - **Shareable:** the \`*_released\` tables and \`<prefix>_results\`.

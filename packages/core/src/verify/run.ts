@@ -1151,6 +1151,173 @@ export async function verifyGoldA(): Promise<VerificationResult> {
     const rdf = await oRow("diagnostic", "interval", "residual_df");
     eq("ols: residual df = 6, so the exact interval is t(6)", Number(rdf?.estimate), ro.residualDf);
 
+    /* ---- Survival: Kaplan-Meier, median, log-rank ----
+     * Almost all of this is EXECUTED, which is unusual here. Only the p-value
+     * is SAS-primary, so only the p-value is asserted as absent rather than as
+     * a number. */
+    const sv = EXPECTED.survival;
+    const K_T = "tz_study_km_a_km";
+    eq(
+      `survival rows = ${sv.rowCount} (life table + horizons + medians + log-rank + HR)`,
+      await scalar<number>(db, `SELECT count(*)::int FROM ${K_T}`),
+      sv.rowCount,
+    );
+    const kRow = async (table: string, component: string, stratum: string, statistic: string, timeDays: number | null) =>
+      (
+        await rows<{ n_risk: number | null; n_event: number | null; estimate: number | null; se: number | null; ci_low: number | null; ci_high: number | null; method: string }>(
+          db,
+          `SELECT n_risk, n_event, estimate::float8, se::float8, ci_low::float8, ci_high::float8, method
+             FROM ${table}
+            WHERE component = '${component}' AND stratum = '${stratum}' AND statistic = '${statistic}'
+              AND time_days IS NOT DISTINCT FROM ${timeDays === null ? "NULL" : timeDays}`,
+        )
+      )[0];
+
+    for (const [stratum, pts] of Object.entries(sv.lifeTable)) {
+      for (const want of pts) {
+        const tag = `km ${stratum} @${want.t}d`;
+        const r = await kRow(K_T, "life_table", stratum, "survival", want.t);
+        if (!r) {
+          checks.push({ name: tag, status: "fail", detail: "row missing" });
+          continue;
+        }
+        /* The RISK SET is asserted directly. Every classic way to get a KM
+         * curve wrong is a wrong risk set, and it produces a perfectly
+         * monotone curve for a different question. */
+        eq(`${tag}: at risk = ${want.nRisk}`, Number(r.n_risk), want.nRisk);
+        eq(`${tag}: events = ${want.nEvent}`, Number(r.n_event), want.nEvent);
+        approx(`${tag}: S = ${want.surv}`, Number(r.estimate), want.surv, 0.00001);
+        approx(`${tag}: Greenwood se = ${want.se}`, Number(r.se), want.se, 0.00001);
+        approx(`${tag}: CI low = ${want.ci[0]}`, Number(r.ci_low), want.ci[0], 0.00001);
+        approx(`${tag}: CI high = ${want.ci[1]}`, Number(r.ci_high), want.ci[1], 0.00001);
+      }
+    }
+
+    for (const [stratum, pts] of Object.entries(sv.horizons)) {
+      for (const want of pts) {
+        const tag = `km horizon ${stratum} S(${want.t})`;
+        const r = await kRow(K_T, "horizon", stratum, "survival", want.t);
+        if (!r) {
+          checks.push({ name: tag, status: "fail", detail: "row missing" });
+          continue;
+        }
+        eq(`${tag}: at risk = ${want.nRisk}`, Number(r.n_risk), want.nRisk);
+        approx(`${tag} = ${want.surv}`, Number(r.estimate), want.surv, 0.00001);
+      }
+    }
+
+    /* THE CROSS-MODULE CHECK. Nobody is censored before the last event, so the
+     * product-limit estimator and the naive at-risk risk MUST agree exactly.
+     * Two modules, two algorithms, one number - asserted rather than left as a
+     * coincidence a reader might notice. */
+    const s365 = await kRow(K_T, "horizon", "Overall", "survival", 365);
+    approx(
+      "km: 1 - S(365) equals the cumulative-incidence module's 3/8",
+      1 - Number(s365?.estimate),
+      EXPECTED.cumulativeIncidence.ci365.overall.risk,
+      0.00001,
+    );
+
+    for (const [stratum, want] of Object.entries(sv.median)) {
+      const r = await kRow(K_T, "median", stratum, "median_survival_days", want);
+      const tag = `km median ${stratum}`;
+      if (!r) {
+        checks.push({ name: tag, status: "fail", detail: "row missing" });
+        continue;
+      }
+      if (want === null) {
+        /* A NULL median is a RESULT. The row must EXIST and say so, because an
+         * omitted row reads as a computation that failed. */
+        checks.push({
+          name: `${tag}: NOT REACHED, and the row says so`,
+          status: r.estimate === null && /NOT REACHED/.test(r.method) ? "pass" : "fail",
+          detail: `estimate=${r.estimate}, method="${r.method}"`,
+        });
+      } else {
+        /* The BOUNDARY case: this curve lands on EXACTLY one half, which is
+         * where the median's "S(t) <= 0.5" is evaluated. Without the tolerance
+         * in km-core the SQL twin reports NULL here while SAS reports 200. */
+        eq(`${tag} = ${want} (the curve lands exactly on one half)`, Number(r.estimate), want);
+      }
+    }
+
+    const lr = sv.logRank;
+    const lrRow = (statistic: string) => kRow(K_T, "logrank", lr.comparison, statistic, null);
+    eq("log-rank: observed events in the exposed arm = 1", Number((await lrRow("observed_exposed"))?.estimate), lr.observed);
+    approx("log-rank: expected = 73/42 = 1.7381", Number((await lrRow("expected_exposed"))?.estimate), lr.expected, 0.00001);
+    approx("log-rank: variance = 1265/1764 = 0.71712", Number((await lrRow("variance"))?.estimate), lr.variance, 0.00001);
+    approx("log-rank: chi-square = 961/1265 = 0.75968", Number((await lrRow("chi_square"))?.estimate), lr.chiSquare, 0.00001);
+    eq("log-rank: does NOT reject at alpha 0.05 (0.75968 < 3.8416)", Number((await lrRow("reject_at_0.05"))?.estimate), lr.reject);
+    /* The ONE SAS-primary column, asserted as ABSENT. A p-value here would mean
+     * something approximated a chi-square tail rather than deferring it. */
+    const pv = await lrRow("p_value");
+    checks.push({
+      name: "log-rank: the p-value is NULL and names PROC LIFETEST",
+      status: pv !== undefined && pv.estimate === null && /sas_proc_lifetest/.test(pv.method) ? "pass" : "fail",
+      detail: `estimate=${pv?.estimate}, method="${pv?.method}"`,
+    });
+
+    const hr = await kRow(K_T, "hazard_ratio", lr.comparison, "hazard_ratio_peto", null);
+    approx("peto HR = exp((O-E)/V) = 0.35728", Number(hr?.estimate), sv.petoHr.estimate, 0.00001);
+    approx("peto HR se = 1/sqrt(V) = 1.18088", Number(hr?.se), sv.petoHr.se, 0.00001);
+    approx("peto HR CI low = 0.0353", Number(hr?.ci_low), sv.petoHr.ci[0], 0.00001);
+    approx("peto HR CI high = 3.61563", Number(hr?.ci_high), sv.petoHr.ci[1], 0.00001);
+    checks.push({
+      name: "peto HR is LABELED as a one-step estimator, not as the Cox fit",
+      status: /peto_one_step/.test(hr?.method ?? "") && /Cox/.test(hr?.method ?? "") ? "pass" : "fail",
+      detail: hr?.method ?? "no method label",
+    });
+    /* DIRECTION. The logistic module reports OR = 1/3 for the same arm on the
+     * same data; a hazard ratio pointing the other way would mean the log-rank
+     * accumulated against the reference arm instead of the exposed one. */
+    checks.push({
+      name: "peto HR and the logistic OR agree on DIRECTION (both < 1 for DRUG_Y)",
+      status: Number(hr?.estimate) < 1 && EXPECTED.regression.oddsRatio.estimate < 1 ? "pass" : "fail",
+      detail: `HR ${hr?.estimate} vs OR ${EXPECTED.regression.oddsRatio.estimate}`,
+    });
+
+    /* ---- the LINEAR interval, and the clamp that argues for log_log ---- */
+    const L_T = "tz_study_km_a_km_lin";
+    eq(`km linear rows = ${sv.linear.rowCount}`, await scalar<number>(db, `SELECT count(*)::int FROM ${L_T}`), sv.linear.rowCount);
+    for (const want of sv.linear.clamped) {
+      const r = await kRow(L_T, "life_table", "Overall", "survival", want.t);
+      approx(`km linear @${want.t}d: CI low = ${want.ciLow}`, Number(r?.ci_low), want.ciLow, 0.00001);
+      /* Greenwood on the raw scale exceeded 1 here and was CLAMPED. The log-log
+       * transform cannot leave [0,1] at all, which is why it is the default. */
+      eq(`km linear @${want.t}d: CI high CLAMPED to 1 (raw limit exceeded it)`, Number(r?.ci_high), want.ciHigh);
+    }
+    const unc = await kRow(L_T, "life_table", "Overall", "survival", sv.linear.unclamped.t);
+    approx(`km linear @${sv.linear.unclamped.t}d: CI high = ${sv.linear.unclamped.ciHigh} (NOT clamped)`,
+      Number(unc?.ci_high), sv.linear.unclamped.ciHigh, 0.00001);
+
+    /* ---- a curve with NO events: every empty-set and divide-by-zero path ---- */
+    const N_T = "tz_study_km_a_km_none";
+    const nv = sv.noEvents;
+    eq(`km no-events rows = ${nv.rowCount}`, await scalar<number>(db, `SELECT count(*)::int FROM ${N_T}`), nv.rowCount);
+    eq(
+      "km no-events: the life table is EMPTY (no event time to tabulate)",
+      await scalar<number>(db, `SELECT count(*)::int FROM ${N_T} WHERE component = 'life_table'`),
+      nv.lifeTableRows,
+    );
+    const nh = await kRow(N_T, "horizon", "Overall", "survival", 365);
+    eq("km no-events: S(365) = 1, not missing", Number(nh?.estimate), nv.survAtHorizon);
+    eq("km no-events: 8 still at risk at 365d", Number(nh?.n_risk), nv.nRiskOverall);
+    const nullLr = await rows<{ statistic: string; estimate: number | null }>(
+      db,
+      `SELECT statistic, estimate::float8 FROM ${N_T} WHERE component IN ('logrank', 'hazard_ratio')`,
+    );
+    checks.push({
+      name: "km no-events: EVERY log-rank term is NULL together (no test exists)",
+      status: nullLr.length === 7 && nullLr.every((r) => r.estimate === null) ? "pass" : "fail",
+      detail: nullLr.map((r) => `${r.statistic}=${r.estimate}`).join(", "),
+    });
+    const nMed = await kRow(N_T, "median", "Overall", "median_survival_days", null);
+    checks.push({
+      name: "km no-events: the median row EXISTS and says NOT REACHED",
+      status: nMed !== undefined && nMed.estimate === null && /NOT REACHED/.test(nMed.method) ? "pass" : "fail",
+      detail: nMed?.method ?? "row missing",
+    });
+
     /* ---- Table 1 comorbidity-index row (executed) ----
      * The row is scored by the SAME shared engine as the index analysis and the
      * balance table, so this asserts the wiring rather than the arithmetic:

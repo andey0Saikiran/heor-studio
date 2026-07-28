@@ -367,6 +367,66 @@ function sqlFingerprint(kind: string, raw: string): Fingerprint {
         /SELECT 'adjusted', '[^']*', '\w+', \d+, CAST\(NULL AS NUMERIC\)/i.test(sql) ? "yes" : "no");
       break;
     }
+    case "survival": {
+      /* A KAPLAN-MEIER CURVE IS ITS RISK SETS. Every classic way to get this
+       * wrong produces a complete, plausible, monotone curve for a different
+       * question, so the scrapes below target the exact arithmetic rather than
+       * the shape of the output. */
+      put(fp, "horizon_days", (sql.match(/SELECT (\d+) AS horizon/g) ?? []).map((m) => (/(\d+)/.exec(m) ?? [])[1]).join(","));
+      put(fp, "ci_method", grab(sql, [/'km_(log_log|linear)'/i]));
+      /* THE RISK SET BOUNDARY. `>=` includes the subjects whose event is AT t,
+       * which is the whole point - they are at risk right up to the instant
+       * they fail. A `>` drops them from their own denominator and inflates
+       * every survival probability, and nothing about the resulting curve looks
+       * wrong. */
+      put(fp, "risk_set_includes_t", count(sql, /s\.t >= e\.t/g));
+      put(fp, "product_limit_factor", /\(n_risk - n_event\) \* 1\.0 \/ n_risk/i.test(sql) ? "yes" : "no");
+      put(fp, "greenwood_term", /n_event \* 1\.0 \/ \(n_risk \* \(n_risk - n_event\)\)/i.test(sql) ? "yes" : "no");
+      /* Follow-up must stop at the endpoint. Readiness requires it, but the
+       * emitter could still drop the term, and then every survival time would
+       * be the administrative one while the event flags stayed set. */
+      put(fp, "time_stops_at_event", /LEAST\(COALESCE\(fu_date, DATE '9999-12-31'\), admin_censor\)/i.test(sql) ? "yes" : "no");
+      put(fp, "censor_bounds", censorBoundsSql(sql));
+      /* The MEDIAN's tolerance, scraped as a value rather than a yes/no: it is
+       * what makes the two twins agree on a curve that lands exactly on one
+       * half, and a silently widened one would start moving medians. */
+      put(fp, "median_tolerance", grab(sql, [/surv <= 0\.5 \+ (\S+?)\s/i]));
+      if (/'km_log_log'/i.test(sql)) {
+        /* THE SIGN THAT READS BACKWARDS. A larger exponent on a number below 1
+         * gives a SMALLER value, so +z belongs on the LOWER limit. Swapping
+         * them yields an interval that is still inside [0,1] and still
+         * contains the estimate - it is simply inverted. */
+        put(fp, "loglog_lower_uses_plus_z", /POWER\(surv, EXP\(1\.96 \* \(SQRT\(gw\) \/ ABS\(LN\(surv\)\)\)\)\) END AS ci_low/i.test(sql) ? "yes" : "no");
+        put(fp, "loglog_upper_uses_minus_z", /POWER\(surv, EXP\(-1\.96 \* \(SQRT\(gw\) \/ ABS\(LN\(surv\)\)\)\)\) END AS ci_high/i.test(sql) ? "yes" : "no");
+      } else {
+        put(fp, "linear_ci_is_clamped", /GREATEST\(0\.0, surv - 1\.96/i.test(sql) && /LEAST\(1\.0, surv \+ 1\.96/i.test(sql) ? "yes" : "no");
+      }
+      if (/lrsum/i.test(sql)) {
+        put(fp, "exposed_level", grab(sql, [/WHEN arm = '([^']+)' THEN 1/i]));
+        put(fp, "arm_levels", (sql.match(/arm IN \('([^']+)', '([^']+)'\)/i) ?? []).slice(1).join(","));
+        put(fp, "logrank_expected_is_hypergeometric", /d \* 1\.0 \* n1 \/ NULLIF\(n, 0\)/i.test(sql) ? "yes" : "no");
+        /* THE TIE CORRECTION. (n-d)/(n-1) is 1 whenever d = 1, so no fixture
+         * with distinct event times can tell a correct implementation from one
+         * that dropped it. It is pinned here precisely because execution
+         * cannot reach it. */
+        put(fp, "logrank_tie_correction", /d \* 1\.0 \* \(n - d\) \* n1 \* \(n - n1\) \/ \(n \* 1\.0 \* n \* \(n - 1\)\)/i.test(sql) ? "yes" : "no");
+        put(fp, "logrank_critical_value", grab(sql, [/> ([\d.]+) THEN 1 ELSE 0 END/i]));
+        put(fp, "peto_log_hr", /\(o_exp - e_exp\) \/ NULLIF\(v_exp, 0\)/i.test(sql) ? "yes" : "no");
+        /* SAS-PRIMARY (language-local): the p-value's ESTIMATE must be NULL.
+         *
+         * This pattern is anchored on the estimate SLOT, not merely near the
+         * p_value label, and that precision was earned. The first version
+         * looked for any CAST(NULL AS NUMERIC) within 200 characters of
+         * 'p_value' — which a populated estimate still satisfies, because the
+         * ci_low/ci_high/se columns beside it are NULL either way. Mutation
+         * testing filled the estimate with 0.05 and the check stayed green: it
+         * was proving that a NULL existed somewhere nearby, not that the number
+         * SQL must not invent was absent. */
+        put(fp, "logrank_p_null_in_sql",
+          /CAST\('p_value' AS VARCHAR\),\s*\n\s*CAST\(\d+ AS INT\),(?:\s*CAST\(NULL AS INT\),)+\s*\n\s*CAST\(NULL AS NUMERIC\)/i.test(sql) ? "yes" : "no");
+      }
+      break;
+    }
     case "comorbidity_index": {
       /* The index IS its weights and its hierarchy. A dropped supersession or a
        * shifted weight produces a score that is wrong by a plausible amount on
@@ -580,6 +640,42 @@ function sasFingerprint(kind: string, rawSas: string, setup: string): Fingerprin
       put(fp, "adjusted_fitted_in_sas", /proc (logistic|genmod|glm)/i.test(sas) && /_adj_pe/i.test(sas) ? "yes" : "no");
       put(fp, "saturated_anchor_present",
         /model y = exposed\s*(;|\/)/i.test(sas) && /anchor_verdict/i.test(sas) ? "yes" : "no");
+      break;
+    }
+    case "survival": {
+      put(fp, "horizon_days", (sas.match(/horizon = (\d+); output;/g) ?? []).map((m) => (/(\d+)/.exec(m) ?? [])[1]).join(","));
+      put(fp, "ci_method", grab(sas, [/'km_(log_log|linear)'/i]));
+      put(fp, "risk_set_includes_t", count(sas, /s\.t >= e\.t/g));
+      put(fp, "product_limit_factor", /_s \* \(n_risk - n_event\) \/ n_risk/i.test(sas) ? "yes" : "no");
+      put(fp, "greenwood_term", /_g \+ n_event \/ \(n_risk \* \(n_risk - n_event\)\)/i.test(sas) ? "yes" : "no");
+      put(fp, "time_stops_at_event", /min\(coalesce\(fu_date, '31DEC9999'd\), admin_censor\)/i.test(sas) ? "yes" : "no");
+      put(fp, "censor_bounds", censorBoundsSas(sas));
+      put(fp, "median_tolerance", grab(sas, [/surv <= 0\.5 \+ (\S+?)\)/i]));
+      if (/'km_log_log'/i.test(sas)) {
+        put(fp, "loglog_lower_uses_plus_z", /ci_low  = surv \*\* exp\(1\.96 \* _sig\)/i.test(sas) ? "yes" : "no");
+        put(fp, "loglog_upper_uses_minus_z", /ci_high = surv \*\* exp\(-1\.96 \* _sig\)/i.test(sas) ? "yes" : "no");
+      } else {
+        put(fp, "linear_ci_is_clamped", /max\(0, surv - 1\.96 \* se\)/i.test(sas) && /min\(1, surv \+ 1\.96 \* se\)/i.test(sas) ? "yes" : "no");
+      }
+      if (/_lrsum/i.test(sas)) {
+        put(fp, "exposed_level", grab(sas, [/exposed = \(arm = "([^"]+)"\)/i]));
+        put(fp, "arm_levels", (sas.match(/arm not in \("([^"]+)", "([^"]+)"\)/i) ?? []).slice(1).join(","));
+        put(fp, "logrank_expected_is_hypergeometric", /sum\(d \* n1 \/ n\) as e_exp/i.test(sas) ? "yes" : "no");
+        put(fp, "logrank_tie_correction", /d \* \(n - d\) \* n1 \* \(n - n1\) \/ \(n \* n \* \(n - 1\)\)/i.test(sas) ? "yes" : "no");
+        put(fp, "logrank_critical_value", grab(sas, [/estimate = \(_chi > ([\d.]+)\)/i]));
+        put(fp, "peto_log_hr", /_lhr = \(o_exp - e_exp\) \/ v_exp/i.test(sas) ? "yes" : "no");
+        /* Language-local: the p-value the SQL twin leaves NULL must be genuinely
+         * produced HERE, by a procedure that can compute a chi-square tail. */
+        put(fp, "logrank_p_computed_in_sas",
+          /ods output HomTests\s*=\s*work\.\w+/i.test(sas) && /strata exposed \/ test=logrank/i.test(sas) ? "yes" : "no");
+      }
+      /* Language-local: the anchor. PROC LIFETEST run BESIDE the closed form and
+       * compared to it, with a verdict printed - the survival analogue of the
+       * saturated-design anchor. Deleting it leaves a program that still
+       * produces every number and checks none of them. */
+      put(fp, "km_anchor_present",
+        /proc lifetest data=work\.\w+ method=km conftype=\w+ outsurv=/i.test(sas) &&
+        /anchor_verdict = 'PASS: LIFETEST = closed-form product limit'/i.test(sas) ? "yes" : "no");
       break;
     }
     case "comorbidity_index": {
@@ -887,6 +983,15 @@ export function expectedFromStamp(kind: string, stamp: Record<string, unknown>):
       }
       break;
     }
+    case "survival": {
+      exp.horizon_days = (stamp.horizonDays as number[] ?? []).join(",");
+      exp.ci_method = String(stamp.ciMethod ?? "");
+      if (stamp.logRank) {
+        exp.exposed_level = String(stamp.exposedLevel ?? "");
+        exp.arm_levels = [stamp.referenceLevel, stamp.exposedLevel].filter(Boolean).join(",");
+      }
+      break;
+    }
     case "comorbidity_index": {
       if (Array.isArray(stamp.conditions)) {
         const cs = stamp.conditions as Array<{ id: string; weight: number }>;
@@ -986,8 +1091,16 @@ const STAT_CONSTANTS: Array<{ key: string; re: RegExp; means: string }> = [
  *  of hiding behind a sibling occurrence that is still correct.
  *
  *  If a module is deliberately restructured, update the number here — the diff
- *  makes a reviewer look at the CI math, which is the point. */
-const EXPECTED_CONSTANTS: Record<string, Record<"sql" | "sas", Record<string, number>>> = {
+ *  makes a reviewer look at the CI math, which is the point.
+ *
+ *  A module may pin SEVERAL WHOLE profiles when a spec option genuinely changes
+ *  which intervals exist — survival emits a hazard-ratio interval and a
+ *  chi-square critical value only when the spec asks for a two-group
+ *  comparison. They are listed as complete profiles rather than as a set of
+ *  allowed counts per constant, so an incoherent combination (the chi-square
+ *  critical value present with no comparison to use it on) still fails. */
+type ConstantProfileSpec = Record<string, number> | Array<Record<string, number>>;
+const EXPECTED_CONSTANTS: Record<string, Record<"sql" | "sas", ConstantProfileSpec>> = {
   incidence: {
     // Byar: z appears in both bounds; Wilson constants are not used.
     sql: { z: 2, z2_half: 0, z2: 0, z2_quarter: 0 },
@@ -1052,38 +1165,84 @@ const EXPECTED_CONSTANTS: Record<string, Record<"sql" | "sas", Record<string, nu
     sql: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
     sas: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
   },
+  survival: {
+    /* TWO whole profiles, because a survival analysis with a two-group
+     * comparison genuinely emits two more intervals than one without.
+     *
+     *   z = 2  both bounds of the survival interval. It is TWO and not four
+     *          because the interval is computed once over the union of
+     *          life-table and horizon points rather than once per row shape -
+     *          the refactor exists so this number stops depending on whether
+     *          the spec asked for a life table.
+     *   z = 4  the two above, plus both bounds of the Peto hazard-ratio Wald
+     *          interval, which exists only with a comparison.
+     *   z2 = 1 3.8416 is the chi-square critical value at 1 df, which IS z^2 at
+     *          the repo's pinned z = 1.96 - deliberately the same literal
+     *          rather than a second 95% constant. It appears once, in the
+     *          alpha = 0.05 log-rank decision, and only when there is a
+     *          log-rank to decide.
+     *   The Wilson constants must never appear: this module reports no
+     *          proportion interval. */
+    sql: [
+      { z: 2, z2_half: 0, z2: 0, z2_quarter: 0 },
+      { z: 4, z2_half: 0, z2: 1, z2_quarter: 0 },
+    ],
+    sas: [
+      { z: 2, z2_half: 0, z2: 0, z2_quarter: 0 },
+      { z: 4, z2_half: 0, z2: 1, z2_quarter: 0 },
+    ],
+  },
 };
 
-/** Count each statistical constant in one language's CODE (comments stripped). */
+/**
+ * Count each statistical constant in one language's CODE — comments AND string
+ * literals stripped.
+ *
+ * Strings are excluded because the point of this check is arithmetic: "a typo
+ * in any one of these silently shifts every confidence interval the study
+ * reports". A constant inside a label cannot shift anything. The survival
+ * module forced the distinction — its log-rank row explains itself with
+ * "chi-square(1) vs 3.8416 = z^2 at the repo-wide z = 1.96", so the prose alone
+ * moved the counts and would have made a module's pinned profile depend on how
+ * carefully its captions were worded.
+ */
 export function constantProfile(
   language: "sql" | "sas",
   content: string,
   setup = ""
 ): Record<string, number> {
-  const code =
+  const stripStrings = (t: string) => t.replace(/'[^'\n]*'/g, "''").replace(/"[^"\n]*"/g, '""');
+  const code = stripStrings(
     language === "sas"
       ? resolveSasMacros(stripComments("sas", content), stripComments("sas", setup))
-      : stripComments("sql", content);
+      : stripComments("sql", content));
   const out: Record<string, number> = {};
   for (const c of STAT_CONSTANTS) out[c.key] = Number(count(code, c.re));
   return out;
 }
 
-/** Compare an observed constant profile to the pinned expectation. */
+/** Compare an observed constant profile to the pinned expectation(s). The
+ *  observed profile must match ONE pinned profile completely; the reported diff
+ *  is against the nearest one, so the message names the constant that moved. */
 export function diffConstantProfile(
   kind: string,
   language: "sql" | "sas",
   observed: Record<string, number>
 ): string[] {
-  const want = EXPECTED_CONSTANTS[kind]?.[language];
-  if (!want) return [];
-  const out: string[] = [];
-  for (const c of STAT_CONSTANTS) {
-    const w = want[c.key] ?? 0;
-    const o = observed[c.key] ?? 0;
-    if (w !== o) out.push(`${c.means} [${c.key}]: found ${o}x, expected ${w}x`);
-  }
-  return out;
+  const spec = EXPECTED_CONSTANTS[kind]?.[language];
+  if (!spec) return [];
+  const candidates = Array.isArray(spec) ? spec : [spec];
+  const diffs = candidates.map((want) => {
+    const out: string[] = [];
+    for (const c of STAT_CONSTANTS) {
+      const w = want[c.key] ?? 0;
+      const o = observed[c.key] ?? 0;
+      if (w !== o) out.push(`${c.means} [${c.key}]: found ${o}x, expected ${w}x`);
+    }
+    return out;
+  });
+  if (diffs.some((d) => d.length === 0)) return [];
+  return diffs.reduce((a, b) => (b.length < a.length ? b : a));
 }
 
 export function hasConstantProfile(kind: string): boolean {
@@ -1118,6 +1277,9 @@ export const LANGUAGE_LOCAL_KEYS: Record<string, { language: "sql" | "sas"; must
   adjusted_null_in_sql: { language: "sql", must: "yes", means: "fitted GLM coefficients are NULL in SQL, not approximated" },
   adjusted_fitted_in_sas: { language: "sas", must: "yes", means: "fitted GLM coefficients are genuinely produced by a SAS modelling procedure" },
   saturated_anchor_present: { language: "sas", must: "yes", means: "the saturated model and its self-check against the closed form are emitted" },
+  logrank_p_null_in_sql: { language: "sql", must: "yes", means: "the log-rank p-value is NULL in SQL, not approximated from the statistic beside it" },
+  logrank_p_computed_in_sas: { language: "sas", must: "yes", means: "the log-rank p-value is genuinely produced by PROC LIFETEST" },
+  km_anchor_present: { language: "sas", must: "yes", means: "PROC LIFETEST is run beside the closed-form life table and compared to it, with a verdict printed" },
 };
 
 /** Assert every language-local key present in a fingerprint holds its required

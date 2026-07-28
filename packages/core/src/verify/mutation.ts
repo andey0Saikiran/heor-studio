@@ -381,6 +381,103 @@ const MUTATIONS: Mutation[] = [
     kind: "resource_use", lang: "sql",
     apply: (t) => t.replace(/index_date \+ 364\)/g, "index_date + 180)"),
   },
+  /* ---- survival ---------------------------------------------------------- *
+   * Every mutation here is a defect that leaves a MONOTONE, PLAUSIBLE survival
+   * curve. That is the whole hazard of this family: an inverted risk set or a
+   * dropped tie correction does not crash, does not look odd on a plot, and
+   * answers a different question with the same confidence. */
+  {
+    /* THE CLASSIC KAPLAN-MEIER BUG. `>=` includes subjects whose event is AT t,
+     * which is correct - they are at risk right up to the instant they fail.
+     * A `>` drops them from their own denominator, so every conditional
+     * survival is too high and the whole curve lifts. */
+    name: "SQL risk set excludes subjects who fail AT t (>= becomes >)",
+    kind: "survival", lang: "sql", pathMatch: /km_a_km\./,
+    apply: (t) => t.replace(/SUM\(CASE WHEN s\.t >= e\.t THEN 1 ELSE 0 END\) AS n_risk/g, "SUM(CASE WHEN s.t > e.t THEN 1 ELSE 0 END) AS n_risk"),
+  },
+  {
+    /* Greenwood's denominator loses the (n-d) factor: the variance shrinks and
+     * every interval on the curve narrows. The point estimates are untouched,
+     * so nothing about the curve itself looks wrong. */
+    name: "SAS Greenwood variance drops its (n - d) factor (every interval narrows)",
+    kind: "survival", lang: "sas", pathMatch: /km_a_km\./,
+    apply: (t) => t.replace(/_g \+ n_event \/ \(n_risk \* \(n_risk - n_event\)\)/, "_g + n_event / (n_risk * n_risk)"),
+  },
+  {
+    /* The log-log limits swap. A larger exponent on a number below 1 gives a
+     * SMALLER value, so +z belongs on the LOWER limit; swapping them produces an
+     * interval that is still inside [0,1], still contains the estimate, and is
+     * inverted. */
+    name: "SQL log-log interval swaps its limits (+z lands on the upper bound)",
+    kind: "survival", lang: "sql", pathMatch: /km_a_km\./,
+    apply: (t) => t
+      .replace(/EXP\(1\.96 \* \(SQRT\(gw\) \/ ABS\(LN\(surv\)\)\)\)\) END AS ci_low/, "EXP(-1.96 * (SQRT(gw) / ABS(LN(surv))))) END AS ci_low")
+      .replace(/EXP\(-1\.96 \* \(SQRT\(gw\) \/ ABS\(LN\(surv\)\)\)\)\) END AS ci_high/, "EXP(1.96 * (SQRT(gw) / ABS(LN(surv))))) END AS ci_high"),
+  },
+  {
+    /* Follow-up no longer stops at the endpoint. Every survival time becomes the
+     * administrative one while the event flags stay set, so the curve describes
+     * enrollment. Readiness forbids the SPEC that would do this; nothing stopped
+     * the EMITTER from doing it. */
+    name: "SAS follow-up no longer stops at the event (time becomes administrative)",
+    kind: "survival", lang: "sas", pathMatch: /km_a_km\./,
+    apply: (t) => t.replace(/t  = min\(coalesce\(fu_date, '31DEC9999'd\), admin_censor\) - index_date;/, "t  = admin_censor - index_date;"),
+  },
+  {
+    /* The median's boundary. Gold Case A's reference arm lands on EXACTLY one
+     * half, so a median defined with a strict `<` reports NOT REACHED for a
+     * curve that plainly reached it. */
+    name: "SQL median requires survival STRICTLY below one half (the boundary case vanishes)",
+    kind: "survival", lang: "sql", pathMatch: /km_a_km\./,
+    apply: (t) => t.replace(/surv <= 0\.5 \+ 1e-9/, "surv < 0.5 - 1e-9"),
+  },
+  {
+    /* The log-rank expectation reads the WRONG margin: n instead of n1 gives an
+     * expectation equal to the total events, and the statistic inflates. */
+    name: "SQL log-rank expectation ignores the arm split (E = d, not d*n1/n)",
+    kind: "survival", lang: "sql", pathMatch: /km_a_km\./,
+    apply: (t) => t.replace(/SUM\(d \* 1\.0 \* n1 \/ NULLIF\(n, 0\)\) AS e_exp/, "SUM(d * 1.0) AS e_exp"),
+  },
+  {
+    /* THE TIE CORRECTION, deleted. (n-d)/(n-1) equals 1 whenever d = 1, so on
+     * Gold Case A - and on any fixture with distinct event times - this changes
+     * NO executed number. It is caught by the fingerprint alone, which is
+     * exactly why the fingerprint scrapes it. */
+    name: "SAS log-rank drops the tie correction ((n-d)/(n-1) removed)",
+    kind: "survival", lang: "sas", pathMatch: /km_a_km\./,
+    apply: (t) => t.replace(/d \* \(n - d\) \* n1 \* \(n - n1\) \/ \(n \* n \* \(n - 1\)\)/g, "d * n1 * (n - n1) / (n * n)"),
+  },
+  {
+    /* The alpha = 0.05 decision loosened to alpha = 0.10 while still LABELLED
+     * 0.05 - a significance claim nobody chose. */
+    name: "SQL log-rank decision uses the 0.10 critical value while still labelled 0.05",
+    kind: "survival", lang: "sql", pathMatch: /km_a_km\./,
+    apply: (t) => t.replace(/> 3\.8416 THEN 1 ELSE 0 END/, "> 2.7055 THEN 1 ELSE 0 END"),
+  },
+  {
+    /* SAS-PRIMARY, deleted: the anchor goes away and the program still produces
+     * every number, checking none of them. */
+    name: "SAS deletes the PROC LIFETEST anchor (nothing checks the closed form)",
+    kind: "survival", lang: "sas", pathMatch: /km_a_km\./,
+    apply: (t) => t.replace(/anchor_verdict = 'PASS: LIFETEST = closed-form product limit'/, "anchor_verdict = 'PASS'"),
+  },
+  {
+    /* SAS-PRIMARY, filled in: SQL guesses the p-value from the statistic it has
+     * rather than deferring it. A normal-approximation p-value beside a
+     * chi-square statistic is exactly the invented number the contract exists
+     * to prevent. */
+    name: "SQL fills in the log-rank p-value instead of leaving it to SAS",
+    kind: "survival", lang: "sql", pathMatch: /km_a_km\./,
+    /* The pattern anchors on the p_value row's ord (40004) and replaces the
+     * FIRST NULL estimate that follows it. Anchoring on 'p_value' alone would
+     * also match the method label two lines down, and anchoring on
+     * "CAST(NULL AS NUMERIC)" alone would hit the first of eleven such casts
+     * elsewhere in the file - the partial-replacement trap that made an earlier
+     * OLS mutation read as NOT CAUGHT. */
+    apply: (t) => t.replace(
+      /(CAST\('p_value' AS VARCHAR\),\s*\n\s*CAST\(40004 AS INT\),(?:\s*CAST\(NULL AS INT\),)+\s*\n\s*)CAST\(NULL AS NUMERIC\)/,
+      "$1CAST(0.05 AS NUMERIC)"),
+  },
 ];
 
 interface Program {

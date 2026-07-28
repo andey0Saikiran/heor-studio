@@ -46,6 +46,27 @@ function n(text: string, re: RegExp): number {
   return (text.match(re) ?? []).length;
 }
 
+/**
+ * Blank out quoted string literals.
+ *
+ * SAS text inside quotes is DATA, not code structure, and the counting rules
+ * below cannot tell the difference on their own. The survival module found
+ * this: a `title "Kaplan-Meier anchor: PROC LIFETEST vs the closed form"`
+ * counted as a ninth procedure, so the lint demanded a ninth `run;` that no
+ * correct program would have — a rule failing on a program that was right.
+ *
+ * The same hazard applies to parentheses: a method label mentioning
+ * "d(n-d)n1n0 / (n^2 (n-1))" is balanced by luck, not by structure, and one
+ * that was not would have read as a mis-built expression.
+ *
+ * Only the STRUCTURAL rules use this. The macro-variable check deliberately
+ * does not: SAS resolves `&var.` inside double quotes, so a macro reference in
+ * a string is a real reference and must still be defined.
+ */
+function stripStrings(text: string): string {
+  return text.replace(/'[^'\n]*'/g, "''").replace(/"[^"\n]*"/g, '""');
+}
+
 /** Structural lint over every emitted .sas file. */
 export function sasStructureChecks(files: SasFile[]): Check[] {
   const checks: Check[] = [];
@@ -62,6 +83,9 @@ export function sasStructureChecks(files: SasFile[]): Check[] {
   for (const f of sasFiles) {
     const name = f.path.split("/").pop() ?? f.path;
     const { code, unbalanced } = stripBlockComments(f.content);
+    /* Structural rules read the STRING-FREE text; see stripStrings. The macro
+     * check below deliberately reads `code` instead. */
+    const codeNS = stripStrings(code);
 
     // 1. An unterminated /* ... comment swallows the rest of the program.
     if (unbalanced) problems.push(`${name}: unterminated block comment`);
@@ -80,16 +104,16 @@ export function sasStructureChecks(files: SasFile[]): Check[] {
     // 2. Every proc must be closed. `proc sql` and `proc datasets` close with
     //    quit; most others close with run;. An unclosed proc silently swallows
     //    the following statements into itself.
-    const quitProcs = n(code, /\bproc\s+(?:sql|datasets)\b/gi);
-    const quits = n(code, /\bquit\s*;/gi);
+    const quitProcs = n(codeNS, /\bproc\s+(?:sql|datasets)\b/gi);
+    const quits = n(codeNS, /\bquit\s*;/gi);
     if (quits < quitProcs) {
       problems.push(`${name}: ${quitProcs} proc sql/datasets but only ${quits} quit;`);
     }
 
     // 3. data steps must be closed with run;
-    const dataSteps = n(code, /^\s*data\s+[\w.&]/gim);
-    const otherProcs = n(code, /\bproc\s+(?!sql\b|datasets\b)\w+/gi);
-    const runs = n(code, /\brun\s*;/gi);
+    const dataSteps = n(codeNS, /^\s*data\s+[\w.&]/gim);
+    const otherProcs = n(codeNS, /\bproc\s+(?!sql\b|datasets\b)\w+/gi);
+    const runs = n(codeNS, /\brun\s*;/gi);
     if (runs < dataSteps + otherProcs) {
       problems.push(`${name}: ${dataSteps} data steps + ${otherProcs} procs but only ${runs} run;`);
     }
@@ -98,7 +122,7 @@ export function sasStructureChecks(files: SasFile[]): Check[] {
     //    parens are the classic symptom of a mis-built expression.
     let depth = 0;
     let broke = false;
-    for (const ch of code) {
+    for (const ch of codeNS) {
       if (ch === "(") depth++;
       else if (ch === ")") {
         depth--;
@@ -139,24 +163,28 @@ export function sasStructureChecks(files: SasFile[]): Check[] {
      *     hard way: a new module's SAS twin referenced work._NNN_pt2, which
      *     nothing created, while balanced-parens/closed-procs checks stayed green. */
     const created = new Set<string>();
-    for (const m of code.matchAll(/create\s+table\s+(work\.\w+)/gi)) created.add(m[1].toLowerCase());
-    for (const m of code.matchAll(/^\s*data\s+(work\.\w+)/gim)) created.add(m[1].toLowerCase());
-    for (const m of code.matchAll(/out\s*=\s*(work\.\w+)/gi)) created.add(m[1].toLowerCase());
+    for (const m of codeNS.matchAll(/create\s+table\s+(work\.\w+)/gi)) created.add(m[1].toLowerCase());
+    for (const m of codeNS.matchAll(/^\s*data\s+(work\.\w+)/gim)) created.add(m[1].toLowerCase());
+    /* `out=` and its procedure-specific siblings. PROC LIFETEST writes its
+     * survival curve to `outsurv=`, which a bare `out=` pattern does not see —
+     * so the program read a dataset the lint believed nothing created, and a
+     * correct program was flagged. Same class as the ODS OUTPUT gap below. */
+    for (const m of codeNS.matchAll(/\b(?:out|outsurv|outest|outstat|outcorr|outcov)\s*=\s*(work\.\w+)/gi)) created.add(m[1].toLowerCase());
     // PROC APPEND creates its BASE dataset when it does not already exist, so
     // an append target counts as created (checked against 030_index, which
     // legitimately accumulates into work._030_dob0 that way).
-    for (const m of code.matchAll(/proc\s+append[^;]*base\s*=\s*(work\.\w+)/gi)) created.add(m[1].toLowerCase());
+    for (const m of codeNS.matchAll(/proc\s+append[^;]*base\s*=\s*(work\.\w+)/gi)) created.add(m[1].toLowerCase());
     /* ODS OUTPUT routes a procedure's own output table into a dataset — the way
      * fitted model estimates are captured. It creates the dataset as surely as
      * a DATA step does, and this check flagged a correct program until it knew
      * that. Found by the regression module, which is the first to capture
      * PROC LOGISTIC's ParameterEstimates. */
-    for (const m of code.matchAll(/ods\s+output\s+[^;]*?=\s*(work\.\w+)/gi)) created.add(m[1].toLowerCase());
+    for (const m of codeNS.matchAll(/ods\s+output\s+[^;]*?=\s*(work\.\w+)/gi)) created.add(m[1].toLowerCase());
     const referenced = new Set<string>();
-    for (const m of code.matchAll(/\bfrom\s+(work\.\w+)/gi)) referenced.add(m[1].toLowerCase());
-    for (const m of code.matchAll(/\bjoin\s+(work\.\w+)/gi)) referenced.add(m[1].toLowerCase());
-    for (const m of code.matchAll(/^\s*set\s+(work\.\w+)/gim)) referenced.add(m[1].toLowerCase());
-    for (const m of code.matchAll(/data\s*=\s*(work\.\w+)/gi)) referenced.add(m[1].toLowerCase());
+    for (const m of codeNS.matchAll(/\bfrom\s+(work\.\w+)/gi)) referenced.add(m[1].toLowerCase());
+    for (const m of codeNS.matchAll(/\bjoin\s+(work\.\w+)/gi)) referenced.add(m[1].toLowerCase());
+    for (const m of codeNS.matchAll(/^\s*set\s+(work\.\w+)/gim)) referenced.add(m[1].toLowerCase());
+    for (const m of codeNS.matchAll(/data\s*=\s*(work\.\w+)/gi)) referenced.add(m[1].toLowerCase());
     const dangling = [...referenced].filter((r) => !created.has(r));
     if (dangling.length > 0) {
       problems.push(`${name}: reads work dataset(s) it never creates: ${dangling.join(", ")} — the program would fail at runtime`);

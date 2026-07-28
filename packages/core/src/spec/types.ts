@@ -653,6 +653,7 @@ export const EMITTABLE_ANALYSIS_KINDS: ReadonlySet<AnalysisKind> = new Set<Analy
   "resource_use",
   "comorbidity_index",
   "regression",
+  "survival",
 ]);
 
 export type DescriptiveAnalysis =
