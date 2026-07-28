@@ -1,8 +1,9 @@
 # HEOR Studio — Status & Roadmap
 
 _Snapshot of what exists vs what's left. Last updated 2026-07-28 (after Analysis Waves
-1.6 through 2.2 — calendar trend, the claim-line ledger, the comorbidity-index
-engine and its Table 1 / SMD wiring; **574 harness checks**). See
+1.6 through 3 — calendar trend, the claim-line ledger, the comorbidity-index
+engine and its Table 1 / SMD wiring, and the GLM emitter; **607 harness
+checks**). See
 `docs/NIGHT-REPORT-2026-07-26.md` for the overnight build and **`docs/PENDING.md`
 for the audited, authoritative roadmap** — a 9-agent audit found 151 pending items
 and corrected several claims previously made here)._
@@ -44,7 +45,7 @@ Everything below is committed and pushed unless noted.
 - **Outcome care-setting filter** applied in both twins (shared `outcomeSettingPlan`), with a planted inpatient negative control.
 - **Honest labeling:** unimplemented options (Clopper-Pearson, Wald, KM, competing risk, minClaims>1, dx-position) → computed-with-closest-method + visible `REVIEW` note in both languages.
 
-### Verification harness (the "machine-verified" engine) — **574 passing checks**
+### Verification harness (the "machine-verified" engine) — **607 passing checks**
 _(the figure once quoted as 207 was miscounted — a live run printed 206. Waves 0-4 took it to 308.)_
 - PGlite (real Postgres-16 wasm) executes the **actual emitted SQL** against a 12-patient synthetic MarketScan fixture with hand-computed ground truth.
 - **Gold Case A passes:** spine 12→11→10; incidence 3/8/2425/451.86/Byar CI + 6 stratum rows; point prevalence 4/10 + 7 strata; period prevalence 3/10 + 6 strata; cumulative incidence 3/8 = 0.375 Wilson (0.13684, 0.69426) + strata; plus zero-denominator and horizon-bound edge cases.
@@ -131,7 +132,7 @@ Each has a real prerequisite — deliberately left for an awake session (see NIG
 
 ## Analysis Waves 1.6 + 2 (2026-07-28) — 8 analyses now verified
 
-**Score: 10 of 69 done, 4 partial.** Harness: **574 checks, 0 failing** (was 396).
+**Score: 11 of 69 done, 4 partial.** Harness: **607 checks, 0 failing** (was 396).
 
 ### Calendar trend (`4758e5a`) — the 7th analysis
 Cochran-Armitage over calendar buckets. The statistic **z is closed form, computed
@@ -239,5 +240,38 @@ covariate existed:
 Also fixed: the harness located balance rows by measure, which kept working only
 because "Age at index" sorts before "Comorbidity index".
 
-**Still open:** regression adjustment (the third family) needs the GLM emitter
-from Wave 5 of the build plan; the covariate plumbing it will consume now exists.
+### GLM emitter (`1e4c015`) — the 11th, and the third family unblocked
+
+Fitted coefficients need IRLS/Newton and warehouse SQL has neither, so the split
+is drawn where the verifiability actually changes:
+
+| | |
+|---|---|
+| both twins, **executed** | analytic dataset, the 2×2, and closed-form OR / RR / RD + Woolf SE + Wald interval |
+| **SAS only** | the adjusted coefficients — NULL in SQL beside the procedure that produces them |
+
+**The anchor.** A logistic model whose only predictor is the two-level exposure
+is *saturated* for a 2×2 — as many free parameters as cells. Its MLE is not an
+approximation of the closed-form log odds ratio, it **is** that number. The
+emitted SAS fits that model, recomputes the closed form from its own data, and
+prints PASS/FAIL. No reference value ships with it; it is the one place a site
+watches the fitting machinery be validated rather than trusted.
+
+Hand-derived, matched exactly: OR = (1×2)/(3×2) = **1/3**, Woolf SE = √(7/3) =
+1.52753, CI (0.01670, 6.65479), RR = 0.5, RD = −0.25. A zero cell returns NULL
+rather than a continuity correction — a correction changes the estimand, and
+doing it silently is how a study reports an estimate nobody chose.
+
+**One family is built** (logistic). `poisson`, `negative_binomial`, `gamma_log`
+and `ols` are refused by name at readiness with the specific feeder each is
+missing.
+
+**Two harness gaps this module found**, not me: the SAS lint didn't know
+`ODS OUTPUT` creates a dataset (this is the first module to capture PROC
+LOGISTIC's ParameterEstimates), and the mutation runner never evaluated
+language-local keys — so "SAS stops fitting" and "the anchor is deleted" read as
+NOT CAUGHT while the parity pass genuinely checked them. Both fixed generally.
+
+**Still open:** the remaining regression families need their feeders (a
+per-subject person-time offset for count models; the ledger's per-subject totals
+as the response for cost models). The GLM structure they slot into now exists.
