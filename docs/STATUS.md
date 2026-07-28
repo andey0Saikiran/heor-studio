@@ -2,7 +2,7 @@
 
 _Snapshot of what exists vs what's left. Last updated 2026-07-28 (after Analysis Waves
 1.6 through 3 — calendar trend, the claim-line ledger, the comorbidity-index
-engine and its Table 1 / SMD wiring, and the GLM emitter; **728 harness
+engine and its Table 1 / SMD wiring, and the GLM emitter; **751 harness
 checks**). See
 `docs/NIGHT-REPORT-2026-07-26.md` for the overnight build and **`docs/PENDING.md`
 for the audited, authoritative roadmap** — a 9-agent audit found 151 pending items
@@ -45,7 +45,7 @@ Everything below is committed and pushed unless noted.
 - **Outcome care-setting filter** applied in both twins (shared `outcomeSettingPlan`), with a planted inpatient negative control.
 - **Honest labeling:** unimplemented options (Clopper-Pearson, Wald, KM, competing risk, minClaims>1, dx-position) → computed-with-closest-method + visible `REVIEW` note in both languages.
 
-### Verification harness (the "machine-verified" engine) — **728 passing checks**
+### Verification harness (the "machine-verified" engine) — **751 passing checks**
 _(the figure once quoted as 207 was miscounted — a live run printed 206. Waves 0-4 took it to 308.)_
 - PGlite (real Postgres-16 wasm) executes the **actual emitted SQL** against a 12-patient synthetic MarketScan fixture with hand-computed ground truth.
 - **Gold Case A passes:** spine 12→11→10; incidence 3/8/2425/451.86/Byar CI + 6 stratum rows; point prevalence 4/10 + 7 strata; period prevalence 3/10 + 6 strata; cumulative incidence 3/8 = 0.375 Wilson (0.13684, 0.69426) + strata; plus zero-denominator and horizon-bound edge cases.
@@ -132,7 +132,7 @@ Each has a real prerequisite — deliberately left for an awake session (see NIG
 
 ## Analysis Waves 1.6 + 2 (2026-07-28) — 8 analyses now verified
 
-**Score: 14 of 69 done, 4 partial. 2 gold cases.** Harness: **728 checks, 0 failing** (was 396).
+**Score: 15 of 69 done, 4 partial. 2 gold cases.** Harness: **751 checks, 0 failing** (was 396).
 
 ### Calendar trend (`4758e5a`) — the 7th analysis
 Cochran-Armitage over calendar buckets. The statistic **z is closed form, computed
@@ -319,8 +319,35 @@ while leaving the point estimate untouched.
 Poisson model. An odds-ratio label on a rate ratio reads as correct and is not.
 The statistic now follows the family and is stamped and asserted.
 
-**Still refused:** `ols`. Overdispersion is an emitted limitation, not a silent
-assumption.
+Overdispersion is an emitted limitation, not a silent assumption.
+
+### OLS (Wave 3.4) — the 15th, and the regression family table is complete
+
+logistic, poisson, negative_binomial, gamma_log, ols — **nothing in the family
+table is refused any more.**
+
+OLS is the strongest case of the five. Every family's saturated coefficient is
+closed form; OLS is the only one whose **standard error** is too (the pooled
+two-sample form), so both halves are executed rather than deferred to SAS.
+
+Hand-derived and matched: mean difference **−1.75 exactly**, pooled SE 0.47871,
+interval (−2.68828, −0.81172). One arm has **zero variance** — a real edge case,
+pinned: the pooled estimator falls back on the other arm rather than dividing by
+nothing.
+
+**The interval is labeled for what it is:** `wald_normal_approx_pooled_sd`. The
+exact interval is Student t on n−2 df and the t quantile needs an inverse CDF
+SQL lacks. At this size that is not a technicality — t(6) = 2.447 vs z = 1.96, a
+25% wider interval — so the residual df ships as its own diagnostic row.
+
+The response is the comorbidity score from the **shared scorer**, so this model
+cannot disagree with Table 1 or the balance table. Readiness refuses the index
+being both response and covariate.
+
+*Two of my own errors, caught and fixed:* the expected row count (6+1+1+3 = 11,
+not 10), and a mutation that read as NOT CAUGHT because the emitter writes the
+pooled variance twice and `replace` without `/g` corrupted only the first — the
+same partial-replacement trap as the D3 spine mutation.
 
 ### Gamma-log cost model (Wave 3.3) — the 14th
 
