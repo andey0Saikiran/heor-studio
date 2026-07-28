@@ -17,6 +17,7 @@ import { emitSas } from "../emitters/sas";
 import { GOLD_A_SPEC, GOLD_A_OPTS, EXPECTED } from "./fixture";
 import { GOLD_B_SPEC, GOLD_B_OPTS, EXPECTED_B, fixtureBSeedSql } from "./fixture-b";
 import { GOLD_C_SPEC, GOLD_C_OPTS, EXPECTED_C, fixtureCSeedSql } from "./fixture-c";
+import { GOLD_D_SPEC, GOLD_D_OPTS, EXPECTED_D, fixtureDSeedSql } from "./fixture-d";
 import { EMITTABLE_ANALYSIS_KINDS } from "../spec/types";
 import type { StudySpec, EmitOptions } from "../index";
 
@@ -604,6 +605,103 @@ export async function verifyGoldC(): Promise<Check[]> {
   // parity for C's own emission, not just A's
   out.push(...sasSqlParityChecks(GOLD_C_SPEC, GOLD_C_OPTS));
   out.push(...sasStructureChecks(emitSas(GOLD_C_SPEC, GOLD_C_OPTS)));
+  return out;
+}
+
+/**
+ * Gold Case D — competing risks.
+ *
+ * Gold Cases A, B and C all have a SINGLE kind of event, which makes the
+ * Aalen-Johansen CIF and the naive 1 - Kaplan-Meier the same number there. An
+ * implementation that had quietly built PER-CAUSE risk sets — the standard way
+ * to get this wrong — agrees with every one of them. Here one subject fails
+ * from a competing cause and the two estimators come apart by an exact
+ * fraction.
+ */
+export async function verifyGoldD(): Promise<Check[]> {
+  const { db, ok, steps } = await seedAndRun(GOLD_D_SPEC, GOLD_D_OPTS, fixtureDSeedSql());
+  const out: Check[] = [];
+  if (!ok) {
+    return [{
+      name: "Gold Case D executes",
+      status: "fail",
+      detail: steps.filter((x) => !x.ok).map((x) => `${x.path}: ${x.error}`).join(" | "),
+    }];
+  }
+  const eq = (name: string, got: number | null | undefined, want: number) =>
+    out.push({ name, status: got === want ? "pass" : "fail", detail: `expected ${want}, got ${got}` });
+  const approx = (name: string, got: number, want: number, tol: number) =>
+    out.push({ name, status: Math.abs(got - want) <= tol ? "pass" : "fail", detail: `expected ${want}±${tol}, got ${got}` });
+
+  eq("D: cohort N = 6", await scalar<number>(db, "SELECT count(*)::int FROM tz_d_cohort"), EXPECTED_D.cohortN);
+
+  const INTEREST = "Event of interest (cause 1)";
+  const COMPETING = "Lung malignancy (competing, cause 2)";
+  const cell = async (component: string, cause: string, atLabel: string) =>
+    (
+      await rows<{ estimate: number | null; se: number | null; ci_low: number | null; ci_high: number | null; method: string; n_risk: number | null; n_event: number | null }>(
+        db,
+        `SELECT estimate::float8, se::float8, ci_low::float8, ci_high::float8, method, n_risk, n_event
+           FROM tz_d_cif WHERE component = '${component}' AND cause = '${cause}' AND at_label = '${atLabel}'`,
+      )
+    )[0];
+
+  /* ---- the all-cause Kaplan-Meier, which is the WEIGHT the estimator uses ---- */
+  for (const w of EXPECTED_D.survAll) {
+    const r = await cell("life_table", INTEREST, `event time ${w.t}d`);
+    eq(`D: at risk at ${w.t}d = ${w.nRisk}`, Number(r?.n_risk), w.nRisk);
+  }
+
+  /* ---- the CIF ---- */
+  approx("D: CIF of the event of interest at 365d = 1/3", Number((await cell("cif", INTEREST, "horizon 365d"))?.estimate), EXPECTED_D.cif.interest.at300, 0.00001);
+  approx("D: CIF of the competing cause at 365d = 1/6", Number((await cell("cif", COMPETING, "horizon 365d"))?.estimate), EXPECTED_D.cif.competing.at300, 0.00001);
+  /* day 150 falls between the first and second event: only P1 has failed, so
+   * the competing CIF is still exactly zero — the flat-curve case that an
+   * inner join to the life table would have dropped entirely. */
+  approx("D: CIF of interest at 150d = 1/6 (before the competing event)", Number((await cell("cif", INTEREST, "horizon 150d"))?.estimate), EXPECTED_D.horizons[150].interest, 0.00001);
+  eq("D: CIF of the competing cause at 150d = 0, and the row still EXISTS", Number((await cell("cif", COMPETING, "horizon 150d"))?.estimate), EXPECTED_D.horizons[150].competing);
+  approx("D: delta-method se of the interest CIF = sqrt(1/27)", Number((await cell("cif", INTEREST, "horizon 365d"))?.se), EXPECTED_D.cif.interest.se, 0.00001);
+  approx("D: delta-method se of the competing CIF = sqrt(5/216)", Number((await cell("cif", COMPETING, "horizon 365d"))?.se), EXPECTED_D.cif.competing.se, 0.00001);
+
+  /* ---- THE PARTITION IDENTITY ---- */
+  const idRow = await cell("identity", "All causes", "horizon 365d");
+  approx("D: the CIFs sum to 1/2", Number(idRow?.estimate), EXPECTED_D.identity.sumCif, 0.00001);
+  approx("D: 1 - S(t) from the all-cause KM = 1/2", Number((await cell("identity", "All-cause survival", "horizon 365d"))?.estimate), EXPECTED_D.identity.oneMinusSurv, 0.00001);
+  out.push({
+    name: "D: the program declares the partition identity HOLDS",
+    status: (idRow?.method ?? "").startsWith("HOLDS") ? "pass" : "fail",
+    detail: (idRow?.method ?? "no row").slice(0, 90),
+  });
+
+  /* ---- THE BIAS: the reason this analysis exists ---- */
+  approx("D: naive 1-KM for the event of interest = 3/8", Number((await cell("naive_km", INTEREST, "horizon 365d"))?.estimate), EXPECTED_D.naive.interest, 0.00001);
+  const biasI = await cell("bias", INTEREST, "horizon 365d");
+  approx("D: 1-KM OVERSTATES the risk of interest by exactly 1/24", Number(biasI?.estimate), EXPECTED_D.naive.biasInterest, 0.00001);
+  out.push({
+    name: "D: the program names the difference an OVERSTATEMENT",
+    status: (biasI?.method ?? "").startsWith("OVERSTATEMENT") ? "pass" : "fail",
+    detail: (biasI?.method ?? "no row").slice(0, 90),
+  });
+  approx("D: naive 1-KM for the competing cause = 1/5", Number((await cell("naive_km", COMPETING, "horizon 365d"))?.estimate), EXPECTED_D.naive.competing, 0.00001);
+  approx("D: 1-KM overstates the competing risk by exactly 1/30", Number((await cell("bias", COMPETING, "horizon 365d"))?.estimate), EXPECTED_D.naive.biasCompeting, 0.00001);
+
+  /* ---- THE PATHOLOGY: naive risks that cannot be a set of probabilities ---- */
+  const diag = await cell("diagnostic", "All causes", "horizon 365d");
+  approx("D: the naive risks sum to 23/40", Number(diag?.estimate), EXPECTED_D.naive.naiveSum, 0.00001);
+  out.push({
+    name: "D: the program flags the naive pair as IMPOSSIBLE AS A SET (23/40 > 1/2)",
+    status: (diag?.method ?? "").startsWith("IMPOSSIBLE AS A SET") ? "pass" : "fail",
+    detail: (diag?.method ?? "no row").slice(0, 100),
+  });
+  out.push({
+    name: "D: two mutually exclusive outcomes, naive probabilities summing ABOVE the chance of either",
+    status: Number(diag?.estimate) > EXPECTED_D.identity.oneMinusSurv + 1e-9 ? "pass" : "fail",
+    detail: `naive sum ${diag?.estimate} vs total event probability ${EXPECTED_D.identity.oneMinusSurv}`,
+  });
+
+  // parity for D's own emission, not just A's
+  out.push(...sasSqlParityChecks(GOLD_D_SPEC, GOLD_D_OPTS));
+  out.push(...sasStructureChecks(emitSas(GOLD_D_SPEC, GOLD_D_OPTS)));
   return out;
 }
 
@@ -1464,6 +1562,81 @@ export async function verifyGoldA(): Promise<VerificationResult> {
       name: "km no-events: the median row EXISTS and says NOT REACHED",
       status: nMed !== undefined && nMed.estimate === null && /NOT REACHED/.test(nMed.method) ? "pass" : "fail",
       detail: nMed?.method ?? "row missing",
+    });
+
+    /* ---- competing risks: the DEGENERATE branch, and the variance reduction ---- */
+    const crx = EXPECTED.competingRisks;
+    const CR_T = "tz_study_cif";
+    const CR_INTEREST = "Event of interest (cause 1)";
+    const CR_COMPETING = "Severe liver disease (competing, cause 2)";
+    eq(`competing risks rows = ${crx.rowCount}`, await scalar<number>(db, `SELECT count(*)::int FROM ${CR_T}`), crx.rowCount);
+    const crCell = async (component: string, cause: string, atLabel: string) =>
+      (
+        await rows<{ estimate: number | null; se: number | null; method: string }>(
+          db,
+          `SELECT estimate::float8, se::float8, method FROM ${CR_T}
+            WHERE component = '${component}' AND cause = '${cause}' AND at_label = '${atLabel}'`,
+        )
+      )[0];
+
+    /* THREE INDEPENDENT CODE PATHS, ONE NUMBER. The cumulative-incidence module
+     * computes 3/8 directly, the survival module reaches it as 1 - S(365), and
+     * the Aalen-Johansen accumulation reaches it as a weighted sum. They agree
+     * here only because nothing competes; Gold Case D is where they must not. */
+    approx("cif: CIF at 365d = 3/8, the SAME number cumulative_incidence and KM report",
+      Number((await crCell("cif", CR_INTEREST, "horizon 365d"))?.estimate), crx.cifInterest365, 0.00001);
+    approx("cif: and it equals the cumulative-incidence module's pinned risk",
+      Number((await crCell("cif", CR_INTEREST, "horizon 365d"))?.estimate), EXPECTED.cumulativeIncidence.ci365.overall.risk, 0.00001);
+    approx("cif: CIF at 180d = 1/8, matching the 180-day cumulative-incidence clone",
+      Number((await crCell("cif", CR_INTEREST, "horizon 180d"))?.estimate), crx.cifInterest180, 0.00001);
+    eq("cif: the competing cause never occurs, so its CIF is 0",
+      Number((await crCell("cif", CR_COMPETING, "horizon 365d"))?.estimate), crx.cifCompeting365);
+
+    /* THE VARIANCE REDUCTION. This is the only check on the three-term
+     * delta-method formula that a single fixture can make: with no competing
+     * event it must collapse to Greenwood, and Greenwood's value here is
+     * already pinned independently by the survival module. */
+    const crSe = Number((await crCell("cif", CR_INTEREST, "horizon 365d"))?.se);
+    approx("cif: the delta-method variance REDUCES to Greenwood's sqrt(15/512)", crSe, crx.seInterest365, 0.00001);
+    /* The SAME number the survival module pins for the last life-table row —
+     * S(300) = 0.625 with Greenwood se 0.17116 — reached here by a completely
+     * different three-term expression. */
+    approx("cif: and that is the SAME standard error the survival life table pins at t=300",
+      crSe, EXPECTED.survival.lifeTable.Overall[2].se, 0.00001);
+    /* Compared on the SE scale, not the variance scale. The emitted standard
+     * error is rounded to five decimals, so squaring it reintroduces that
+     * rounding as ~1e-6 of variance — an earlier version of this check squared
+     * and demanded 1e-6, and failed a correct program. The tolerance has to
+     * match the precision the number was emitted at. */
+    checks.push({
+      name: "cif: the emitted se IS sqrt(Greenwood 15/512), at the precision it was emitted",
+      status: Math.abs(crSe - Math.sqrt(crx.greenwoodVariance)) < 1e-5 ? "pass" : "fail",
+      detail: `se = ${crSe}, sqrt(15/512) = ${Math.sqrt(crx.greenwoodVariance).toFixed(9)}`,
+    });
+
+    /* THE BIAS IS EXACTLY ZERO HERE, and the program says which case it is in.
+     * A module that reported "OVERSTATEMENT" on a fixture with no competing
+     * event would be describing a difference it had invented. */
+    const crBias = await crCell("bias", CR_INTEREST, "horizon 365d");
+    eq("cif: the bias against 1-KM is EXACTLY zero when nothing competes", Number(crBias?.estimate), crx.biasInterest365);
+    checks.push({
+      name: "cif: the program names this the DEGENERATE case, not a validation",
+      status: /DEGENERATE case, not a validation/.test(crBias?.method ?? "") ? "pass" : "fail",
+      detail: (crBias?.method ?? "no row").slice(0, 100),
+    });
+    approx("cif: naive 1-KM equals the CIF here", Number((await crCell("naive_km", CR_INTEREST, "horizon 365d"))?.estimate), crx.naiveInterest365, 0.00001);
+    const crId = await crCell("identity", "All causes", "horizon 365d");
+    approx("cif: the partition identity sums to 3/8", Number(crId?.estimate), crx.identitySum, 0.00001);
+    checks.push({
+      name: "cif: the identity HOLDS on Gold A too",
+      status: (crId?.method ?? "").startsWith("HOLDS") ? "pass" : "fail",
+      detail: (crId?.method ?? "no row").slice(0, 80),
+    });
+    const crDiag = await crCell("diagnostic", "All causes", "horizon 365d");
+    checks.push({
+      name: "cif: with nothing competing, the naive risks do NOT exceed the total",
+      status: /do not exceed/.test(crDiag?.method ?? "") ? "pass" : "fail",
+      detail: (crDiag?.method ?? "no row").slice(0, 80),
     });
 
     /* ---- Cox: what is closed form, and what is deferred ---- */

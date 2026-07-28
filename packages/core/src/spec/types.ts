@@ -391,6 +391,47 @@ export function survivalOutcome(an: { endpoint: SurvivalEndpoint }): OutcomeDefi
   return an.endpoint.kind === "claims_event" ? an.endpoint.outcomeDefinition : null;
 }
 
+/** One competing cause: an event that makes the event of interest impossible.
+ *  It carries its own ascertainment, because "died of something else" and "had
+ *  the outcome" are read from different code lists. */
+export interface CompetingEvent {
+  id: string;
+  label: string;
+  outcomeDefinition: OutcomeDefinition;
+}
+
+/**
+ * Cumulative incidence with competing risks (Aalen-Johansen).
+ *
+ * Kaplan-Meier treats a competing event as censoring, which asserts that the
+ * subject who died of something else would have gone on to have the event of
+ * interest at the same rate as everyone still at risk. They cannot have it at
+ * all, so 1 - KM OVERSTATES the probability — always, and by more as the
+ * competing risk grows.
+ *
+ * Everything here is closed form and both twins compute it, including the
+ * delta-method variance. See emitters/cif-core.ts for what makes it checkable:
+ * the causes partition, so SUM_k CIF_k(t) = 1 - S_allcause(t) exactly.
+ *
+ * Ref: Aalen & Johansen Scand J Statist 1978;5:141; Klein & Moeschberger 2e
+ * §4.9; Andersen et al. Int J Epidemiol 2012;41:861.
+ */
+export interface CompetingRisksAnalysis extends AnalysisCommon {
+  kind: "competing_risks";
+  /** the event of interest */
+  endpoint: SurvivalEndpoint;
+  /** at least one competing cause — otherwise this is just cumulative incidence */
+  competingEvents: CompetingEvent[];
+  washout: RelativeWindow;
+  personTimeRule: PersonTimeRule;
+  horizonDays: number[];
+  /** emit the naive 1 - KM beside the CIF, and their difference. Default on:
+   *  the bias is the reason the analysis exists, and a reader who cannot see
+   *  it has to take the estimator on faith. */
+  emitNaiveComparison: boolean;
+  emitLifeTable: boolean;
+}
+
 /**
  * Cox proportional hazards.
  *
@@ -667,6 +708,7 @@ export type Analysis =
   | RegressionAnalysis
   | SurvivalAnalysis
   | CoxAnalysis
+  | CompetingRisksAnalysis
   | StatisticalEngineAnalysis
   | FutureAnalysisStub;
 
@@ -694,6 +736,7 @@ export const EMITTABLE_ANALYSIS_KINDS: ReadonlySet<AnalysisKind> = new Set<Analy
   "regression",
   "survival",
   "cox",
+  "competing_risks",
 ]);
 
 export type DescriptiveAnalysis =
@@ -1185,6 +1228,41 @@ export function validateAnalyses(spec: StudySpec): string[] {
             problems.push(`${w}: exposure "${gvC.id}" has no referenceLevel — without one the sign of the coefficient, and so the direction of the hazard ratio, is arbitrary.`);
         }
         a.covariateIds.forEach((b) => requireBaseline(b, `${w} covariate`));
+        break;
+      }
+      case "competing_risks": {
+        /* The SAME mortality gate, from the SAME constant, for the THIRD
+         * time-to-event kind. Note the shape of the trap here: this analysis is
+         * ABOUT competing mortality, so it reads as the one place a death
+         * endpoint should be allowed. It is not — the endpoint is what the CIF
+         * estimates, and DSTATUS cannot ascertain it. A competing cause read
+         * from a claims code list is fine and is what competingEvents carries. */
+        if (a.endpoint.kind === "death") {
+          problems.push(`${w}: ${MORTALITY_REFUSAL} (this is the CIF's event of INTEREST; a competing cause read from a claims code list is a different matter and belongs in competingEvents[])`);
+          break;
+        }
+        requireCodeList(a.endpoint.outcomeDefinition.codeListId, `${w} endpoint`);
+        if (a.competingEvents.length === 0)
+          problems.push(
+            `${w}: no competing events declared. With none, the Aalen-Johansen estimator IS 1 - Kaplan-Meier and this analysis adds nothing over a survival or cumulative_incidence one — declare the competing cause, or use the simpler analysis and say why competing risk was ruled out.`,
+          );
+        const seenCr = new Set<string>();
+        for (const ce of a.competingEvents) {
+          if (seenCr.has(ce.id)) problems.push(`${w}: duplicate competing event id "${ce.id}".`);
+          seenCr.add(ce.id);
+          requireCodeList(ce.outcomeDefinition.codeListId, `${w} competing event "${ce.id}"`);
+          /* A competing cause read from the SAME code list as the endpoint
+           * makes every subject fail from both at once, and the estimator would
+           * silently split its own numerator. */
+          if (ce.outcomeDefinition.codeListId === a.endpoint.outcomeDefinition.codeListId)
+            problems.push(
+              `${w}: competing event "${ce.id}" uses the SAME code list as the endpoint ("${ce.outcomeDefinition.codeListId}"). The causes must be mutually exclusive — sharing a list means every event counts as both, and the partition identity SUM(CIF) = 1 - S would be satisfied by an estimator that is double-counting.`,
+            );
+        }
+        if (!a.personTimeRule.censorAt.includes("outcome"))
+          problems.push(`${w}: personTimeRule.censorAt must include "outcome" — the CIF clock stops at whichever cause occurs first.`);
+        if (a.horizonDays.length === 0) problems.push(`${w}: horizonDays[] is empty.`);
+        for (const h of a.horizonDays) if (h <= 0) problems.push(`${w}: horizonDays entry ${h} must be positive.`);
         break;
       }
       case "statistical_engine": {

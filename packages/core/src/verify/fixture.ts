@@ -524,6 +524,30 @@ export const EXPECTED = {
    * compute it and no SAS runs in CI, so pinning it would be pinning a number
    * nothing in this repo produces. The one-step's visible drift from it is the
    * reason the one-step is labelled rather than reported as the answer. */
+  /* ---------------- competing risks, the DEGENERATE branch ---------------- *
+   * Gold A's competing cause (mild liver disease) never occurs after index, so
+   * every quantity below must collapse onto a number another module already
+   * pins — which is the point. Three independent code paths reaching 3/8:
+   * the cumulative-incidence module's naive risk, the KM complement, and the
+   * Aalen-Johansen CIF.
+   *
+   * And the one that could not be checked any other way: the three-term
+   * delta-method variance must reduce to Greenwood's, 15/512, whose square root
+   * is the 0.17116 the survival module already pins for S(365). A variance with
+   * a wrong sign or a dropped cross-term still produces a plausible standard
+   * error on Gold Case D; here it has exactly one value it can take. */
+  competingRisks: {
+    rowCount: 24,
+    cifInterest365: 0.375,   // = 3/8, the same number cumulative_incidence and KM report
+    cifInterest180: 0.125,   // = 1/8, matching a_ci_180
+    cifCompeting365: 0,      // the cause never occurs
+    /** sqrt(15/512) — the Greenwood standard error, reached by the AJ formula */
+    seInterest365: 0.17116,
+    greenwoodVariance: 0.029296875, // 15/512
+    naiveInterest365: 0.375,
+    biasInterest365: 0,      // EXACTLY zero, not approximately
+    identitySum: 0.375,
+  },
   cox: {
     rowCount: 19, // 4 design + 8 score + 1 one-step + 3 anchor + 3 adjusted
     eventTimes: 3,
@@ -1244,6 +1268,34 @@ export const GOLD_A_SPEC: StudySpec = {
       horizonDays: [365],
       ciMethod: "log_log",
       groupVarId: "g_arm",
+      emitLifeTable: true,
+    },
+    /* COMPETING RISKS, with a competing cause that NEVER OCCURS after index —
+     * the mild-liver-disease list, whose only Gold A claims are dated
+     * 2018-06-15 and therefore sit in the baseline.
+     *
+     * That makes this the DEGENERATE branch, and it is worth having precisely
+     * because it is degenerate: with no competing event the Aalen-Johansen CIF
+     * must equal 1 - Kaplan-Meier must equal the cumulative-incidence module's
+     * naive risk of 3/8, the reported bias must be exactly zero, and the
+     * three-term delta-method variance must collapse to Greenwood's 15/512.
+     * Gold Case D is the mirror image, where the two estimators come apart. An
+     * implementation that had quietly built PER-CAUSE risk sets — the standard
+     * way to get this wrong — agrees with everything here and fails there. */
+    {
+      id: "a_cif", label: "Cumulative incidence of AE with a competing risk", kind: "competing_risks", enabled: true,
+      endpoint: {
+        kind: "claims_event",
+        outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "outpatient", diagnosisPosition: "any" },
+      },
+      competingEvents: [{
+        id: "cr_liver", label: "Severe liver disease",
+        outcomeDefinition: { codeListId: "cci_mliv_dx", minClaims: 1, setting: "any", diagnosisPosition: "any" },
+      }],
+      washout: { start: -365, end: 0, includesIndex: true },
+      personTimeRule: { start: "index", censorAt: ["outcome", "disenrollment", "study_end", "max_followup"], maxFollowupDays: 365 },
+      horizonDays: [180, 365],
+      emitNaiveComparison: true,
       emitLifeTable: true,
     },
     /* COX on the same endpoint as a_km. Gold A has NO tied event times, which

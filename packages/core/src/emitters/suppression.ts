@@ -231,6 +231,26 @@ export const SUPPRESSION_SHAPES: Record<string, SuppressionShape> = {
     keepCols: ["ord", "method"],
     tieBreakCol: "time_days",
   },
+  competing_risks: {
+    /* The life-table rows are per-event-time and therefore per-patient, exactly
+     * as the survival module's are; the horizon rows are not. Grouping by
+     * component keeps the two under separate complementary-masking groups, so a
+     * suppressed life table does not drag the horizon estimates down with it. */
+    /* at_label sits INSIDE the list, not at the end: the results contract takes
+     * the LAST TWO label columns as the row identity, so (cause, component)
+     * must be last and the point identifier rides along as rowDetailCol. */
+    labelCols: ["measure", "at_label", "cause", "component"],
+    groupCols: ["measure", "component", "cause"],
+    countCol: "n_event",
+    denomCol: "n_risk",
+    maskCols: ["n_risk", "n_event", "estimate", "se", "ci_low", "ci_high"],
+    keepCols: ["at_kind", "at_days", "method"],
+    /* at_label carries the point identity — event time or horizon, never both
+     * — so (cause, component, at_label) is unique and every contract row is
+     * fully labeled. */
+    rowDetailCol: "at_label",
+    tieBreakCol: "at_label",
+  },
   cox: {
     /* Same shape as the regression table, and for the same reason: the DESIGN
      * rows are the counts everything else is computed from, so everything masks

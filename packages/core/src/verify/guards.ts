@@ -385,6 +385,81 @@ export function verifySilenceGuards(): Check[] {
     );
   }
 
+  /* 3f-quater. The competing-risks readiness gates.
+   *
+   * The mortality gate here has a shape the other two do not: this analysis is
+   * ABOUT competing mortality, so a death endpoint reads as the one place it
+   * ought to be allowed. It is not — the endpoint is what the CIF ESTIMATES,
+   * and DSTATUS cannot ascertain it. A competing cause read from a claims code
+   * list is a different matter and belongs in competingEvents[]. */
+  {
+    const base: StudySpec = JSON.parse(JSON.stringify(GOLD_A_SPEC));
+    const crAnalysis = (over: Record<string, unknown>) => ({
+      id: "guard_cr", label: "guard cr", kind: "competing_risks", enabled: true,
+      endpoint: { kind: "claims_event", outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "outpatient", diagnosisPosition: "any" } },
+      competingEvents: [{ id: "cr1", label: "Competing", outcomeDefinition: { codeListId: "cci_mliv_dx", minClaims: 1, setting: "any", diagnosisPosition: "any" } }],
+      washout: { start: -365, end: 0, includesIndex: true },
+      personTimeRule: { start: "index", censorAt: ["outcome", "disenrollment", "study_end", "max_followup"], maxFollowupDays: 365 },
+      horizonDays: [365], emitNaiveComparison: true, emitLifeTable: false,
+      ...over,
+    });
+
+    const deadCr: StudySpec = JSON.parse(JSON.stringify(base));
+    deadCr.analyses.push(crAnalysis({ endpoint: { kind: "death", source: "dstatus" } }) as never);
+    const rd = specReadiness(deadCr);
+    const deathMsg = rd.problems.find((p) => p.includes("guard_cr"));
+    push(
+      "guard: a DEATH endpoint on a COMPETING-RISKS analysis is refused too",
+      !!deathMsg && deathMsg.includes("DSTATUS"),
+      deathMsg?.slice(0, 90) ?? "competing_risks accepted a mortality endpoint",
+    );
+    push(
+      "guard: and the refusal points at competingEvents[] as the right place for a claims-ascertained cause",
+      !!deathMsg && deathMsg.includes("competingEvents[]"),
+      deathMsg?.slice(-110) ?? "no message",
+    );
+
+    /* NO COMPETING EVENT means this IS 1 - Kaplan-Meier, so the analysis is
+     * claiming a correction it is not making. */
+    const noCr: StudySpec = JSON.parse(JSON.stringify(base));
+    noCr.analyses.push(crAnalysis({ competingEvents: [] }) as never);
+    const rn = specReadiness(noCr);
+    push(
+      "guard: competing_risks with NO competing event is refused as a claim it does not make",
+      rn.problems.some((p) => p.includes("guard_cr") && p.includes("IS 1 - Kaplan-Meier")),
+      rn.problems.find((p) => p.includes("guard_cr"))?.slice(0, 110) ?? "accepted",
+    );
+
+    /* SHARED CODE LIST between the endpoint and a competing cause. This is the
+     * subtle one: the causes would no longer be mutually exclusive, every event
+     * would count as both — and the partition identity, which is this module's
+     * own self-check, would still be perfectly satisfied by the double count. */
+    const shared: StudySpec = JSON.parse(JSON.stringify(base));
+    shared.analyses.push(crAnalysis({
+      competingEvents: [{ id: "cr1", label: "Competing", outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "any", diagnosisPosition: "any" } }],
+    }) as never);
+    const rs = specReadiness(shared);
+    const sharedMsg = rs.problems.find((p) => p.includes("guard_cr") && p.includes("SAME code list"));
+    push(
+      "guard: a competing cause sharing the endpoint's code list is refused",
+      !!sharedMsg,
+      sharedMsg?.slice(0, 100) ?? "accepted a shared code list",
+    );
+    push(
+      "guard: and the refusal explains that the identity check would NOT catch it",
+      !!sharedMsg && sharedMsg.includes("would be satisfied by an estimator that is double-counting"),
+      sharedMsg?.slice(-100) ?? "no message",
+    );
+
+    const okCr: StudySpec = JSON.parse(JSON.stringify(base));
+    okCr.analyses.push(crAnalysis({}) as never);
+    push(
+      "guard: a well-formed competing-risks analysis is NOT refused",
+      !specReadiness(okCr).problems.some((p) => p.includes("guard_cr")),
+      specReadiness(okCr).problems.filter((p) => p.includes("guard_cr")).join("; ") || "no problems",
+    );
+  }
+
   /* 3g. Reproducibility provenance. "Identical spec in, identical code out" is
      only auditable against a generator VERSION and a spec identity — otherwise
      a reviewer re-running a study a year later cannot tell a legitimate emitter

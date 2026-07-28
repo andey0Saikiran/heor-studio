@@ -480,6 +480,50 @@ function sqlFingerprint(kind: string, raw: string): Fingerprint {
       }
       break;
     }
+    case "competing_risks": {
+      /* The estimator is three decisions, and every one of them has a wrong
+       * version that still produces a monotone curve between 0 and 1. */
+      put(fp, "causes", (sql.match(/SELECT enrolid, event_date, (\d+) AS cause/g) ?? [])
+        .map((m) => (/(\d+) AS cause/.exec(m) ?? [])[1]).join(","));
+      put(fp, "cause_lists", (sql.match(/WHERE code_list_id = '([^']+)'/g) ?? [])
+        .map((m) => (/'([^']+)'/.exec(m) ?? [])[1]).join(","));
+      /* THE RISK SET IS ALL-CAUSE. Restricting it to the cause in hand is the
+       * standard way to write this wrong, and it reproduces exactly the 1 - KM
+       * bias the estimator exists to remove — while leaving a curve that looks
+       * entirely reasonable. */
+      put(fp, "risk_set_is_all_cause",
+        /SUM\(CASE WHEN s\.t = e\.t AND s\.cause > 0 THEN 1 ELSE 0 END\) AS d_all/i.test(sql) ? "yes" : "no");
+      /* THE WEIGHT IS S AT THE PREVIOUS EVENT TIME, not at this one. Using the
+       * current S understates every cumulative incidence by one factor. */
+      put(fp, "weight_is_s_prev",
+        /SUM\(s_prev \* d_\d+ \* 1\.0 \/ NULLIF\(n_risk, 0\)\)/i.test(sql) ? "yes" : "no");
+      put(fp, "s_prev_lags_one_row",
+        /ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING/i.test(sql) ? "yes" : "no");
+      /* FIRST EVENT OF ANY CAUSE, from one union — per-cause firsts combined
+       * afterwards is how a subject contributes to two causes at once. */
+      put(fp, "first_event_is_any_cause",
+        /ORDER BY a\.event_date, a\.cause\) AS rn/i.test(sql) ? "yes" : "no");
+      put(fp, "variance_three_terms", String(
+        (/POWER\(a\.cif_\d+ - b\.cif_\d+, 2\)/i.test(sql) ? 1 : 0) +
+        (/POWER\(b\.s_prev, 2\)/i.test(sql) ? 1 : 0) +
+        (/- 2 \* SUM\( \(a\.cif_\d+ - b\.cif_\d+\) \* b\.s_prev/i.test(sql) ? 1 : 0)));
+      put(fp, "naive_treats_competing_as_censored",
+        /SUM\(CASE WHEN s\.t = e\.t AND s\.cause = \d+ THEN 1 ELSE 0 END\) AS d_k/i.test(sql) ? "yes" : "no");
+      /* The COMPARISON, not the verdict string. This check is unusual in that
+       * it SHIPS WITH THE RESULT — nobody downstream re-derives it — so a
+       * version that always prints HOLDS is worse than none at all. Testing for
+       * the HOLDS text alone passed exactly that mutation. */
+      put(fp, "identity_row_emitted",
+        /ABS\(\(cif_\d+(?: \+ cif_\d+)*\) - \(1\.0 - surv_all\)\) < 1e-9/i.test(sql) &&
+        /HOLDS: the causes partition/i.test(raw) ? "yes" : "no");
+      put(fp, "bias_row_emitted", /'bias'/i.test(sql) ? "yes" : "no");
+      put(fp, "interval_is_clamped",
+        /GREATEST\(0\.0, cif_\d+ - 1\.96/i.test(sql) && /LEAST\(1\.0, cif_\d+ \+ 1\.96/i.test(sql) ? "yes" : "no");
+      put(fp, "horizons", (sql.match(/SELECT (\d+) AS horizon/g) ?? [])
+        .map((m) => (/(\d+)/.exec(m) ?? [])[1]).join(","));
+      put(fp, "censor_bounds", censorBoundsSql(sql));
+      break;
+    }
     case "comorbidity_index": {
       /* The index IS its weights and its hierarchy. A dropped supersession or a
        * shifted weight produces a score that is wrong by a plausible amount on
@@ -769,6 +813,46 @@ function sasFingerprint(kind: string, rawSas: string, setup: string): Fingerprin
       put(fp, "cox_anchor_check",
         /anchor_verdict = 'PASS: fitted HR = closed-form binomial maximum'/i.test(sas) &&
         /anchor_verdict = 'NOT APPLICABLE: risk-set exposure share is not constant'/i.test(sas) ? "yes" : "no");
+      break;
+    }
+    case "competing_risks": {
+      put(fp, "causes", (sas.match(/select e\.enrolid, e\.svcdate, (\d+) as cause/gi) ?? [])
+        .map((m) => (/(\d+) as cause/i.exec(m) ?? [])[1]).join(","));
+      /* The event table is named tz.&tag._ev_<listid>, and &tag. is resolved by
+       * the caller before this runs — so the prefix is the RESOLVED tag, not a
+       * program number. Matching on the _ev_ marker itself keeps this working
+       * whatever the tag is. */
+      put(fp, "cause_lists", (sas.match(/_ev_(\w+) as e/gi) ?? [])
+        .map((m) => (/_ev_(\w+) as e/i.exec(m) ?? [])[1]).join(","));
+      put(fp, "risk_set_is_all_cause",
+        /sum\(case when s\.t = e\.t and s\.cause > 0 then 1 else 0 end\) as d_all/i.test(sas) ? "yes" : "no");
+      put(fp, "weight_is_s_prev", /cif_\d+ = cif_\d+ \+ s_prev \* d_\d+ \/ n_risk;/i.test(sas) ? "yes" : "no");
+      /* SAS lags by ASSIGNING s_prev before updating surv_all — a different
+       * mechanism from the SQL window frame, which is why the fingerprint
+       * compares the FACT rather than the text. */
+      put(fp, "s_prev_lags_one_row", /s_prev = surv_all;[\s\S]{0,400}?surv_all = surv_all \*/i.test(sas) ? "yes" : "no");
+      put(fp, "first_event_is_any_cause", /by enrolid svcdate cause;/i.test(sas) ? "yes" : "no");
+      put(fp, "variance_three_terms", String(
+        (/\(a\.cif_\d+ - b\.cif_\d+\)\*\*2/i.test(sas) ? 1 : 0) +
+        (/\(b\.s_prev\*\*2\)/i.test(sas) ? 1 : 0) +
+        (/- 2 \* sum\( \(a\.cif_\d+ - b\.cif_\d+\) \* b\.s_prev/i.test(sas) ? 1 : 0)));
+      put(fp, "naive_treats_competing_as_censored",
+        /sum\(case when s\.t = e\.t and s\.cause = \d+ then 1 else 0 end\) as d_k/i.test(sas) ? "yes" : "no");
+      put(fp, "identity_row_emitted",
+        /abs\(\(cif_\d+(?: \+ cif_\d+)*\) - \(1 - surv_all\)\) < 1e-9/i.test(sas) &&
+        /HOLDS: the causes partition/i.test(rawSas) ? "yes" : "no");
+      put(fp, "bias_row_emitted", /'bias'/i.test(sas) ? "yes" : "no");
+      put(fp, "interval_is_clamped",
+        /max\(0, cif_\d+ - 1\.96/i.test(sas) && /min\(1, cif_\d+ \+ 1\.96/i.test(sas) ? "yes" : "no");
+      put(fp, "horizons", (sas.match(/horizon = (\d+); output;/g) ?? [])
+        .map((m) => (/(\d+)/.exec(m) ?? [])[1]).join(","));
+      put(fp, "censor_bounds", censorBoundsSas(sas));
+      /* Language-local: SAS has its OWN Aalen-Johansen in PROC LIFETEST, so the
+       * closed form is checked against a second implementation on the site's
+       * own data. */
+      put(fp, "cif_anchor_present",
+        /proc lifetest data=work\.\w+ plots=none;/i.test(sas) && /eventcode=1/i.test(sas) &&
+        /cif_anchor_verdict = 'PASS: closed form = PROC LIFETEST CIF'/i.test(rawSas) ? "yes" : "no");
       break;
     }
     case "comorbidity_index": {
@@ -1258,6 +1342,15 @@ const EXPECTED_CONSTANTS: Record<string, Record<"sql" | "sas", ConstantProfileSp
     sql: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
     sas: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
   },
+  competing_risks: {
+    /* z = 4: both bounds of the delta-method Wald interval, for each of the two
+     *        causes. No z^2 anywhere — nothing here estimates a proportion by
+     *        Wilson and nothing runs a chi-square test, because the one test
+     *        this family would want (Gray's) is refused rather than
+     *        approximated. A z^2 appearing here would mean something did. */
+    sql: { z: 4, z2_half: 0, z2: 0, z2_quarter: 0 },
+    sas: { z: 4, z2_half: 0, z2: 0, z2_quarter: 0 },
+  },
   cox: {
     /* z = 2: both bounds of the one-step hazard ratio's Wald interval, and
      *        nowhere else - the fitted interval is PHREG's and is NULL here.
@@ -1386,6 +1479,7 @@ export const LANGUAGE_LOCAL_KEYS: Record<string, { language: "sql" | "sas"; must
   cox_fit_in_sas: { language: "sas", must: "yes", means: "PROC PHREG fits the model, with ties=breslow stated explicitly rather than left to the default" },
   cox_null_loglik_check: { language: "sas", must: "yes", means: "PHREG's null -2 LOG L is checked against the closed-form partial log-likelihood" },
   cox_score_zero_check: { language: "sas", must: "yes", means: "U(beta_hat) = 0 is verified — the fitted coefficient is checked against the equation that defines it" },
+  cif_anchor_present: { language: "sas", must: "yes", means: "PROC LIFETEST with eventcode= is run beside the closed-form CIF and compared to it, with a verdict printed" },
   cox_anchor_check: { language: "sas", must: "yes", means: "the constant-proportion closed form is checked, and says NOT APPLICABLE rather than passing vacuously when it does not apply" },
 };
 

@@ -31,7 +31,7 @@ const DEMO_AXES = new Set(["age_band", "sex", "region", "plan_type", "year"]);
 const ANALYSIS_KINDS = new Set([
   "attrition", "table1", "point_prevalence", "period_prevalence", "cumulative_incidence",
   "incidence_rate", "standardization", "calendar_trend", "resource_use",
-  "comorbidity_index", "regression", "survival", "cox", "statistical_engine", "future_stub",
+  "comorbidity_index", "regression", "survival", "cox", "competing_risks", "statistical_engine", "future_stub",
 ]);
 const SURVIVAL_CI = new Set(["log_log", "linear"]);
 const SURVIVAL_ENDPOINTS = new Set(["claims_event", "death"]);
@@ -340,6 +340,29 @@ function checkAnalysis(p: Problems, v: unknown, path: string): void {
       needStr(p, v, "ties", path, { nonEmpty: true });
       if (!Array.isArray(v.covariateIds)) p.push(`${path}.covariateIds`, `expected an array of baseline ids, got ${typeOf(v.covariateIds)}`);
       else v.covariateIds.forEach((x, j) => need(p, `${path}.covariateIds[${j}]`, isStr(x), `expected a baseline id string, got ${typeOf(x)}`));
+      break;
+    }
+    case "competing_risks": {
+      const epr = `${path}.endpoint`;
+      if (!isObj(v.endpoint)) p.push(epr, `expected {kind, ...}, got ${typeOf(v.endpoint)}`);
+      else {
+        needEnum(p, v.endpoint, "kind", epr, SURVIVAL_ENDPOINTS);
+        if (v.endpoint.kind === "claims_event") checkOutcomeDefinition(p, v.endpoint.outcomeDefinition, `${epr}.outcomeDefinition`);
+      }
+      if (!Array.isArray(v.competingEvents)) p.push(`${path}.competingEvents`, `expected an array, got ${typeOf(v.competingEvents)}`);
+      else v.competingEvents.forEach((ce, j) => {
+        const cp = `${path}.competingEvents[${j}]`;
+        if (!isObj(ce)) { p.push(cp, `expected an object, got ${typeOf(ce)}`); return; }
+        needStr(p, ce, "id", cp, { nonEmpty: true });
+        needStr(p, ce, "label", cp, { nonEmpty: true });
+        checkOutcomeDefinition(p, ce.outcomeDefinition, `${cp}.outcomeDefinition`);
+      });
+      checkWindow(p, v.washout, `${path}.washout`);
+      checkPersonTimeRule(p, v.personTimeRule, `${path}.personTimeRule`);
+      if (!Array.isArray(v.horizonDays)) p.push(`${path}.horizonDays`, `expected an array of day marks, got ${typeOf(v.horizonDays)}`);
+      else v.horizonDays.forEach((h, j) => need(p, `${path}.horizonDays[${j}]`, isNum(h), `expected a number, got ${typeOf(h)}`));
+      needBool(p, v, "emitNaiveComparison", path);
+      needBool(p, v, "emitLifeTable", path);
       break;
     }
     case "standardization":

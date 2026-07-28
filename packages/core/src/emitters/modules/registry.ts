@@ -25,6 +25,7 @@ import { comorbidityIndexModule } from "./comorbidity_index";
 import { regressionModule } from "./regression";
 import { survivalModule } from "./survival";
 import { coxModule } from "./cox";
+import { competingRisksModule } from "./competing_risks";
 
 export const ANALYSIS_MODULES: Partial<Record<Analysis["kind"], AnalysisModule<never>>> = {
   incidence_rate: incidenceModule as AnalysisModule<never>,
@@ -39,6 +40,7 @@ export const ANALYSIS_MODULES: Partial<Record<Analysis["kind"], AnalysisModule<n
   regression: regressionModule as AnalysisModule<never>,
   survival: survivalModule as AnalysisModule<never>,
   cox: coxModule as AnalysisModule<never>,
+  competing_risks: competingRisksModule as AnalysisModule<never>,
 };
 
 /* Readiness (spec/types.ts EMITTABLE_ANALYSIS_KINDS) blocks enabled analyses
@@ -74,6 +76,26 @@ const SPINE_EMITTED_KINDS = new Set<Analysis["kind"]>(["attrition", "table1"]);
     if (!shapeFor(stamp))
       throw new Error(
         `modules/registry: "${kind}" (stamp "${stamp}") has no entry in SUPPRESSION_SHAPES (emitters/suppression.ts) — its results would ship without small-cell suppression (BR-DEL-004).`
+      );
+  }
+}
+
+/* A shape's rowDetailCol must be a column the suppression pass actually keeps.
+ * The released table is projected from labelCols + keepCols + maskCols, so a
+ * rowDetailCol outside all three is dropped there and then referenced by the
+ * results contract — which fails at RUN TIME, in the last program of the
+ * bundle, long after anything that could have pointed at the shape. Caught at
+ * module load instead, like the two throws above. (The competing-risks shape
+ * tripped exactly this.) */
+{
+  for (const [kind, mod] of Object.entries(ANALYSIS_MODULES)) {
+    const stamp = (mod as AnalysisModule).stampKind;
+    const shape = shapeFor(stamp);
+    if (!shape?.rowDetailCol) continue;
+    const carried = new Set<string>([...shape.labelCols, ...(shape.keepCols ?? []), ...shape.maskCols]);
+    if (!carried.has(shape.rowDetailCol))
+      throw new Error(
+        `modules/registry: "${kind}" (stamp "${stamp}") declares rowDetailCol "${shape.rowDetailCol}", which is in neither labelCols, keepCols nor maskCols — the suppression pass would drop it and the results contract would fail at run time referencing a column that does not exist.`,
       );
   }
 }

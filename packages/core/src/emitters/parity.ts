@@ -26,6 +26,7 @@ import type {
   ResourceUseAnalysis,
   Stratifier,
   CoxAnalysis,
+  CompetingRisksAnalysis,
   SurvivalAnalysis,
   TrendSpec,
 } from "../spec/types";
@@ -1299,5 +1300,82 @@ export function coxParity(
     oneStep: "first_newton_step",
     fittedCoefficient: "sas_primary",
     selfChecks: ["null_minus_2_loglik", "score_at_beta_hat_is_zero", "constant_proportion_closed_form"],
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ *  Competing risks (Aalen-Johansen)
+ * ------------------------------------------------------------------ */
+
+export interface CompetingRisksParity {
+  id: string;
+  /** cause code -> which code list ascertains it, in emission order. The CAUSE
+   *  NUMBERING is part of the contract: if the twins disagreed about which cause
+   *  is 2, every CIF would be attached to the wrong label while the partition
+   *  identity still held perfectly. */
+  causes: Array<{ code: number; id: string; codeListId: string }>;
+  washout: { start: number | "anytime_before"; end: number | "anytime_after"; includesIndex: boolean };
+  censorTerms: string[];
+  dataCut: string | null;
+  settingFilter: string;
+  horizonDays: number[];
+  emitNaiveComparison: boolean;
+  emitLifeTable: boolean;
+  estimator: "aalen_johansen";
+  variance: "delta_method_closed_form";
+  /** unusually for this repo, nothing is deferred to SAS here */
+  sasPrimary: "none";
+}
+
+export function competingRisksLimitations(an: CompetingRisksAnalysis, listSystem: CodeSystem, spec?: StudySpec): string[] {
+  const out: string[] = [];
+  const od = survivalOutcome(an);
+  if (od) {
+    const note = outcomeSettingPlan(od, listSystem).note;
+    if (note) out.push(note);
+    if (od.minClaims > 1)
+      out.push(`endpoint minClaims=${od.minClaims} is NOT yet enforced - any single qualifying claim counts, so the failure time is the FIRST claim's date`);
+  }
+  if (an.personTimeRule.censorAt.includes("death")) out.push(DEATH_CENSOR_NOTE);
+  if (spec && !dataCutLimit(spec)) out.push(NO_DATA_CUT_NOTE);
+  /* GRAY'S TEST: not emitted rather than approximated. */
+  out.push(`NO GRAY'S TEST. The competing-risks analogue of the log-rank compares SUBDISTRIBUTION hazards, and its weights depend on the cumulative incidence at each event time — it is closed form, but it is a different and more intricate statistic than the log-rank, and a "close enough" version of it would be a mislabeled test rather than a rounding error. If you need a formal comparison, PROC LIFETEST with eventcode= produces Gray's test, and a survival analysis on the CAUSE-SPECIFIC events gives the log-rank — which answers a DIFFERENT question, see the method notes`);
+  out.push(`NO FINE-GRAY REGRESSION: there is no subdistribution-hazard model here, so there is no adjusted competing-risks effect estimate. The cumulative incidences are unadjusted`);
+  out.push(`the causes are assumed EXHAUSTIVE. Any failure mode not in the endpoint or competingEvents[] is treated as CENSORING, which puts it back in the position this analysis exists to correct — the partition identity cannot detect a cause nobody declared`);
+  if (!an.emitNaiveComparison)
+    out.push(`emitNaiveComparison is OFF, so the 1 - Kaplan-Meier estimate and the bias against it are not reported. That difference is the reason this analysis is being run instead of a simpler one, and a reader without it has to take the choice on faith`);
+  return out;
+}
+
+export const COMPETING_RISKS_METHOD_NOTES = [
+  `Aalen-Johansen: CIF_k(t) = SUM over event times of S(t_prev) * d_k / n, with S the ALL-CAUSE Kaplan-Meier. The risk set is all-cause on purpose — a competing event removes the subject from every cause's denominator, including its own`,
+  `the PARTITION IDENTITY is emitted as a row: the causes are exhaustive and mutually exclusive, so the cumulative incidences sum to EXACTLY 1 - S(t) at every mark. It is not a tolerance check — the sums telescope, and any error in one cause's accumulation breaks it. Read those rows first`,
+  `the naive 1 - Kaplan-Meier per cause is computed BESIDE the CIF and the difference reported, so the reason for using this estimator is a subtraction in the output rather than a claim in a note`,
+  `naive per-cause risks can sum to MORE than the total probability of any event — mutually exclusive outcomes whose probabilities exceed the chance of either happening. When that occurs it is flagged, because it is the clearest evidence that treating competing events as censoring is not a small approximation`,
+  `the variance is the delta-method form (Klein & Moeschberger 2e 4.9), three sums over the same risk sets. Its interval is a Wald interval on the raw scale, CLAMPED to [0,1] and labelled as clamped: near the boundary it runs outside the range a probability can take`,
+  `CAUSE-SPECIFIC vs SUBDISTRIBUTION hazards answer different questions. A log-rank or Cox model on the cause-specific events estimates the ETIOLOGIC effect on the rate among those still at risk; the cumulative incidence here is the PREDICTIVE quantity, what fraction of the original cohort will have this event. Both are legitimate and they routinely point in different directions — reporting one and discussing the other is a common and serious error`,
+  `SAS-PRIMARY: nothing. There is no p-value and no fitted coefficient in this analysis, so the SQL twin is complete — which is true of no other family in this bundle`,
+];
+
+export function competingRisksParity(
+  an: CompetingRisksAnalysis,
+  consumed: {
+    censorTerms: string[]; dataCut: string | null; settingFilter: string;
+    causes: Array<{ code: number; id: string; codeListId: string }>;
+  },
+): CompetingRisksParity {
+  return {
+    id: an.id,
+    causes: consumed.causes,
+    washout: { start: an.washout.start, end: an.washout.end, includesIndex: an.washout.includesIndex },
+    censorTerms: consumed.censorTerms,
+    dataCut: consumed.dataCut,
+    settingFilter: consumed.settingFilter,
+    horizonDays: an.horizonDays,
+    emitNaiveComparison: an.emitNaiveComparison,
+    emitLifeTable: an.emitLifeTable,
+    estimator: "aalen_johansen",
+    variance: "delta_method_closed_form",
+    sasPrimary: "none",
   };
 }

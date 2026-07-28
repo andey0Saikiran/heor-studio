@@ -565,6 +565,74 @@ const MUTATIONS: Mutation[] = [
       /(CAST\('adjusted' AS VARCHAR\) AS component,[\s\S]{0,200}?CAST\(\d+ AS INT\) AS ord,\s*\n\s*)CAST\(NULL AS NUMERIC\) AS estimate/g,
       "$1ROUND(CAST(EXP(score_u0 / NULLIF(information0, 0)) AS NUMERIC), 5) AS estimate"),
   },
+  /* ---- competing_risks --------------------------------------------------- *
+   * The first is the one that matters. It is the standard way to write an
+   * Aalen-Johansen estimator wrong, it produces a perfectly plausible monotone
+   * curve, and on Gold Cases A, B and C it changes NOTHING — because none of
+   * them has a competing event. It is exactly the 1 - KM bias the estimator
+   * exists to remove, reintroduced silently. */
+  {
+    name: "SQL competing-risks risk set becomes PER-CAUSE (reintroduces the 1-KM bias)",
+    kind: "competing_risks", lang: "sql",
+    apply: (t) => t.replace(
+      /SUM\(CASE WHEN s\.t = e\.t AND s\.cause > 0 THEN 1 ELSE 0 END\) AS d_all/,
+      "SUM(CASE WHEN s.t = e.t AND s.cause = 1 THEN 1 ELSE 0 END) AS d_all"),
+  },
+  {
+    /* The weight becomes S at the CURRENT event time instead of the previous
+     * one. Every cumulative incidence comes out one factor too small, the curve
+     * is still monotone and still below 1, and the partition identity — which
+     * is the module's own self-check — breaks, which is the point of having it. */
+    name: "SQL Aalen-Johansen weights by S(t) instead of S(t-)",
+    kind: "competing_risks", lang: "sql",
+    apply: (t) => t.replace(/ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING/, "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW"),
+  },
+  {
+    // the cross-term of the delta-method variance dropped: the SE is then
+    // wrong by an amount that still looks like a standard error
+    name: "SAS drops the cross-term from the delta-method variance",
+    kind: "competing_risks", lang: "sas",
+    apply: (t) => t.replace(/- 2 \* sum\( \(a\.cif_(\d+) - b\.cif_\d+\) \* b\.s_prev/g, "- 0 * sum( (a.cif_$1 - b.cif_$1) * b.s_prev"),
+  },
+  {
+    /* The identity check reduced to a tautology. The row still prints HOLDS on
+     * every dataset, including ones where the estimator is broken — which is
+     * the failure mode a self-check that ships WITH the result has to be
+     * protected against, since nobody downstream re-derives it. */
+    name: "SQL partition-identity check always says HOLDS",
+    kind: "competing_risks", lang: "sql",
+    apply: (t) => t.replace(/CASE WHEN ABS\(\(cif_1 \+ cif_2\) - \(1\.0 - surv_all\)\) < 1e-9/, "CASE WHEN 1 = 1"),
+  },
+  {
+    // the naive comparison stops treating competing events as censored, so the
+    // "bias" it reports is zero on every dataset and the module silently loses
+    // the only argument it makes
+    name: "SAS naive KM counts ALL causes, so the reported bias is always zero",
+    kind: "competing_risks", lang: "sas",
+    apply: (t) => t.replace(/sum\(case when s\.t = e\.t and s\.cause = (\d+) then 1 else 0 end\) as d_k/g,
+      "sum(case when s.t = e.t and s.cause > 0 then 1 else 0 end) as d_k"),
+  },
+  {
+    /* Same-day tie between two causes resolved by cause DESCENDING. Nothing in
+     * any current fixture has one, so no number moves — but the rule is part of
+     * the twin contract, and the two languages would silently disagree about
+     * which cause claimed the subject the first time a study had one. */
+    name: "SQL breaks a same-day cause tie toward the COMPETING event instead",
+    kind: "competing_risks", lang: "sql",
+    apply: (t) => t.replace(/ORDER BY a\.event_date, a\.cause\) AS rn/, "ORDER BY a.event_date, a.cause DESC) AS rn"),
+  },
+  {
+    name: "SAS deletes the PROC LIFETEST CIF anchor",
+    kind: "competing_risks", lang: "sas",
+    apply: (t) => t.replace(/eventcode=1;/, "eventcode=99;"),
+  },
+  {
+    // the interval stops being clamped, so a probability can be reported below
+    // zero or above one
+    name: "SQL competing-risks interval is no longer clamped to [0,1]",
+    kind: "competing_risks", lang: "sql",
+    apply: (t) => t.replace(/GREATEST\(0\.0, cif_(\d+) - 1\.96/g, "(cif_$1 - 1.96"),
+  },
 ];
 
 interface Program {
