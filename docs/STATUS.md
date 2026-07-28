@@ -321,6 +321,67 @@ The statistic now follows the family and is stamped and asserted.
 
 Overdispersion is an emitted limitation, not a silent assumption.
 
+### Fine-Gray (Wave 6.4) — the 19th, and a correction to my own refusal
+
+Wave 6.3 filed this beside Gray's test under "refused, not approximated". Half
+right. Gray's test **is** a different and more intricate statistic. Fine-Gray is
+a **Cox model over a different risk set**, so it takes exactly the Cox carve-out.
+The general lesson: *"needs Newton" is never on its own a reason to refuse a
+model here — it is a reason to carve out the coefficient.* Third time I have
+over-refused something in this project.
+
+**One rule differs from Cox.** A subject who fails from a competing cause
+**stays** in the risk set, weighted by G(t)/G(t_j) with G the Kaplan-Meier of the
+**censoring** distribution. Treating censoring as the event is the classic error
+everywhere else in this bundle and is exactly right here, for a different
+quantity — the two are one predicate apart.
+
+**The reduction is what makes it checkable.** With no competing events every
+weight is 1 and this becomes Cox *identically*. Gold A asserts it against the
+live Cox table, so a change to either module surfaces as two pinned numbers
+disagreeing:
+
+| | Fine-Gray | Cox |
+|---|---|---|
+| score U(0) | −31/42 | −31/42 |
+| information I(0) | 1265/1764 | 1265/1764 |
+| logL(0) | −5.8171112 | −5.8171112 |
+
+**Three fixtures, three things only one can show.** Gold A: the reduction. Gold D:
+the **risk set** (11 weighted vs 10 cause-specific — the retained subject) and
+**complete separation**, where the one-step and closed form must return NULL
+rather than the large finite number that reads as an overwhelming effect. Gold E,
+new: **fractional weights** — nobody in D is censored before the last event, so G
+is 1 throughout and the weight expression could be deleted without moving a
+number. In E, G drops to 2/3 and the retained subject enters at exactly that,
+giving a weighted denominator of 8/3 rather than 3.
+
+E is also built so no event time coincides with a censoring time: implementations
+differ on whether G is evaluated at t or t−, and a fixture whose gold numbers
+depended on that would pin this repo's guess rather than the estimator.
+
+**The third self-check is the one this model needs most.** Without `eventcode=`,
+PROC PHREG fits a cause-specific Cox model — cleanly, convergently, answering a
+different question. The program compares its own two risk-set totals and says
+when they're indistinguishable.
+
+*One real defect, caught by Gold D.* I defined cause-specific membership as
+"weight = 1", conflating *still at risk* with *retained at full weight* — they
+differ exactly when G hasn't dropped. So `retained_by_subdistribution` reported
+**zero** on a fixture where a subject was genuinely retained: the check that
+exists to say "this is a Cox model by another name" said it about a real
+Fine-Gray fit.
+
+*And three in my checks.* `separation_guarded` was an occurrence **count** (SQL
+inlines the guard four times, SAS hoists it — 5 vs 2, both correct). A pattern
+anchored on `ROUND(CAST(… AS NUMERIC))` passed Postgres and failed Snowflake —
+the dialect check doing its job on my regex. `weight_is_g_ratio` asserted both G
+subqueries *exist* but not which is the numerator, so inverting the ratio passed.
+And `fg_subdistribution_check` matched a comparison appearing twice, found the
+copy in the result assembly, and stayed green while the check itself was reduced
+to `if 1 then` — **fourth time** a single-occurrence pattern has hidden a partial
+corruption here.
+
 ### Competing-risks CIF (Wave 6.3) — the 18th, and the first with nothing deferred to SAS
 
 Kaplan-Meier treats a competing event as censoring, which asserts that the

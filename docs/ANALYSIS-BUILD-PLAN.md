@@ -5,7 +5,7 @@ analyses, 1 sequencer, and 2 adversarial reviewers (a MarketScan methodologist a
 a code-truth reviewer reading the actual repo). Both reviewers' corrections are
 folded in below and marked **[CORRECTION]**._
 
-**Status: 18 done, 4 partial (updated 2026-07-28 — see docs/STATUS.md).**
+**Status: 19 done, 4 partial (updated 2026-07-28 — see docs/STATUS.md).**
 
 ---
 
@@ -158,8 +158,14 @@ Stated up front so no one has to discover it later.
   cumulative incidence at each event time. It is closed form — this is not a
   "SQL cannot" refusal — but it is a different and more intricate statistic than
   the log-rank, and a close-enough version of it would be a mislabeled test
-  rather than a rounding error. Fine-Gray regression is refused for the same
-  reason plus the usual one: it needs Newton.
+  rather than a rounding error.
+  **[CORRECTED — Wave 6.4]** The sentence that followed this one refused
+  Fine-Gray "for the same reason plus the usual one: it needs Newton", and that
+  was wrong. Fine-Gray is not a different statistic — it is a Cox model over a
+  different risk set, so it takes exactly the Cox carve-out: beta is SAS-primary,
+  everything around it is closed form. It shipped in Wave 6.4 (`30b3105`). The
+  right reading is that "needs Newton" is never on its own a reason to refuse a
+  model here; it is a reason to carve out the coefficient.
 - **Numbers in `docs/blueprints/p1/` must not be pinned as-is** — that README states
   the adversarial-verification pass never ran (the workflow hit a spend limit).
 
@@ -261,6 +267,14 @@ bullet under "What will NOT be built": Cox does have an anchor.
 
 **Competing-risks CIF landed** in Wave 6.3 (`b9123fa`), with Gold Case D. It is
 the first family in this bundle with nothing deferred to SAS.
+
+**Fine-Gray landed** in Wave 6.4 (`30b3105`), with Gold Case E. Its verification
+rests on a REDUCTION rather than on a reference value: with no competing events
+the subdistribution model is Cox identically, so the harness asserts the two
+modules produce the same numbers on Gold Case A. Gold Case E exists because
+neither A nor D has censoring before the last event of interest, so on both of
+them every IPCW weight is exactly 1 and the weight expression could be deleted
+without moving a number.
 
 **Still unbuilt in this family**: the
 Brookmeyer-Crowley interval on the median (derivable from the band already
