@@ -1,6 +1,7 @@
 # HEOR Studio — Status & Roadmap
 
-_Snapshot of what exists vs what's left. Last updated 2026-07-27 (after Waves 0-4; see
+_Snapshot of what exists vs what's left. Last updated 2026-07-28 (after Analysis Waves
+1.6 and 2 — calendar trend and the claim-line ledger; **525 harness checks**). See
 `docs/NIGHT-REPORT-2026-07-26.md` for the overnight build and **`docs/PENDING.md`
 for the audited, authoritative roadmap** — a 9-agent audit found 151 pending items
 and corrected several claims previously made here)._
@@ -42,7 +43,7 @@ Everything below is committed and pushed unless noted.
 - **Outcome care-setting filter** applied in both twins (shared `outcomeSettingPlan`), with a planted inpatient negative control.
 - **Honest labeling:** unimplemented options (Clopper-Pearson, Wald, KM, competing risk, minClaims>1, dx-position) → computed-with-closest-method + visible `REVIEW` note in both languages.
 
-### Verification harness (the "machine-verified" engine) — **308 passing checks**
+### Verification harness (the "machine-verified" engine) — **525 passing checks**
 _(the figure once quoted as 207 was miscounted — a live run printed 206. Waves 0-4 took it to 308.)_
 - PGlite (real Postgres-16 wasm) executes the **actual emitted SQL** against a 12-patient synthetic MarketScan fixture with hand-computed ground truth.
 - **Gold Case A passes:** spine 12→11→10; incidence 3/8/2425/451.86/Byar CI + 6 stratum rows; point prevalence 4/10 + 7 strata; period prevalence 3/10 + 6 strata; cumulative incidence 3/8 = 0.375 Wilson (0.13684, 0.69426) + strata; plus zero-denominator and horizon-bound edge cases.
@@ -124,3 +125,83 @@ Each has a real prerequisite — deliberately left for an awake session (see NIG
 2. **Statistical engine** — first add the two-exposure-cohort spine extension, then the SMD balance table (pinned gold smdAge = −0.63246 is waiting).
 3. **Standardization** (enter + double-check the standard-pop weight tables) → **calendar trend** (multi-year fixture extension + p-value policy).
 4. Then P2 economics (where MarketScan demand concentrates).
+
+---
+
+## Analysis Waves 1.6 + 2 (2026-07-28) — 8 analyses now verified
+
+**Score: 9 of 69 done, 3 partial.** Harness: **525 checks, 0 failing** (was 396).
+
+### Calendar trend (`4758e5a`) — the 7th analysis
+Cochran-Armitage over calendar buckets. The statistic **z is closed form, computed
+in BOTH twins, and executed** against hand-derived truth; only the two-sided
+p-value is SAS-primary. Declaring the whole test SAS-primary would have been
+easier and would have put a perfectly verifiable number beyond verification.
+
+On Gold Case A the algebra collapses to clean fractions — R=5, N=30, pbar=1/6,
+T=-2, Var=25/9 — giving **z = -1.2 exactly**, a value a floating-point slip or a
+mis-scored bucket cannot land on by accident.
+
+Refused by name at readiness: `incidence_rate` and `point_prevalence` bases
+(person-time split across buckets, and a per-bucket anchor, do not exist), and
+monthly buckets under Cochran-Armitage (dozens of sparse cells scored 0,1,2,…
+give the test almost no power).
+
+**A latent defect found by reusing the SAS-primary contract:** `exact_ci_null_in_sql`
+and `exact_ci_computed_in_sas` are produced by one language each, and
+`diffFingerprints` compared the union of keys — so the first spec asking for
+`poisson_exact` would have hit a spurious mismatch. Never fired because the gold
+spec uses `poisson_byar`. Fixed with `LANGUAGE_LOCAL_KEYS` + per-language
+assertions: strictly more enforcement, not an exemption.
+
+### Claim-line ledger + resource use and cost (`cbe0c15`) — the 8th
+The substrate the whole economic tier sits on. Counts and costs are ONE module
+because they share a denominator, a window and a definition of an encounter.
+
+**The inpatient double count.** MarketScan records an admission twice — a
+stay-level total, and service lines that already roll up into it. Summing both
+inflates the largest cost component in most studies and produces a table that is
+complete, well-formed and wrong. Gold Case A pins it:
+
+| | |
+|---|---|
+| correct IP total | **$15,000** |
+| double-counting ledger | $22,000 |
+
+Both are in the fixture, the second labelled as the failure to detect. The
+mirror-image error — dropping service lines that have no admission record —
+loses whole stays; P05 is that case and is kept.
+
+**Median yes, quartiles no, and the reason is a proof:** SQL's
+`PERCENTILE_CONT(0.5)` and SAS's `PCTLDEF=5` agree exactly for every n (n even →
+both average the two central order statistics; n odd → both take the central
+one). Away from p=0.5 they genuinely differ, so no quartile is emitted by either
+twin, and `PCTLDEF=5` is written out rather than left to a site default.
+
+Every executed number matched a hand derivation done *before* the module ran: 19
+encounters over 10 members, $18,600 total, mean $1,860 vs median $350.
+
+**Fixture safety proven, not asserted.** 8 claim rows and 5 payment columns were
+added; all 440 previously-pinned checks still passed on the fixture change ALONE,
+before any module existed to read it.
+
+### Not shipped tonight, and why
+
+**Charlson comorbidity index.** The build plan puts it early because it is
+simultaneously a Table 1 row, an SMD covariate and a regression adjustment. It is
+NOT shipped because the weights could not be cross-source verified: Wikipedia
+renders "uncontrolled diabetes" at weight 3, while the Deyo/Quan administrative
+implementations score *diabetes with chronic complications* at 2. That is exactly
+the class of plausible-but-wrong constant this project exists to prevent, and the
+same discipline that produced `STANDARD_POPULATIONS_PENDING` applies: refuse with
+a citation rather than substitute.
+
+To transcribe and sum-check before building: **Quan H, et al. Med Care
+2005;43(11):1130-9** (ICD-10 coding algorithms) and **Deyo RA, et al. J Clin
+Epidemiol 1992;45(6):613-9** (the 17-category adaptation and its weights).
+
+Note also that the ICD-10 code sets themselves run to hundreds of codes and
+belong to the analyst, not to the emitter — `CodeList` already carries per-code
+`source`/`verified` flags for exactly this reason. The right shape is a general
+weighted-index engine whose conditions, weights and hierarchy (`supersedes`) come
+from the reviewed spec, with Charlson as one verified template.
