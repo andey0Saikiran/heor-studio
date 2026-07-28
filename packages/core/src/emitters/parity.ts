@@ -13,6 +13,7 @@
  * twin inherits the SQL twin's machine-verified ground truth.
  */
 import type {
+  CalendarTrendAnalysis,
   CodeSystem,
   CumulativeIncidenceAnalysis,
   IncidenceRateAnalysis,
@@ -21,6 +22,7 @@ import type {
   PointPrevalenceAnalysis,
   RelativeWindow,
   Stratifier,
+  TrendSpec,
 } from "../spec/types";
 import type { StudySpec } from "../spec/types";
 
@@ -678,3 +680,163 @@ export const NO_DATA_CUT_NOTE =
   `In a real extract the last months are incomplete: members still enrolled at the cut ` +
   `look DISENROLLED and the immature tail counts as event-free person-time, biasing rates ` +
   `downward. Declare dataCutDate (and claimsRunoutMonths) before reporting person-time results`;
+
+/* ================================================================== *
+ *  Calendar trend
+ * ================================================================== */
+
+/** One calendar bucket, with its boundaries already CLIPPED to the study period. */
+export interface TrendBucket {
+  /** 0-based ordinal — also the Cochran-Armitage score (see below) */
+  ord: number;
+  /** display label, e.g. "2019", "2019-Q3", "2019-07" */
+  label: string;
+  /** ISO bounds, inclusive, clipped to meta.studyPeriod */
+  start: string;
+  end: string;
+  /** true when clipping shortened the natural bucket */
+  isPartial: boolean;
+}
+
+const MONTH_DAYS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+function lastDayOfMonth(y: number, m: number): number {
+  if (m === 2) return y % 4 === 0 && (y % 100 !== 0 || y % 400 === 0) ? 29 : 28;
+  return MONTH_DAYS[m - 1];
+}
+
+const isoOf = (y: number, m: number, d: number): string =>
+  `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+
+/**
+ * The calendar buckets a trend runs over, derived from meta.studyPeriod.
+ *
+ * Generated HERE, in TypeScript, rather than by a SQL calendar generator or a
+ * SAS `%do` loop, precisely so BOTH twins receive the identical literal
+ * boundaries. A recursive CTE and a macro loop are two implementations of the
+ * same intent, and two implementations are where twins drift — this is the one
+ * place that difference would be invisible, because a bucket that is one day off
+ * still produces a full, plausible-looking trend table.
+ *
+ * Boundaries are CLIPPED to the study period, and a clipped bucket is flagged:
+ * a half-length bucket has systematically fewer events, which bends the trend.
+ * That is reported, never silently smoothed.
+ */
+export function trendBuckets(spec: StudySpec, bucket: TrendSpec["bucket"]): TrendBucket[] {
+  const { start: pStart, end: pEnd } = spec.meta.studyPeriod;
+  const [sy, sm] = pStart.split("-").map(Number);
+  const [ey, em] = pEnd.split("-").map(Number);
+  const natural: Array<{ label: string; start: string; end: string }> = [];
+
+  if (bucket === "calendar_year") {
+    for (let y = sy; y <= ey; y++) natural.push({ label: String(y), start: isoOf(y, 1, 1), end: isoOf(y, 12, 31) });
+  } else if (bucket === "calendar_quarter") {
+    for (let y = sy; y <= ey; y++) {
+      for (let qi = 1; qi <= 4; qi++) {
+        const m0 = (qi - 1) * 3 + 1;
+        const m1 = m0 + 2;
+        if (y === sy && m1 < sm) continue;
+        if (y === ey && m0 > em) continue;
+        natural.push({ label: `${y}-Q${qi}`, start: isoOf(y, m0, 1), end: isoOf(y, m1, lastDayOfMonth(y, m1)) });
+      }
+    }
+  } else {
+    for (let y = sy; y <= ey; y++) {
+      for (let m = 1; m <= 12; m++) {
+        if (y === sy && m < sm) continue;
+        if (y === ey && m > em) continue;
+        natural.push({ label: `${y}-${String(m).padStart(2, "0")}`, start: isoOf(y, m, 1), end: isoOf(y, m, lastDayOfMonth(y, m)) });
+      }
+    }
+  }
+
+  return natural
+    .filter((b) => b.end >= pStart && b.start <= pEnd)
+    .map((b, i) => {
+      const start = b.start < pStart ? pStart : b.start;
+      const end = b.end > pEnd ? pEnd : b.end;
+      return { ord: i, label: b.label, start, end, isPartial: start !== b.start || end !== b.end };
+    });
+}
+
+/** The parameter set a calendar-trend twin must consume identically. */
+export interface CalendarTrendParity {
+  id: string;
+  codeListId: string;
+  base: CalendarTrendAnalysis["base"];
+  bucket: TrendSpec["bucket"];
+  /** the test actually computed, which may differ from the requested method */
+  trendMethod: string;
+  /** every bucket boundary, in order — a shifted bucket changes this list */
+  buckets: Array<{ ord: number; label: string; start: string; end: string }>;
+  /** Cochran-Armitage scores, in bucket order */
+  scores: number[];
+  denominatorRule: "enrolled_anytime";
+  numeratorRule: "event_in_bucket";
+  ciMethod: string;
+  settingFilter: string;
+  /** the p-value is SAS-primary; SQL emits it NULL */
+  pValueSource: "sas_primary";
+}
+
+/** Spec options the calendar-trend twins do NOT implement yet. */
+export function calendarTrendLimitations(an: CalendarTrendAnalysis, listSystem: CodeSystem, buckets: TrendBucket[]): string[] {
+  const out: string[] = [];
+  const od = an.outcomeDefinition;
+  if (od.minClaims > 1)
+    out.push(`outcome minClaims=${od.minClaims} is NOT yet enforced - any single qualifying claim in a bucket counts as a case`);
+  const settingNote = outcomeSettingPlan(od, listSystem).note;
+  if (settingNote) out.push(settingNote);
+  if (od.diagnosisPosition !== "any")
+    out.push(`diagnosisPosition="primary" is NOT yet applied - any-position diagnoses count (the events spine does not record claim position yet)`);
+  if (an.trend.method !== "cochran_armitage")
+    out.push(
+      `trend method "${an.trend.method}" is NOT implemented - ${
+        an.trend.method === "poisson_rate_trend"
+          ? "a Poisson rate trend needs person-time SPLIT across calendar buckets (no emitter builds that yet) and a fitted log-linear slope, which has no closed form"
+          : "a linear slope on proportions needs a fitted OLS coefficient, which has no closed form in SQL"
+      }; the Cochran-Armitage trend test IS computed and labeled cochran_armitage`,
+    );
+  if (!an.trend.reportPerBucket)
+    out.push(`trend.reportPerBucket=false is IGNORED - the per-bucket rows are always emitted, because a trend statistic with no visible buckets cannot be reviewed`);
+  for (const s of splitStratifiers(an.stratifyBy).unsupported)
+    out.push(`stratifier "${s.id}" (${s.source.kind}-sourced) is NOT yet emitted`);
+  if (an.stratifyBy.length > 0)
+    out.push(`stratifyBy is NOT yet applied to the trend - the test is computed on the whole cohort; a stratified trend needs one test per stratum plus a homogeneity test`);
+  const partial = buckets.filter((b) => b.isPartial);
+  if (partial.length > 0)
+    out.push(
+      `bucket(s) ${partial.map((b) => b.label).join(", ")} are PARTIAL (clipped to the study period). A short bucket accrues fewer events at the same underlying rate, which bends the trend; the equally-spaced scores below do not correct for it`,
+    );
+  return out;
+}
+
+/** Method notes ALWAYS emitted (describe what IS computed). */
+export const CALENDAR_TREND_METHOD_NOTES = [
+  `per-bucket denominator = final-cohort members whose stitched enrollment episode OVERLAPS the bucket; numerator = members with >= 1 qualifying event DATED inside it (same rules as the period-prevalence module, applied bucket by bucket)`,
+  `a member enrolled across several buckets is counted ONCE PER BUCKET, so the Trend row's counts are person-BUCKET sums, not distinct patients - they are the quantities the trend statistic is computed from, and must not be read as a cohort size`,
+  `Cochran-Armitage scores are the 0-based bucket ORDINALS (0, 1, 2, ...), the standard equally-spaced default. They assume the buckets are equally spaced in time, which partial (clipped) buckets are not`,
+  `the trend statistic z is computed in BOTH twins from the same closed form; only the two-sided p-value is SAS-primary (it inverts the normal CDF, which warehouse SQL has no function for)`,
+  `this tests for a MONOTONE linear trend in the bucket proportions. It has no power against non-monotone change (a rise then a fall can return z near zero), so the per-bucket rows must be read alongside it`,
+];
+
+/** The parity record for a calendar-trend twin, from consumed values. */
+export function calendarTrendParity(
+  an: CalendarTrendAnalysis,
+  consumed: { settingFilter: string; buckets: TrendBucket[] },
+): CalendarTrendParity {
+  return {
+    id: an.id,
+    codeListId: an.outcomeDefinition.codeListId,
+    base: an.base,
+    bucket: an.trend.bucket,
+    trendMethod: "cochran_armitage",
+    buckets: consumed.buckets.map((b) => ({ ord: b.ord, label: b.label, start: b.start, end: b.end })),
+    scores: consumed.buckets.map((b) => b.ord),
+    denominatorRule: "enrolled_anytime",
+    numeratorRule: "event_in_bucket",
+    ciMethod: "wilson",
+    settingFilter: consumed.settingFilter,
+    pValueSource: "sas_primary",
+  };
+}

@@ -137,6 +137,34 @@ const MUTATIONS: Mutation[] = [
     kind: "smd_balance", lang: "sas",
     apply: (t) => t.replace(/in \('DRUG_X', 'DRUG_Y'\)/i, "in ('DRUG_Y', 'DRUG_X')"),
   },
+  {
+    /* One day. Events dated 2019-12-31 silently move out of the 2019 bucket and
+     * the table still shows three complete years — the exact reason the bucket
+     * boundaries are emitted as literals from ONE generator and fingerprinted. */
+    name: "SQL trend bucket boundary shifted by a day (2019-12-31 -> 2019-12-30)",
+    kind: "calendar_trend", lang: "sql",
+    apply: (t) => t.replace(/DATE '2019-12-31'/, "DATE '2019-12-30'"),
+  },
+  {
+    // Unequal scores change the statistic without changing a single count.
+    name: "SAS trend scores no longer equally spaced (bucket 2 scored 3)",
+    kind: "calendar_trend", lang: "sas",
+    apply: (t) => t.replace(/bucket_ord = 2; bucket =/, "bucket_ord = 3; bucket ="),
+  },
+  {
+    // sum(w^2 * n) is the variance term; pointing it at the case counts leaves a
+    // finite, plausible z that is simply wrong.
+    name: "SQL Cochran-Armitage variance term reads cases instead of denominators",
+    kind: "calendar_trend", lang: "sql",
+    apply: (t) => t.replace(/SUM\(bucket_ord \* bucket_ord \* denominator\)/, "SUM(bucket_ord * bucket_ord * patients)"),
+  },
+  {
+    // Dividing by the variance rather than its square root: z shrinks toward
+    // zero, so a real trend quietly reads as no trend.
+    name: "SAS trend z divides by the variance, not its square root",
+    kind: "calendar_trend", lang: "sas",
+    apply: (t) => t.replace(/round\(t_stat \/ sqrt\(var_t\)/, "round(t_stat / (var_t)"),
+  },
 ];
 
 interface Program {
@@ -405,6 +433,71 @@ function sasPrimaryMutationChecks(): Check[] {
         ? "a SAS-primary column that stops being computed is detected"
         : "NOT CAUGHT — the SAS side could quietly stop computing it",
   });
+
+  /* The SECOND SAS-primary column, on a different kind and for a different
+   * reason (normal CDF rather than inverse incomplete gamma). Worth its own
+   * mutations because the contract is only as good as its weakest instance, and
+   * because the trend case is the one where SQL leaving a column NULL sits
+   * directly beside a number SQL DOES compute — the tempting place to "just
+   * fill it in for consistency". */
+  {
+    const sqlTrend = emitSql(GOLD_A_SPEC, "postgres", GOLD_A_OPTS).find((f) => /trend/.test(f.path))?.content ?? "";
+    const sasAll = emitSas(GOLD_A_SPEC, GOLD_A_OPTS);
+    const sasTrend = sasAll.find((f) => /trend/.test(f.path))?.content ?? "";
+    const sasSetup = sasAll.find((f) => /setup/i.test(f.path))?.content ?? "";
+
+    const cleanSql = fingerprint("calendar_trend", "sql", sqlTrend);
+    const cleanSas = fingerprint("calendar_trend", "sas", sasTrend, sasSetup);
+    checks.push({
+      name: "sas-primary: trend p-value contract holds on clean emission",
+      status: cleanSql.trend_p_null_in_sql === "yes" && cleanSas.trend_p_computed_in_sas === "yes" ? "pass" : "fail",
+      detail: `sql null=${cleanSql.trend_p_null_in_sql}, sas computed=${cleanSas.trend_p_computed_in_sas}`,
+    });
+
+    // direction 1: SQL fills the p-value in with a constant rather than NULL
+    const fakedP = sqlTrend.replace(
+      /CAST\(NULL AS NUMERIC\),(\s*\n\s*)CAST\('sas_normal_cdf' AS VARCHAR\)/,
+      "0.05,$1CAST('sas_normal_cdf' AS VARCHAR)",
+    );
+    const fakedPChanged = fakedP !== sqlTrend;
+    const fakedPFp = fingerprint("calendar_trend", "sql", fakedP);
+    checks.push({
+      name: "sas-primary mutation caught: SQL fabricates the trend p-value",
+      status: fakedPChanged && fakedPFp.trend_p_null_in_sql !== "yes" ? "pass" : "fail",
+      detail: !fakedPChanged
+        ? "mutation pattern did not match — vacuous test"
+        : fakedPFp.trend_p_null_in_sql !== "yes"
+          ? "a p-value in the SQL twin is rejected — it would carry the label of a test SQL never ran"
+          : "NOT CAUGHT — SQL may invent a p-value",
+    });
+
+    // direction 2: the SAS p-value stops being computed, leaving the column
+    // absent in BOTH twins while the method label still claims a source
+    const noProbnorm = sasTrend.replace(/probnorm\(/gi, "0*(");
+    const noProbnormChanged = noProbnorm !== sasTrend;
+    const noProbnormFp = fingerprint("calendar_trend", "sas", noProbnorm, sasSetup);
+    checks.push({
+      name: "sas-primary mutation caught: SAS trend p-value deleted",
+      status: noProbnormChanged && noProbnormFp.trend_p_computed_in_sas !== "yes" ? "pass" : "fail",
+      detail: !noProbnormChanged
+        ? "mutation pattern did not match — vacuous test"
+        : noProbnormFp.trend_p_computed_in_sas !== "yes"
+          ? "detected — otherwise the column would be NULL in SQL, absent in SAS, and labeled as sourced"
+          : "NOT CAUGHT — the p-value could vanish from both twins",
+    });
+
+    /* The z statistic must NOT drift into the SAS-primary set. It is closed form
+     * and executed against hand-computed truth; quietly declaring it SAS-primary
+     * would retire a verified number into an unverifiable one — a regression
+     * that ADDS a plausible-looking contract rather than breaking one. */
+    checks.push({
+      name: "sas-primary: the trend STATISTIC stays executable in SQL (not absorbed into the contract)",
+      status: cleanSql.ca_z_is_t_over_sd === "yes" ? "pass" : "fail",
+      detail: cleanSql.ca_z_is_t_over_sd === "yes"
+        ? "z is computed in the SQL twin and executed by the harness; only the p-value is SAS-primary"
+        : "SQL no longer computes z — a verified number has been moved beyond verification",
+    });
+  }
 
   return checks;
 }

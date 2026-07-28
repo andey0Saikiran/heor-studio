@@ -28,6 +28,7 @@ import {
   constantProfile,
   diffConstantProfile,
   hasConstantProfile,
+  languageLocalChecks,
   spineFingerprint,
 } from "./fingerprint";
 import type { StudySpec, EmitOptions } from "../index";
@@ -209,6 +210,21 @@ export function sasSqlParityChecks(spec: StudySpec, opts: EmitOptions): Check[] 
           name: `parity ${key}: ${lang} stamp matches its own code`,
           status: "fail",
           detail: drift.join(" | "),
+        });
+      }
+    }
+
+    /* 3a. SAS-PRIMARY contract, asserted per language. These keys are excluded
+     *     from the cross-language diff above (one language produces each by
+     *     design), so they are checked HERE instead — the SQL column must be
+     *     NULL and the SAS statistic must genuinely exist. Skipping them would
+     *     let an asymmetric column go unverified in both directions at once. */
+    for (const [lang, fp] of [["sql", fpSql], ["sas", fpSas]] as const) {
+      for (const c of languageLocalChecks(lang, fp)) {
+        checks.push({
+          name: `parity ${key}: ${lang} SAS-primary contract (${c.key})`,
+          status: c.ok ? "pass" : "fail",
+          detail: c.detail,
         });
       }
     }

@@ -337,6 +337,36 @@ export const EXPECTED = {
     // (P03 day-200, P07 day-300 excluded) → 1/8 = 0.125.
     ci180: { patients: 1, denominator: 8, risk: 0.125, pct: 12.5, ci: [0.02242, 0.47089] as [number, number] },
   },
+  /* Calendar trend — per-calendar-year prevalence + the Cochran-Armitage test.
+   *
+   * Denominator, per year: every cohort member's stitched episode is
+   * 2018-01-01..2020-06-30 (P07's two spans stitch across a 20-day gap), which
+   * overlaps all three study years, so n = 10 in each.
+   * Numerator: OUTPATIENT E119 events dated inside the year —
+   *   2018: P01 (06-01), P06 (09-01)                    -> 2
+   *   2019: P02 (04-11), P03 (07-20), P07 (10-28)       -> 3
+   *         (P05's 2019-03-01 event is INPATIENT, so the setting filter drops it)
+   *   2020: none                                        -> 0
+   *
+   * Cochran-Armitage with scores w = 0,1,2 (the bucket ordinals):
+   *   R = 5, N = 30, pbar = 1/6
+   *   sum(w*r)   = 0*2 + 1*3 + 2*0 = 3
+   *   sum(w*n)   = 0  + 10  + 20   = 30
+   *   sum(w^2*n) = 0  + 10  + 40   = 50
+   *   T   = 3 - (1/6)(30) = -2
+   *   Var = (1/6)(5/6)(50 - 30^2/30) = (5/36)(20) = 25/9
+   *   z   = -2 / (5/3) = -1.2   EXACTLY
+   * The two-sided p (2*(1-Phi(1.2)) = 0.2301) is SAS-primary: NULL in SQL. */
+  calendarTrend: {
+    rowCount: 4, // 2018 + 2019 + 2020 + the Trend row
+    buckets: {
+      "2018": { patients: 2, denominator: 10, prevalence: 0.2, pct: 20, ci: [0.05668, 0.50984] as [number, number] },
+      "2019": { patients: 3, denominator: 10, prevalence: 0.3, pct: 30, ci: [0.10779, 0.60323] as [number, number] },
+      "2020": { patients: 0, denominator: 10, prevalence: 0,   pct: 0,  ci: [0, 0.27754] as [number, number] },
+    } as Record<string, { patients: number; denominator: number; prevalence: number; pct: number; ci: [number, number] }>,
+    // person-BUCKET sums on the Trend row, not distinct patients
+    trend: { patients: 5, denominator: 30, prevalence: 0.16667, z: -1.2, method: "cochran_armitage" },
+  },
   /* SMD balance, DRUG_X (reference) vs DRUG_Y, over the 10-patient cohort.
    *   ages X = 40,45,50,55,60 -> mean 50, sample variance 62.5
    *   ages Y = 45,50,55,60,65 -> mean 55, sample variance 62.5
@@ -536,6 +566,20 @@ export const GOLD_A_SPEC: StudySpec = {
       personTimeRule: { start: "index", censorAt: ["outcome", "disenrollment", "study_end"], maxFollowupDays: 180 },
       competingRiskDeath: "censor", // exercises the KM/SAS-only limitation note
       recurrence: "first_only",
+      ciMethod: "wilson",
+      stratifyBy: [],
+    },
+    /* Calendar trend of the SAME outcome across the three study years.
+     * Deliberately NON-monotone-looking in the middle (2 -> 3 -> 0) so the test
+     * is exercised on data where the direction is not obvious by eye: the rise
+     * then fall yields z = -1.2, which is exactly the case the method notes warn
+     * about (a monotone-trend test has little power against a peak). */
+    {
+      id: "a_trend", label: "Calendar trend of AE prevalence", kind: "calendar_trend", enabled: true,
+      base: "period_prevalence",
+      outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "outpatient", diagnosisPosition: "any" },
+      denominatorRule: "enrolled_anytime",
+      trend: { bucket: "calendar_year", method: "cochran_armitage", reportPerBucket: true },
       ciMethod: "wilson",
       stratifyBy: [],
     },

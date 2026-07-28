@@ -450,6 +450,7 @@ export const EMITTABLE_ANALYSIS_KINDS: ReadonlySet<AnalysisKind> = new Set<Analy
   "cumulative_incidence",
   "standardization",
   "statistical_engine",
+  "calendar_trend",
 ]);
 
 export type DescriptiveAnalysis =
@@ -721,7 +722,20 @@ export function validateAnalyses(spec: StudySpec): string[] {
       }
       case "calendar_trend": {
         requireCodeList(a.outcomeDefinition.codeListId, `${w} outcome`);
+        /* Only the PROPORTION trend is built. Refused loudly rather than
+         * approximated, because both alternatives would emit a complete,
+         * plausible-looking table off the wrong denominator: a rate trend needs
+         * person-time SPLIT across calendar buckets (nothing builds that yet),
+         * and a point-prevalence trend needs a per-bucket anchor date. */
+        if (a.base !== "period_prevalence")
+          problems.push(
+            `${w}: calendar-trend base "${a.base}" is not emitted yet — only "period_prevalence" buckets are built. ` +
+              `A rate trend needs person-time split across calendar buckets; a point-prevalence trend needs a per-bucket anchor. ` +
+              `Set base:"period_prevalence", or disable the analysis to keep it visible as planned work.`
+          );
         if (a.base === "incidence_rate" && !a.personTimeRule) problems.push(`${w}: rate trend requires personTimeRule.`);
+        if (a.trend.bucket === "calendar_month" && a.trend.method === "cochran_armitage")
+          problems.push(`${w}: monthly buckets with a Cochran-Armitage trend are usually a mistake — the test scores buckets 0,1,2,... and assumes equal spacing, so dozens of sparse monthly cells give it almost no power. Use calendar_year or calendar_quarter, or state the intent explicitly.`);
         checkStratifiers(a.stratifyBy, w);
         break;
       }

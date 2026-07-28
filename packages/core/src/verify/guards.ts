@@ -32,18 +32,22 @@ export function verifySilenceGuards(): Check[] {
   const push = (name: string, cond: boolean, detail: string) =>
     out.push({ name, status: cond ? "pass" : "fail", detail });
 
-  /* 1. readiness BLOCKS enabled-but-unemittable analyses (silent-drop hole) */
+  /* 1. readiness BLOCKS enabled-but-unemittable analyses (silent-drop hole)
+   *
+   * The kind here is DELIBERATELY SYNTHETIC. This guard previously used whatever
+   * real analysis kind happened to be unbuilt — standardization, then
+   * calendar_trend — and broke on the day each one shipped, which is a guard
+   * that fails for the one reason that is good news. It is also the wrong test:
+   * readiness keys on membership in EMITTABLE_ANALYSIS_KINDS, so a kind that is
+   * definitionally absent from that set exercises the mechanism directly and
+   * keeps doing so no matter how many modules land.
+   *
+   * Do not "fix" this back to a real unbuilt kind. */
   {
     const spec: StudySpec = JSON.parse(JSON.stringify(GOLD_A_SPEC));
     spec.analyses.push({
-      id: "guard_trend", label: "guard", enabled: true, kind: "calendar_trend",
-      base: "incidence_rate",
-      outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "any", diagnosisPosition: "any" },
-      personTimeRule: { start: "index", censorAt: ["outcome", "disenrollment", "study_end"] },
-      denominatorRule: "person_time",
-      trend: { bucket: "calendar_year", method: "linear_slope", reportPerBucket: true },
-      ciMethod: "poisson_byar",
-      stratifyBy: [],
+      id: "guard_no_generator", label: "guard", enabled: true,
+      kind: "kind_that_has_no_registered_generator",
     } as never);
     const r = specReadiness(spec);
     push(

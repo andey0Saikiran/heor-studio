@@ -19,6 +19,7 @@ import { periodPrevalenceModule } from "./period_prevalence";
 import { cumulativeIncidenceModule } from "./cumulative_incidence";
 import { standardizationModule } from "./standardization";
 import { statisticalEngineModule } from "./statistical_engine";
+import { calendarTrendModule } from "./calendar_trend";
 
 export const ANALYSIS_MODULES: Partial<Record<Analysis["kind"], AnalysisModule<never>>> = {
   incidence_rate: incidenceModule as AnalysisModule<never>,
@@ -27,6 +28,7 @@ export const ANALYSIS_MODULES: Partial<Record<Analysis["kind"], AnalysisModule<n
   cumulative_incidence: cumulativeIncidenceModule as AnalysisModule<never>,
   standardization: standardizationModule as AnalysisModule<never>,
   statistical_engine: statisticalEngineModule as AnalysisModule<never>,
+  calendar_trend: calendarTrendModule as AnalysisModule<never>,
 };
 
 /* Readiness (spec/types.ts EMITTABLE_ANALYSIS_KINDS) blocks enabled analyses

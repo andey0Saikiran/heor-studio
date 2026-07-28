@@ -545,6 +545,72 @@ export async function verifyGoldA(): Promise<VerificationResult> {
     eq("DSR band 45-54: weight = 134,834", Number(dsr4554?.weight), 134_834);
     eq("DSR band 45-54: person-days = 600 (matches the incidence stratum)", Number(dsr4554?.person_days), 600);
 
+    /* ---- calendar trend (executed vs hand-computed Cochran-Armitage) ----
+     * Per-bucket: 2018 = 2/10, 2019 = 3/10, 2020 = 0/10 (see EXPECTED).
+     * The statistic is what makes this worth executing rather than merely
+     * fingerprinting: with scores 0,1,2 the algebra collapses to clean
+     * fractions, T = -2 and Var = 25/9, so z = -1.2 EXACTLY — a value a
+     * floating-point slip or a mis-scored bucket cannot land on by accident. */
+    const ct = EXPECTED.calendarTrend;
+    eq(
+      `calendar-trend rows = ${ct.rowCount} (3 year buckets + the Trend row)`,
+      await scalar<number>(db, "SELECT count(*)::int FROM tz_study_trend"),
+      ct.rowCount,
+    );
+    const trendRow = async (bucket: string) =>
+      (
+        await rows<{ patients: number; denominator: number; prevalence: number; prevalence_pct: number; ci_low: number; ci_high: number; trend_z: number | null; trend_p: number | null; trend_method: string | null; trend_p_method: string | null }>(
+          db,
+          `SELECT patients, denominator, prevalence::float8, prevalence_pct::float8, ci_low::float8, ci_high::float8,
+                  trend_z::float8, trend_p::float8, trend_method, trend_p_method
+             FROM tz_study_trend WHERE bucket = '${bucket}'`,
+        )
+      )[0];
+    for (const [bucket, want] of Object.entries(ct.buckets)) {
+      const r = await trendRow(bucket);
+      const tag = `trend bucket ${bucket}`;
+      if (!r) {
+        checks.push({ name: tag, status: "fail", detail: "row missing" });
+        continue;
+      }
+      eq(`${tag}: cases = ${want.patients}`, Number(r.patients), want.patients);
+      eq(`${tag}: denominator = ${want.denominator}`, Number(r.denominator), want.denominator);
+      approx(`${tag}: prevalence = ${want.prevalence}`, Number(r.prevalence), want.prevalence, 0.00001);
+      approx(`${tag}: Wilson CI low = ${want.ci[0]}`, Number(r.ci_low), want.ci[0], 0.00001);
+      approx(`${tag}: Wilson CI high = ${want.ci[1]}`, Number(r.ci_high), want.ci[1], 0.00001);
+      checks.push({
+        name: `${tag}: carries no trend statistic (only the Trend row does)`,
+        status: r.trend_z === null ? "pass" : "fail",
+        detail: r.trend_z === null ? "trend_z NULL on bucket rows" : `bucket row has trend_z = ${r.trend_z}`,
+      });
+    }
+    const tr = await trendRow("Trend");
+    if (!tr) {
+      checks.push({ name: "trend: Trend row exists", status: "fail", detail: "no row with bucket = 'Trend'" });
+    } else {
+      eq("trend: person-bucket cases = 5 (2+3+0)", Number(tr.patients), ct.trend.patients);
+      eq("trend: person-bucket denominator = 30 (10 per year)", Number(tr.denominator), ct.trend.denominator);
+      approx("trend: pooled proportion = 1/6", Number(tr.prevalence), ct.trend.prevalence, 0.00001);
+      approx("trend: Cochran-Armitage z = -1.2 EXACTLY (hand-computed)", Number(tr.trend_z), ct.trend.z, 0.00001);
+      checks.push({
+        name: "trend: the statistic is labeled with the test actually computed",
+        status: tr.trend_method === ct.trend.method ? "pass" : "fail",
+        detail: `expected ${ct.trend.method}, got ${tr.trend_method ?? "NULL"}`,
+      });
+      /* SAS-PRIMARY, asserted by EXECUTION rather than by reading the text: the
+       * p-value column must arrive NULL out of a real Postgres run, while the
+       * label beside it names what produces it. A SQL twin that quietly filled
+       * this in with a normal approximation would fail here. */
+      checks.push({
+        name: "trend: p-value is NULL in executed SQL, with its source labeled",
+        status: tr.trend_p === null && tr.trend_p_method === "sas_normal_cdf" ? "pass" : "fail",
+        detail:
+          tr.trend_p === null
+            ? `trend_p NULL, method label "${tr.trend_p_method}" (SAS PROBNORM computes it)`
+            : `SQL populated trend_p = ${tr.trend_p} — the SAS-primary contract is broken`,
+      });
+    }
+
     invariants.push(...(await runInvariants(db, "tz_study")));
   }
 

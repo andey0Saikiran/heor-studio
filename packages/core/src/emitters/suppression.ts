@@ -117,6 +117,23 @@ export const SUPPRESSION_SHAPES: Record<string, SuppressionShape> = {
     keepCols: ["weight", "ci_method", "covered_weight_pct"],
     tieBreakCol: "stratum",
   },
+  calendar_trend: {
+    /* Buckets do not partition the cohort - a member enrolled across several
+     * buckets is counted once in each - but the Trend row IS the sum of them,
+     * so a lone masked bucket is recoverable by subtraction exactly as it would
+     * be from a true total. Complementary suppression therefore applies, with
+     * the Trend row in the same group as the buckets it aggregates.
+     *
+     * trend_z masks with its row because the statistic is computed FROM every
+     * bucket count, including the masked ones. */
+    labelCols: ["measure", "bucket"],
+    groupCols: ["measure"],
+    countCol: "patients",
+    denomCol: "denominator",
+    maskCols: ["patients", "denominator", "prevalence", "prevalence_pct", "ci_low", "ci_high", "trend_z", "trend_p"],
+    keepCols: ["bucket_ord", "b_start", "b_end", "is_partial", "ci_method", "trend_method", "trend_p_method"],
+    tieBreakCol: "bucket",
+  },
   table1: {
     labelCols: ["ord", "characteristic", "category"],
     groupCols: ["characteristic"],

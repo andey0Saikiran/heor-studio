@@ -66,11 +66,34 @@ export const EXACT_POISSON_CI: SasPrimaryColumn[] = [
   },
 ];
 
+/**
+ * Two-sided p-value from the standard normal CDF.
+ *
+ * The companion case to the exact Poisson interval, and the one that shows why
+ * this contract is drawn at the COLUMN and not at the statistic: the
+ * Cochran-Armitage trend test splits cleanly in two. Its statistic z is a ratio
+ * of sums over the bucket table — closed form, so both twins compute it and the
+ * harness executes it against hand-derived truth. Only the tail probability
+ * needs Phi, which warehouse SQL has no function for.
+ *
+ * Declaring the whole test SAS-primary would have been the easy call and would
+ * have put a perfectly verifiable number permanently beyond verification.
+ */
+export const NORMAL_CDF_P_VALUE: SasPrimaryColumn[] = [
+  {
+    column: "trend_p",
+    methodLabel: "sas_normal_cdf",
+    why: "the two-sided p-value inverts the standard normal CDF (SAS PROBNORM); warehouse SQL has no such function. The trend statistic z beside it IS computed in both twins",
+    sasToken: "probnorm(",
+  },
+];
+
 /** Registry: PARITY stamp kind -> the SAS-primary columns it may emit.
  *  Emission is still conditional on the spec asking for them; this declares
  *  what is POSSIBLE so the verification layer knows what to enforce. */
 export const SAS_PRIMARY_BY_KIND: Record<string, SasPrimaryColumn[]> = {
   incidence: EXACT_POISSON_CI,
+  calendar_trend: NORMAL_CDF_P_VALUE,
 };
 
 /** SQL side: NULL columns + the method label, with the reason stated inline. */

@@ -219,6 +219,27 @@ function sqlFingerprint(kind: string, raw: string): Fingerprint {
       put(fp, "reference_arm", grab(sql, [/IN \('([^']+)',/i]));
       break;
     }
+    case "calendar_trend": {
+      /* The buckets ARE the analysis: a boundary off by a day silently moves
+       * events between buckets and still yields a complete trend table. Every
+       * literal boundary is scraped IN ORDER, from the bucket CTE's own rows. */
+      put(fp, "bucket_bounds", (sql.match(/DATE\s*'(\d{4}-\d{2}-\d{2})'/g) ?? []).map((m) => m.slice(6, -1)).join(","));
+      // Cochran-Armitage scores, in emission order (the bucket_ord literals).
+      put(fp, "bucket_scores", (sql.match(/SELECT\s+(\d+)\s*(?:AS bucket_ord|,\s*')/g) ?? []).map((m) => (/(\d+)/.exec(m) ?? [])[1]).join(","));
+      // The three CA sums must be over the scores, not over anything else.
+      put(fp, "ca_sum_wr", /SUM\(bucket_ord \* patients\)/i.test(sql) ? "yes" : "no");
+      put(fp, "ca_sum_wn", /SUM\(bucket_ord \* denominator\)/i.test(sql) ? "yes" : "no");
+      put(fp, "ca_sum_w2n", /SUM\(bucket_ord \* bucket_ord \* denominator\)/i.test(sql) ? "yes" : "no");
+      // z is computed in BOTH twins, so this key IS cross-compared.
+      put(fp, "ca_z_is_t_over_sd", /t_stat\s*\/\s*NULLIF\(\s*SQRT\(var_t\)/i.test(sql) ? "yes" : "no");
+      /* SAS-PRIMARY contract, SQL side (language-local): the p-value column must
+       * be present and NULL. A SQL twin that computes a plausible-looking
+       * p-value is worse than one that omits it — the number would be wrong and
+       * the label right. */
+      put(fp, "trend_p_null_in_sql",
+        /CAST\(NULL AS NUMERIC\),\s*\n\s*CAST\('sas_[a-z_]+' AS VARCHAR\)/i.test(sql) ? "yes" : "no");
+      break;
+    }
     case "period_prevalence": {
       const between = /event_date\s+BETWEEN\s+DATE\s*'(\d{4}-\d{2}-\d{2})'\s+AND\s+DATE\s*'(\d{4}-\d{2}-\d{2})'/i.exec(sql);
       put(fp, "period_start", between?.[1]);
@@ -299,6 +320,21 @@ function sasFingerprint(kind: string, rawSas: string, setup: string): Fingerprin
       put(fp, "pooled_halved_denominator", /\/\s*2\s*\)/.test(sas) ? "yes" : "no");
       put(fp, "imbalance_threshold", grab(sas, [/abs\(smd\)\s*>\s*([\d.]+)/i]));
       put(fp, "reference_arm", grab(sas, [/in \('([^']+)',/i]));
+      break;
+    }
+    case "calendar_trend": {
+      // Same values, scraped from the SAS twin's OWN bucket data step.
+      put(fp, "bucket_bounds", (sas.match(/'\d{2}[A-Z]{3}\d{4}'d/g) ?? []).map((m) => sasDateToIso(m) ?? m).join(","));
+      put(fp, "bucket_scores", (sas.match(/bucket_ord\s*=\s*(\d+)\s*;\s*bucket\s*=/g) ?? []).map((m) => (/(\d+)/.exec(m) ?? [])[1]).join(","));
+      put(fp, "ca_sum_wr", /sum\(bucket_ord \* patients\)/i.test(sas) ? "yes" : "no");
+      put(fp, "ca_sum_wn", /sum\(bucket_ord \* denominator\)/i.test(sas) ? "yes" : "no");
+      put(fp, "ca_sum_w2n", /sum\(bucket_ord \* bucket_ord \* denominator\)/i.test(sas) ? "yes" : "no");
+      put(fp, "ca_z_is_t_over_sd", /trend_z\s*=\s*round\(\s*t_stat\s*\/\s*sqrt\(var_t\)/i.test(sas) ? "yes" : "no");
+      /* SAS-PRIMARY contract, SAS side (language-local): the p-value must
+       * genuinely be COMPUTED here. That is the entire basis on which SQL is
+       * allowed to leave the column NULL — delete this and the contract becomes
+       * a column that simply does not exist anywhere. */
+      put(fp, "trend_p_computed_in_sas", /probnorm\(/i.test(sas) && /trend_p\s*=\s*round\(/i.test(sas) ? "yes" : "no");
       break;
     }
     case "period_prevalence": {
@@ -494,6 +530,23 @@ export function expectedFromStamp(kind: string, stamp: Record<string, unknown>):
       }
       break;
     }
+    case "calendar_trend": {
+      /* The stamp lists every bucket; the code must contain exactly those
+       * boundaries, in that order, plus the overall span on the Trend row.
+       * A bucket silently shifted by a day is the failure this catches. */
+      const bk = stamp.buckets as Array<{ start?: unknown; end?: unknown }> | undefined;
+      if (Array.isArray(bk) && bk.length > 0) {
+        const bounds = bk.flatMap((b) => [String(b.start), String(b.end)]);
+        exp.bucket_bounds = [...bounds, String(bk[0].start), String(bk[bk.length - 1].end)].join(",");
+      }
+      if (Array.isArray(stamp.scores)) exp.bucket_scores = (stamp.scores as number[]).join(",");
+      // The three CA sums and the z ratio are the test; none is optional.
+      exp.ca_sum_wr = "yes";
+      exp.ca_sum_wn = "yes";
+      exp.ca_sum_w2n = "yes";
+      exp.ca_z_is_t_over_sd = "yes";
+      break;
+    }
     case "period_prevalence": {
       const p = stamp.period as { start?: unknown; end?: unknown } | undefined;
       if (typeof p?.start === "string") {
@@ -553,6 +606,16 @@ const EXPECTED_CONSTANTS: Record<string, Record<"sql" | "sas", Record<string, nu
     sql: { z: 2, z2_half: 2, z2: 2, z2_quarter: 2 },
     sas: { z: 1, z2_half: 2, z2: 2, z2_quarter: 1 },
   },
+  calendar_trend: {
+    /* Per-bucket Wilson intervals, structured exactly like the prevalence
+     * modules (SQL inlines the radical in both bounds, SAS computes _rad once).
+     * The Cochran-Armitage statistic itself uses NO z constant — z is the
+     * OUTPUT here, not an input — so these counts must not grow when the trend
+     * arithmetic changes. A 1.96 appearing in the trend algebra would mean
+     * someone slipped a normal approximation in beside the statistic. */
+    sql: { z: 2, z2_half: 2, z2: 2, z2_quarter: 2 },
+    sas: { z: 1, z2_half: 2, z2: 2, z2_quarter: 1 },
+  },
   // SMD is a descriptive diagnostic with NO confidence interval, so none of the
   // z constants may appear — a stray one would mean a CI crept in unannounced.
   standardization: {
@@ -604,9 +667,60 @@ export function hasConstantProfile(kind: string): boolean {
   return EXPECTED_CONSTANTS[kind] !== undefined;
 }
 
-/** Human-readable diff of two fingerprints (empty array = identical). */
+/* ------------------------------------------------------------------ *
+ *  Language-local fingerprint keys
+ * ------------------------------------------------------------------ */
+
+/**
+ * Keys that only ONE language can produce, by design — the SAS-primary contract
+ * (emitters/sas-primary.ts) creates them in pairs: SQL asserts the column is
+ * NULL, SAS asserts it is computed. Cross-language comparison must skip them,
+ * because "present in SAS, absent in SQL" is the contract working, not drift.
+ *
+ * This was a latent defect, not a new requirement. `exact_ci_null_in_sql` and
+ * `exact_ci_computed_in_sas` already existed and would have made
+ * `diffFingerprints` report a spurious mismatch the moment a spec asked for
+ * `poisson_exact` — the gold spec uses `poisson_byar`, so neither key was ever
+ * emitted and the collision never fired.
+ *
+ * Skipping them here would weaken the check, so each is asserted SEPARATELY, in
+ * its own language, by `languageLocalChecks` — the contract is enforced more
+ * strictly than a cross-diff ever did, not less.
+ */
+export const LANGUAGE_LOCAL_KEYS: Record<string, { language: "sql" | "sas"; must: string; means: string }> = {
+  exact_ci_null_in_sql: { language: "sql", must: "yes", means: "exact Poisson limits are NULL in SQL, not approximated" },
+  exact_ci_computed_in_sas: { language: "sas", must: "yes", means: "exact Poisson limits are genuinely computed in SAS" },
+  trend_p_null_in_sql: { language: "sql", must: "yes", means: "the trend p-value is NULL in SQL, not guessed" },
+  trend_p_computed_in_sas: { language: "sas", must: "yes", means: "the trend p-value is genuinely computed in SAS" },
+};
+
+/** Assert every language-local key present in a fingerprint holds its required
+ *  value, and that it appeared in the language that is supposed to produce it. */
+export function languageLocalChecks(
+  language: "sql" | "sas",
+  fp: Fingerprint,
+): Array<{ key: string; ok: boolean; detail: string }> {
+  const out: Array<{ key: string; ok: boolean; detail: string }> = [];
+  for (const [key, rule] of Object.entries(LANGUAGE_LOCAL_KEYS)) {
+    const got = fp[key];
+    if (got === undefined) continue;
+    if (rule.language !== language) {
+      out.push({ key, ok: false, detail: `${key} was scraped from the ${language} twin, but only ${rule.language} can produce it` });
+      continue;
+    }
+    out.push({
+      key,
+      ok: got === rule.must,
+      detail: got === rule.must ? rule.means : `${key} = "${got}", must be "${rule.must}" — ${rule.means}`,
+    });
+  }
+  return out;
+}
+
+/** Human-readable diff of two fingerprints (empty array = identical).
+ *  Language-local keys are excluded — see LANGUAGE_LOCAL_KEYS. */
 export function diffFingerprints(a: Fingerprint, b: Fingerprint): string[] {
-  const keys = [...new Set([...Object.keys(a), ...Object.keys(b)])].sort();
+  const keys = [...new Set([...Object.keys(a), ...Object.keys(b)])].filter((k) => !LANGUAGE_LOCAL_KEYS[k]).sort();
   const out: string[] = [];
   for (const k of keys) {
     if (a[k] !== b[k]) out.push(`${k}: ${a[k] ?? "MISSING"} vs ${b[k] ?? "MISSING"}`);
