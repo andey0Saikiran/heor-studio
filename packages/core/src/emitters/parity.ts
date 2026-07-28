@@ -1036,6 +1036,9 @@ export interface RegressionParity {
   /** adjusted-model terms in order, exposure first */
   terms: string[];
   settingFilter: string;
+  /** "indicator" (0/1) or "count" (recurrent events). The cell algebra and the
+   *  crude closed form differ between them, so the checks must know which. */
+  responseKind: "indicator" | "count";
   /** the effect the exponentiated coefficient IS — labelling a Poisson
    *  coefficient "odds_ratio" would be a mislabeled statistic, so the label is
    *  stamped and compared */
@@ -1083,6 +1086,7 @@ export function regressionParity(
   consumed: {
     referenceLevel: string; exposedLevel: string; terms: string[]; settingFilter: string;
     effectStatistic: string; offset: { applied: string[]; dataCut: string | null } | null;
+    responseKind: "indicator" | "count";
   },
 ): RegressionParity {
   return {
@@ -1096,6 +1100,7 @@ export function regressionParity(
     exposedLevel: consumed.exposedLevel,
     terms: consumed.terms,
     settingFilter: consumed.settingFilter,
+    responseKind: consumed.responseKind,
     effectStatistic: consumed.effectStatistic,
     offset: consumed.offset,
     crudeEffect: "closed_form_2x2",

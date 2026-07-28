@@ -578,6 +578,42 @@ export const EXPECTED = {
     logRr: -0.99648,
     adjustedTerms: ["Index drug", "Age at index", "Sex", "Comorbidity index"],
   },
+  /* Negative binomial on recurrent counts, hand-derived.
+   *
+   * Follow-up does NOT stop at the first event, so every at-risk member is
+   * observed for the full 365 days: 8 x 365 = 2920 person-days, 1460 per arm.
+   * That is a different denominator from the Poisson analysis (which censors at
+   * the outcome and gives 2425) — and the difference is exactly the point: a
+   * recurrent-event model must keep observing.
+   *
+   *                events   person-days
+   *   DRUG_Y (exposed)   1          1460
+   *   DRUG_X (reference) 2          1460
+   *
+   *   rate_Y = 1 x 1000 x 365.25 / 1460 = 250.17123 per 1000 PY
+   *   rate_X = 2 x 1000 x 365.25 / 1460 = 500.34247 per 1000 PY
+   *   RR     = (1/1460) / (2/1460) = 0.5 EXACTLY  (equal person-time cancels)
+   *   ln(RR) = -0.69315
+   *   SE     = sqrt(1/1 + 1/2) = sqrt(1.5) = 1.22474
+   *   95% CI = exp(-0.69315 +/- 1.96*1.22474) = (0.04534, 5.51434)
+   *   rate difference = -250.17123 per 1000 PY
+   *
+   * max events per subject = 1, so dispersion is NOT identified — asserted, so
+   * the day Gold Case B adds recurrence this check changes and says so. */
+  regressionNegBin: {
+    rowCount: 15, // 8 design + 2 crude + 1 diagnostic + 4 adjusted
+    personDaysPerArm: 1460,
+    personDaysTotal: 2920,
+    design: {
+      exposed: { n: 4, events: 1, ratePer1000py: 250.17123 },
+      reference: { n: 4, events: 2, ratePer1000py: 500.34247 },
+    },
+    rateRatio: { estimate: 0.5, ciLow: 0.04534, ciHigh: 5.51434, seLog: 1.22474 },
+    rateDifference: -250.17123,
+    logRr: -0.6931472,
+    maxEventsPerSubject: 1,
+    dispersionVerdict: "DEGENERATE",
+  },
   /* SMD balance, DRUG_X (reference) vs DRUG_Y, over the 10-patient cohort.
    *   ages X = 40,45,50,55,60 -> mean 50, sample variance 62.5
    *   ages Y = 45,50,55,60,65 -> mean 55, sample variance 62.5
@@ -872,6 +908,31 @@ export const GOLD_A_SPEC: StudySpec = {
       washout: { start: -365, end: 0, includesIndex: true },
       horizonDays: 365,
       personTimeRule: { start: "index", censorAt: ["outcome", "disenrollment", "study_end", "max_followup"], maxFollowupDays: 365 },
+      groupVarId: "g_arm",
+      covariateIds: ["b_age", "b_sex", "b_cci"],
+    },
+    /* NEGATIVE BINOMIAL on a RECURRENT-EVENT count.
+     *
+     * Two things change from the Poisson analysis: the response is a COUNT of
+     * qualifying events (recurrence "all_events"), and follow-up no longer stops
+     * at the first event — counting every event while censoring at the first is
+     * incoherent, so "outcome" is out of censorAt. Every at-risk member is
+     * therefore observed for the full 365 days.
+     *
+     * On THIS fixture no subject has more than one event, so the response is
+     * Bernoulli and the dispersion parameter is NOT identified. That is not a
+     * defect of the model, it is a property of the data — and the emitted
+     * program says so in a diagnostic row rather than printing a dispersion
+     * estimate nobody could trust. Gold Case B (recurrent events) is what would
+     * exercise dispersion for real. */
+    {
+      id: "a_glm_nb", label: "Recurrent AE rate, negative binomial", kind: "regression", enabled: true,
+      family: "negative_binomial",
+      outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "outpatient", diagnosisPosition: "any" },
+      washout: { start: -365, end: 0, includesIndex: true },
+      horizonDays: 365,
+      recurrence: "all_events",
+      personTimeRule: { start: "index", censorAt: ["disenrollment", "study_end", "max_followup"], maxFollowupDays: 365 },
       groupVarId: "g_arm",
       covariateIds: ["b_age", "b_sex", "b_cci"],
     },

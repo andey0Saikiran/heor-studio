@@ -58,6 +58,7 @@ const MEASURE = "regression";
 const ADJ_METHOD_BY_FAMILY: Record<string, string> = {
   logistic: "sas_proc_logistic",
   poisson: "sas_proc_genmod",
+  negative_binomial: "sas_proc_genmod_negbin",
 };
 const adjMethod = (family: string) => ADJ_METHOD_BY_FAMILY[family] ?? "sas_primary";
 /** The effect a family's exponentiated coefficient IS. Labelling a Poisson
@@ -66,6 +67,7 @@ const adjMethod = (family: string) => ADJ_METHOD_BY_FAMILY[family] ?? "sas_prima
 const ADJ_STATISTIC_BY_FAMILY: Record<string, string> = {
   logistic: "odds_ratio",
   poisson: "rate_ratio",
+  negative_binomial: "rate_ratio",
 };
 const adjStatistic = (family: string) => ADJ_STATISTIC_BY_FAMILY[family] ?? "effect";
 
@@ -111,7 +113,8 @@ function sqlRegression(ctx: SqlCtx, an: RegressionAnalysis, suffix: string): Sql
   const wc = windowConds(an.washout, "a.event_date", "c.index_date", d);
   const washoutPred = wc.length > 0 ? wc.join("\n      AND ") : "TRUE";
   const horizonEnd = d.offset("s.index_date", an.horizonDays);
-  const isCount = an.family === "poisson";
+  const isCount = an.family === "poisson" || an.family === "negative_binomial";
+  const isRecurrent = (an.recurrence ?? "first_only") === "all_events";
   const censor = an.personTimeRule ? censorPlan(spec, an.personTimeRule) : null;
   const censorFinal = censor?.atOutcome
     ? `LEAST(COALESCE(fu_date, DATE '9999-12-31'), admin_censor)`
@@ -126,6 +129,7 @@ function sqlRegression(ctx: SqlCtx, an: RegressionAnalysis, suffix: string): Sql
         referenceLevel: p.referenceLevel, exposedLevel: p.exposedLevel, terms: modelTerms,
         settingFilter: setting.stamped, effectStatistic: adjStatistic(an.family),
         offset: censor ? { applied: censor.applied, dataCut: censor.dataCut } : null,
+        responseKind: isRecurrent ? "count" : "indicator",
       }),
     )}`,
   );
@@ -195,11 +199,29 @@ function sqlRegression(ctx: SqlCtx, an: RegressionAnalysis, suffix: string): Sql
     L.push(`  FROM ptc0`);
     L.push(`),`);
   }
+  if (isRecurrent) {
+    /* The RESPONSE is a count, not an indicator. Distinct qualifying dates, so a
+     * stay billed on several lines is one event — the same grain the events
+     * spine already enforces. */
+    L.push(`ev_n AS (   -- recurrent events per subject inside the horizon`);
+    L.push(`  SELECT c.enrolid, COUNT(DISTINCT a.event_date) AS n_events`);
+    L.push(`  FROM atrisk c`);
+    L.push(`  JOIN ae a ON a.enrolid = c.enrolid`);
+    L.push(`   AND a.event_date > c.index_date`);
+    L.push(`   AND a.event_date <= ${d.offset("c.index_date", an.horizonDays)}`);
+    L.push(`  GROUP BY c.enrolid`);
+    L.push(`),`);
+  }
   L.push(`subj AS (   -- the ANALYTIC DATASET: one row per at-risk subject`);
   L.push(`  SELECT s.enrolid,`);
   L.push(`         CASE WHEN s.arm = '${q(p.exposedLevel)}' THEN 1 ELSE 0 END AS exposed,`);
-  L.push(`         -- incident event INSIDE the horizon; a subject counts once`);
-  L.push(`         CASE WHEN f.fu_date IS NOT NULL AND f.fu_date <= ${horizonEnd} THEN 1 ELSE 0 END AS y,`);
+  if (isRecurrent) {
+    L.push(`         -- COUNT of qualifying events in the horizon (recurrence: all_events)`);
+    L.push(`         COALESCE(en.n_events, 0) AS y,`);
+  } else {
+    L.push(`         -- incident event INSIDE the horizon; a subject counts once`);
+    L.push(`         CASE WHEN f.fu_date IS NOT NULL AND f.fu_date <= ${horizonEnd} THEN 1 ELSE 0 END AS y,`);
+  }
   L.push(`         CAST(${d.year("s.index_date")} - dm.dobyr AS NUMERIC) AS age_val,`);
   L.push(`         CASE WHEN dm.sex = '1' THEN 1.0 ELSE 0.0 END AS sex_male${cciCov && cciAn ? `,` : ``}`);
   if (cciCov && cciAn) L.push(`         CAST(COALESCE(cs.score, 0) AS NUMERIC) AS cci_val${isCount ? `,` : ``}`);
@@ -216,13 +238,24 @@ function sqlRegression(ctx: SqlCtx, an: RegressionAnalysis, suffix: string): Sql
   L.push(`  LEFT JOIN demo1 dm ON dm.enrolid = s.enrolid`);
   if (cciCov && cciAn) L.push(`  LEFT JOIN cci_per_pt cs ON cs.enrolid = s.enrolid`);
   if (isCount) L.push(`  LEFT JOIN ptc pt ON pt.enrolid = s.enrolid`);
+  if (isRecurrent) L.push(`  LEFT JOIN ev_n en ON en.enrolid = s.enrolid`);
   L.push(`  WHERE s.arm IN ('${q(p.referenceLevel)}', '${q(p.exposedLevel)}')`);
   L.push(`),`);
   L.push(`cells AS (   -- the table the closed form is computed from`);
-  L.push(`  SELECT SUM(CASE WHEN exposed = 1 AND y = 1 THEN 1 ELSE 0 END) AS a_ee,`);
-  L.push(`         SUM(CASE WHEN exposed = 1 AND y = 0 THEN 1 ELSE 0 END) AS b_en,`);
-  L.push(`         SUM(CASE WHEN exposed = 0 AND y = 1 THEN 1 ELSE 0 END) AS c_ue,`);
-  L.push(`         SUM(CASE WHEN exposed = 0 AND y = 0 THEN 1 ELSE 0 END) AS d_un${isCount ? `,` : ``}`);
+  if (isRecurrent) {
+    // a count response has no "non-event" cell; b/d carry SUBJECT counts so the
+    // design rows can still report arm sizes
+    L.push(`  SELECT SUM(CASE WHEN exposed = 1 THEN y ELSE 0 END) AS a_ee,`);
+    L.push(`         SUM(CASE WHEN exposed = 1 THEN 1 ELSE 0 END) AS b_en,`);
+    L.push(`         SUM(CASE WHEN exposed = 0 THEN y ELSE 0 END) AS c_ue,`);
+    L.push(`         SUM(CASE WHEN exposed = 0 THEN 1 ELSE 0 END) AS d_un,`);
+    L.push(`         MAX(y) AS max_events,`);
+  } else {
+    L.push(`  SELECT SUM(CASE WHEN exposed = 1 AND y = 1 THEN 1 ELSE 0 END) AS a_ee,`);
+    L.push(`         SUM(CASE WHEN exposed = 1 AND y = 0 THEN 1 ELSE 0 END) AS b_en,`);
+    L.push(`         SUM(CASE WHEN exposed = 0 AND y = 1 THEN 1 ELSE 0 END) AS c_ue,`);
+    L.push(`         SUM(CASE WHEN exposed = 0 AND y = 0 THEN 1 ELSE 0 END) AS d_un${isCount ? `,` : ``}`);
+  }
   if (isCount) {
     L.push(`         SUM(CASE WHEN exposed = 1 THEN person_days ELSE 0 END) AS pt_exp,`);
     L.push(`         SUM(CASE WHEN exposed = 0 THEN person_days ELSE 0 END) AS pt_unexp`);
@@ -235,7 +268,10 @@ function sqlRegression(ctx: SqlCtx, an: RegressionAnalysis, suffix: string): Sql
    * chose. */
   L.push(`eff AS (`);
   L.push(`  SELECT a_ee, b_en, c_ue, d_un,`);
-  L.push(`         (a_ee + b_en) AS n_exp, (c_ue + d_un) AS n_unexp,${isCount ? `` : ``}`);
+  L.push(isRecurrent
+    ? `         b_en AS n_exp, d_un AS n_unexp,`
+    : `         (a_ee + b_en) AS n_exp, (c_ue + d_un) AS n_unexp,`);
+  if (isRecurrent) L.push(`         max_events,`);
   if (isCount) {
     L.push(`         pt_exp, pt_unexp,`);
     /* The Poisson closed form: a ratio of RATES, not of odds. Its standard
@@ -311,6 +347,19 @@ function sqlRegression(ctx: SqlCtx, an: RegressionAnalysis, suffix: string): Sql
       d.roundN(`a_ee * 1.0 / NULLIF(n_exp, 0) - c_ue * 1.0 / NULLIF(n_unexp, 0)`, 5),
       `CAST(NULL AS NUMERIC)`, `CAST(NULL AS NUMERIC)`, `CAST(NULL AS NUMERIC)`));
   }
+  /* NB DISPERSION DEGENERACY, reported as data rather than left to the reader.
+   * With no subject contributing more than one event the response is Bernoulli,
+   * whose variance is always BELOW its mean — the dispersion parameter is not
+   * identified and the fit collapses to Poisson. A model that printed a
+   * dispersion estimate anyway would look like it had measured something. */
+  if (an.family === "negative_binomial") {
+    L.push(`  UNION ALL`);
+    L.push(
+      `  SELECT 'diagnostic', 'overdispersion', 'max_events_per_subject', 15,` +
+        ` CAST(max_events AS NUMERIC), CAST(NULL AS NUMERIC), CAST(NULL AS NUMERIC), CAST(NULL AS NUMERIC),` +
+        ` CAST(CASE WHEN max_events <= 1 THEN 'DEGENERATE: no subject has >1 event, so the dispersion parameter is NOT identified and negative binomial reduces to Poisson' ELSE 'dispersion is estimable' END AS VARCHAR) FROM eff`,
+    );
+  }
   // 3. the adjusted model — SAS-primary, declared and NULL
   modelTerms.forEach((t, i) => {
     L.push(`  UNION ALL`);
@@ -362,7 +411,9 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
   const cciCov = p.covariates.find((c) => c.axis === "comorbidity_index");
   const cciAn = indexAnalysisFor(spec, cciCov?.analysisId);
   const cciScore = cciCov && cciAn ? comorbidityScoreSasSteps(ctx, { an: cciAn, num, cohT, evOf: ctx.evOf }) : null;
-  const isCountS = an.family === "poisson";
+  const isCountS = an.family === "poisson" || an.family === "negative_binomial";
+  const isRecurrentS = (an.recurrence ?? "first_only") === "all_events";
+  const nbDist = an.family === "negative_binomial" ? "negbin" : "poisson";
   const censorS = an.personTimeRule ? censorPlan(spec, an.personTimeRule) : null;
   const YS = ctx.daysPerYearLit;
   const indexListIdS = spec.indexEvent.codeListId;
@@ -386,6 +437,7 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
         referenceLevel: p.referenceLevel, exposedLevel: p.exposedLevel, terms: modelTerms,
         settingFilter: setting.stamped, effectStatistic: adjStatistic(an.family),
         offset: censorS ? { applied: censorS.applied, dataCut: censorS.dataCut } : null,
+        responseKind: isRecurrentS ? "count" : "indicator",
       }),
     )} */`,
     ``,
@@ -455,6 +507,23 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
     `  group by a.enrolid;`,
     `quit;`,
     ``,
+    ...(isRecurrentS
+      ? [
+          `/*-------------------- recurrent events per subject --------------------------*/`,
+          `proc sql;`,
+          `  create table work._${num}_evn as`,
+          `  select a.enrolid, count(distinct e.svcdate) as n_events`,
+          `  from work._${num}_atrisk as a`,
+          `  inner join ${evT} as e`,
+          `    on  e.enrolid = a.enrolid`,
+          `    and e.svcdate >  a.index_date`,
+          `    and e.svcdate <= a.index_date + ${an.horizonDays}`,
+          ...(sasSettingCond ? [`    ${sasSettingCond}`] : []),
+          `  group by a.enrolid;`,
+          `quit;`,
+          ``,
+        ]
+      : []),
     ...(cciScore ? [...cciScore.lines, ...comorbidityScoreSasScore(num, cohT)] : []),
     ...(isCountS && censorS
       ? [
@@ -491,7 +560,9 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
     `  create table work._${num}_subj as`,
     `  select a.enrolid,`,
     `         (case when a.arm = '${sq(p.exposedLevel)}' then 1 else 0 end) as exposed,`,
-    `         (case when f.enrolid is not null then 1 else 0 end) as y,`,
+    ...(isRecurrentS
+      ? [`         coalesce(n.n_events, 0) as y,   /* COUNT (recurrence: all_events) */`]
+      : [`         (case when f.enrolid is not null then 1 else 0 end) as y,`]),
     `         (year(a.index_date) - b.dobyr) as age_val,`,
     `         (case when b.sex = '1' then 1 else 0 end) as sex_male${cciScore ? "," : ""}`,
     ...(cciScore ? [`         coalesce(s.score, 0) as cci_val${isCountS ? "," : ""}`] : []),
@@ -503,6 +574,7 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
     `    on b.enrolid = a.enrolid`,
     ...(cciScore ? [`  left join ${cciScore.scoreTable} as s on s.enrolid = a.enrolid`] : []),
     ...(isCountS ? [`  left join work._${num}_pt as pt on pt.enrolid = a.enrolid`] : []),
+    ...(isRecurrentS ? [`  left join work._${num}_evn as n on n.enrolid = a.enrolid`] : []),
     `  ;`,
     `quit;`,
     ``,
@@ -513,10 +585,23 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
     `----------------------------------------------------------------------------*/`,
     `proc sql;`,
     `  create table work._${num}_cells as`,
-    `  select sum(case when exposed = 1 and y = 1 then 1 else 0 end) as a_ee,`,
-    `         sum(case when exposed = 1 and y = 0 then 1 else 0 end) as b_en,`,
-    `         sum(case when exposed = 0 and y = 1 then 1 else 0 end) as c_ue,`,
-    `         sum(case when exposed = 0 and y = 0 then 1 else 0 end) as d_un${isCountS ? "," : ""}`,
+    ...(isRecurrentS
+      ? [
+          `  /* a COUNT response has no "non-event" cell: a_ee sums counts, and`,
+          `     b_en / d_un carry SUBJECT counts so the design rows still report`,
+          `     arm sizes. */`,
+          `  select sum(case when exposed = 1 then y else 0 end) as a_ee,`,
+          `         sum(case when exposed = 1 then 1 else 0 end) as b_en,`,
+          `         sum(case when exposed = 0 then y else 0 end) as c_ue,`,
+          `         sum(case when exposed = 0 then 1 else 0 end) as d_un,`,
+          `         max(y) as max_events,`,
+        ]
+      : [
+          `  select sum(case when exposed = 1 and y = 1 then 1 else 0 end) as a_ee,`,
+          `         sum(case when exposed = 1 and y = 0 then 1 else 0 end) as b_en,`,
+          `         sum(case when exposed = 0 and y = 1 then 1 else 0 end) as c_ue,`,
+          `         sum(case when exposed = 0 and y = 0 then 1 else 0 end) as d_un${isCountS ? "," : ""}`,
+        ]),
     ...(isCountS
       ? [
           `         sum(case when exposed = 1 then person_days else 0 end) as pt_exp,`,
@@ -528,8 +613,9 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
     ``,
     `data work._${num}_eff;`,
     `  set work._${num}_cells;`,
-    `  n_exp   = a_ee + b_en;`,
-    `  n_unexp = c_ue + d_un;`,
+    ...(isRecurrentS
+      ? [`  n_exp   = b_en;`, `  n_unexp = d_un;`]
+      : [`  n_exp   = a_ee + b_en;`, `  n_unexp = c_ue + d_un;`]),
     ...(isCountS
       ? [
           `  /* the Poisson closed form: a ratio of RATES. Person-time enters the`,
@@ -569,7 +655,7 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
           ``,
           `ods output ParameterEstimates = work._${num}_anchor_pe;`,
           `proc genmod data=work._${num}_subj;`,
-          `  model y = exposed / dist=poisson link=log offset=log_pt;`,
+          `  model y = exposed / dist=${nbDist} link=log offset=log_pt;`,
           `run;`,
         ]
       : [
@@ -603,7 +689,7 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
       ? [
           `ods output ParameterEstimates = work._${num}_adj_pe;`,
           `proc genmod data=work._${num}_subj;`,
-          `  model y = exposed${p.covariates.length > 0 ? " " + p.covariates.map(sasVar).join(" ") : ""} / dist=poisson link=log offset=log_pt;`,
+          `  model y = exposed${p.covariates.length > 0 ? " " + p.covariates.map(sasVar).join(" ") : ""} / dist=${nbDist} link=log offset=log_pt;`,
           `run;`,
         ]
       : [
@@ -682,7 +768,21 @@ function sasRegression(ctx: SasCtx, an: RegressionAnalysis, num: string, suffix:
           `    else estimate = .;`,
           `  output;`,
         ]),
-    `  /* adjusted - the estimates PROC LOGISTIC above produced */`,
+    ...(an.family === "negative_binomial"
+      ? [
+          `  /* NB DISPERSION DEGENERACY, reported as data. With no subject above one`,
+          `     event the response is Bernoulli, whose variance is always BELOW its`,
+          `     mean: the dispersion parameter is not identified and the fit reduces`,
+          `     to Poisson. Printing a dispersion estimate anyway would look like a`,
+          `     measurement. */`,
+          `  component='diagnostic'; term='overdispersion'; statistic='max_events_per_subject'; ord=15;`,
+          `  estimate = max_events; ci_low=.; ci_high=.; se_log=.;`,
+          `  if max_events <= 1 then method = 'DEGENERATE: dispersion NOT identified';`,
+          `  else method = 'dispersion is estimable';`,
+          `  output;`,
+        ]
+      : []),
+    `  /* adjusted - the estimates the model above produced */`,
     `  estimate=.; ci_low=.; ci_high=.; se_log=.;`,
     `  component='adjusted'; statistic='${adjStatistic(an.family)}'; method="${adjMethod(an.family)}";`,
     ...modelTerms.map((t, i) => `  term="${sq(t)}"; ord=${20 + i}; output;`),

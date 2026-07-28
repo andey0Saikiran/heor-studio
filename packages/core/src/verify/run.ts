@@ -895,6 +895,68 @@ export async function verifyGoldA(): Promise<VerificationResult> {
       detail: `${adjP.length} terms, statistic "${adjP[0]?.statistic}", method "${adjP[0]?.method}", all NULL in SQL`,
     });
 
+    /* ---- NEGATIVE BINOMIAL on a recurrent-event count ----
+     * The response is a COUNT, and follow-up no longer stops at the first event
+     * — counting every event while censoring at the first is incoherent. That
+     * makes the denominator 8 x 365 = 2920, DIFFERENT from the Poisson model's
+     * 2425, and the difference is the methodological point rather than a bug. */
+    const rn = EXPECTED.regressionNegBin;
+    const NB_T = "tz_study_glm_a_glm_nb";
+    eq(
+      `negative-binomial rows = ${rn.rowCount} (8 design + 2 crude + 1 diagnostic + 4 adjusted)`,
+      await scalar<number>(db, `SELECT count(*)::int FROM ${NB_T}`),
+      rn.rowCount,
+    );
+    const nbRow = async (component: string, term: string, statistic: string) =>
+      (
+        await rows<{ estimate: number | null; ci_low: number | null; ci_high: number | null; se_log: number | null; method: string }>(
+          db,
+          `SELECT estimate::float8, ci_low::float8, ci_high::float8, se_log::float8, method
+             FROM ${NB_T} WHERE component = '${component}' AND term = '${term}' AND statistic = '${statistic}'`,
+        )
+      )[0];
+    for (const [arm, want] of [["DRUG_Y", rn.design.exposed], ["DRUG_X", rn.design.reference]] as const) {
+      eq(`negbin design ${arm}: subjects = ${want.n}`, Number((await nbRow("design", arm, "n"))?.estimate), want.n);
+      eq(`negbin design ${arm}: EVENT COUNT = ${want.events}`, Number((await nbRow("design", arm, "events"))?.estimate), want.events);
+      eq(`negbin design ${arm}: person-days = ${rn.personDaysPerArm} (full follow-up, no censoring at outcome)`,
+        Number((await nbRow("design", arm, "person_days"))?.estimate), rn.personDaysPerArm);
+      approx(`negbin design ${arm}: rate = ${want.ratePer1000py}/1000PY`, Number((await nbRow("design", arm, "rate_per_1000py"))?.estimate), want.ratePer1000py, 0.00001);
+    }
+    /* The denominator MUST differ from the Poisson model's. If a change ever
+     * made them agree, follow-up stopped at the first event and later events
+     * became uncountable. */
+    checks.push({
+      name: "negbin: recurrent follow-up runs to the admin censor (2920 person-days, NOT the 2425 of a first-event model)",
+      status:
+        Number((await nbRow("design", "DRUG_Y", "person_days"))?.estimate) +
+          Number((await nbRow("design", "DRUG_X", "person_days"))?.estimate) === rn.personDaysTotal
+          ? "pass" : "fail",
+      detail: `1460 + 1460 = ${rn.personDaysTotal} = 8 at-risk x 365 days; the first-event models pin ${EXPECTED.personDays}`,
+    });
+    const nbRR = await nbRow("crude", "Index drug", "rate_ratio");
+    approx("negbin crude RR = 0.5 EXACTLY (equal person-time cancels)", Number(nbRR?.estimate), rn.rateRatio.estimate, 0.00001);
+    approx(`negbin RR CI low = ${rn.rateRatio.ciLow}`, Number(nbRR?.ci_low), rn.rateRatio.ciLow, 0.00001);
+    approx(`negbin RR CI high = ${rn.rateRatio.ciHigh}`, Number(nbRR?.ci_high), rn.rateRatio.ciHigh, 0.00001);
+    approx("negbin SE(log RR) = sqrt(1.5)", Number(nbRR?.se_log), rn.rateRatio.seLog, 0.00001);
+    approx("negbin rate difference = -250.17123/1000PY", Number((await nbRow("crude", "Index drug", "rate_difference_per_1000py"))?.estimate), rn.rateDifference, 0.00001);
+    checks.push({
+      name: "negbin: the saturated anchor value is ln(0.5) — the NB point estimate is anchored even though its dispersion is not",
+      status: Math.abs(Math.log(Number(nbRR?.estimate)) - rn.logRr) < 0.0001 ? "pass" : "fail",
+      detail: `ln(${nbRR?.estimate}) = ${Math.log(Number(nbRR?.estimate)).toFixed(7)}, expected ${rn.logRr}`,
+    });
+    /* THE HONEST ROW. On this fixture no subject exceeds one event, so the
+     * response is Bernoulli and the dispersion parameter is not identified.
+     * The program reports that rather than printing a dispersion estimate.
+     * When Gold Case B adds real recurrence this assertion changes — which is
+     * the point of asserting it. */
+    const diag = await nbRow("diagnostic", "overdispersion", "max_events_per_subject");
+    eq("negbin: max events per subject = 1 on this fixture", Number(diag?.estimate), rn.maxEventsPerSubject);
+    checks.push({
+      name: "negbin: the program REPORTS that dispersion is not identified, rather than estimating it",
+      status: (diag?.method ?? "").startsWith(rn.dispersionVerdict) ? "pass" : "fail",
+      detail: diag?.method ?? "no diagnostic row",
+    });
+
     /* ---- Table 1 comorbidity-index row (executed) ----
      * The row is scored by the SAME shared engine as the index analysis and the
      * balance table, so this asserts the wiring rather than the arithmetic:

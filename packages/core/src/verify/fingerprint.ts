@@ -297,12 +297,27 @@ function sqlFingerprint(kind: string, raw: string): Fingerprint {
       /* The model IS its design. A shifted horizon, a flipped reference level or
        * a lost washout each produce a complete, plausible odds ratio for a
        * different question. */
-      put(fp, "horizon_days", grab(sql, [/fu_date <= DATEADD\(\s*day\s*,\s*(\d+)\s*,/i, /fu_date <= \(s\.index_date \+ (\d+)\)/i]));
+      put(fp, "horizon_days", grab(sql, [
+        /fu_date <= DATEADD\(\s*day\s*,\s*(\d+)\s*,/i,
+        /fu_date <= \(s\.index_date \+ (\d+)\)/i,
+        // recurrent-count feeder bounds the EVENTS, not a first-event date
+        /a\.event_date <= DATEADD\(\s*day\s*,\s*(\d+)\s*,/i,
+        /a\.event_date <= \(c\.index_date \+ (\d+)\)/i,
+      ]));
+      put(fp, "response_is_count", /COUNT\(DISTINCT a\.event_date\) AS n_events/i.test(sql) ? "yes" : "no");
       put(fp, "exposed_level", grab(sql, [/WHEN s\.arm = '([^']+)' THEN 1/i, /WHEN s\.index_code = '([^']+)' THEN 1/i]));
       put(fp, "arm_levels", (sql.match(/s\.arm IN \('([^']+)', '([^']+)'\)/i) ?? []).slice(1).join(","));
       // 2x2 cell definitions — an inverted cell silently inverts the estimate.
-      put(fp, "cell_a", /SUM\(CASE WHEN exposed = 1 AND y = 1 THEN 1 ELSE 0 END\) AS a_ee/i.test(sql) ? "yes" : "no");
-      put(fp, "cell_d", /SUM\(CASE WHEN exposed = 0 AND y = 0 THEN 1 ELSE 0 END\) AS d_un/i.test(sql) ? "yes" : "no");
+      /* A COUNT response has no "non-event" cell: a_ee is the SUM of counts,
+       * not a tally of subjects. Checking it against the indicator algebra
+       * would fail a correct program. */
+      if (/COUNT\(DISTINCT a\.event_date\)/i.test(sql)) {
+        put(fp, "cell_a", /SUM\(CASE WHEN exposed = 1 THEN y ELSE 0 END\) AS a_ee/i.test(sql) ? "yes" : "no");
+        put(fp, "cell_d", /SUM\(CASE WHEN exposed = 0 THEN 1 ELSE 0 END\) AS d_un/i.test(sql) ? "yes" : "no");
+      } else {
+        put(fp, "cell_a", /SUM\(CASE WHEN exposed = 1 AND y = 1 THEN 1 ELSE 0 END\) AS a_ee/i.test(sql) ? "yes" : "no");
+        put(fp, "cell_d", /SUM\(CASE WHEN exposed = 0 AND y = 0 THEN 1 ELSE 0 END\) AS d_un/i.test(sql) ? "yes" : "no");
+      }
       put(fp, "log_or_is_cross_product", /LN\(\(a_ee \* 1\.0 \* d_un\) \/ \(b_en \* 1\.0 \* c_ue\)\)/i.test(sql) ? "yes" : "no");
       put(fp, "woolf_se", /SQRT\(1\.0\/a_ee \+ 1\.0\/b_en \+ 1\.0\/c_ue \+ 1\.0\/d_un\)/i.test(sql) ? "yes" : "no");
       /* A zero cell must yield NULL, never a continuity-corrected number: a
@@ -321,6 +336,11 @@ function sqlFingerprint(kind: string, raw: string): Fingerprint {
         put(fp, "poisson_se_uses_events_only",
           /SQRT\(1\.0\/a_ee \+ 1\.0\/c_ue\)/i.test(sql) ? "yes" : "no");
         put(fp, "offset_censor_bounds", censorBoundsSql(sql));
+        /* Whether the clock STOPS at the first event. Combined with a count
+         * response this is incoherent — later events could never be observed —
+         * and nothing else in the fingerprint could see it. */
+        put(fp, "offset_censors_at_outcome",
+          /LEAST\(COALESCE\(fu_date, DATE '9999-12-31'\), admin_censor\)/i.test(sql) ? "yes" : "no");
       }
       // SAS-PRIMARY (language-local): the fitted estimates must be NULL here.
       put(fp, "adjusted_null_in_sql",
@@ -494,10 +514,16 @@ function sasFingerprint(kind: string, rawSas: string, setup: string): Fingerprin
     }
     case "regression": {
       put(fp, "horizon_days", grab(sas, [/svcdate <= a\.index_date \+ (\d+)/i]));
+      put(fp, "response_is_count", /count\(distinct e\.svcdate\) as n_events/i.test(sas) ? "yes" : "no");
       put(fp, "exposed_level", grab(sas, [/when a\.arm = '([^']+)' then 1/i]));
       put(fp, "arm_levels", (sas.match(/in \('([^']+)', '([^']+)'\)/i) ?? []).slice(1).join(","));
-      put(fp, "cell_a", /sum\(case when exposed = 1 and y = 1 then 1 else 0 end\) as a_ee/i.test(sas) ? "yes" : "no");
-      put(fp, "cell_d", /sum\(case when exposed = 0 and y = 0 then 1 else 0 end\) as d_un/i.test(sas) ? "yes" : "no");
+      if (/count\(distinct e\.svcdate\)/i.test(sas)) {
+        put(fp, "cell_a", /sum\(case when exposed = 1 then y else 0 end\) as a_ee/i.test(sas) ? "yes" : "no");
+        put(fp, "cell_d", /sum\(case when exposed = 0 then 1 else 0 end\) as d_un/i.test(sas) ? "yes" : "no");
+      } else {
+        put(fp, "cell_a", /sum\(case when exposed = 1 and y = 1 then 1 else 0 end\) as a_ee/i.test(sas) ? "yes" : "no");
+        put(fp, "cell_d", /sum\(case when exposed = 0 and y = 0 then 1 else 0 end\) as d_un/i.test(sas) ? "yes" : "no");
+      }
       put(fp, "log_or_is_cross_product", /log\(\(a_ee \* d_un\) \/ \(b_en \* c_ue\)\)/i.test(sas) ? "yes" : "no");
       put(fp, "woolf_se", /sqrt\(1\/a_ee \+ 1\/b_en \+ 1\/c_ue \+ 1\/d_un\)/i.test(sas) ? "yes" : "no");
       put(fp, "zero_cell_returns_null", /if a_ee > 0 and b_en > 0 and c_ue > 0 and d_un > 0/i.test(sas) ? "yes" : "no");
@@ -509,6 +535,8 @@ function sasFingerprint(kind: string, rawSas: string, setup: string): Fingerprin
         put(fp, "poisson_se_uses_events_only",
           /sqrt\(1\/a_ee \+ 1\/c_ue\)/i.test(sas) ? "yes" : "no");
         put(fp, "offset_censor_bounds", censorBoundsSas(sas));
+        put(fp, "offset_censors_at_outcome",
+          /censor_date = min\(coalesce\(fu_date, '31DEC9999'd\), admin_censor\)/i.test(sas) ? "yes" : "no");
       }
       /* SAS-PRIMARY (language-local), plus the ANCHOR. The saturated model and
        * the self-check are what make the fitted estimates trustworthy at all;
@@ -785,11 +813,16 @@ export function expectedFromStamp(kind: string, stamp: Record<string, unknown>):
       if (stamp.offset !== null && typeof stamp.offset === "object") {
         exp.rate_ratio_is_rate_over_rate = "yes";
         exp.poisson_se_uses_events_only = "yes";
+        /* The stamp lists the censoring terms actually honored; the clock must
+         * stop at the outcome only when "outcome" is among them. */
+        const applied = (stamp.offset as { applied?: unknown }).applied;
+        if (Array.isArray(applied)) exp.offset_censors_at_outcome = applied.includes("outcome") ? "yes" : "no";
       }
       /* The stamp CLAIMS a closed-form crude effect and a saturated anchor; the
        * code has to actually be those things — but WHICH closed form depends on
        * the family. An offset in the stamp means a rate model, and a rate model
        * must not be checked against the odds-ratio algebra. */
+      if (typeof stamp.responseKind === "string") exp.response_is_count = stamp.responseKind === "count" ? "yes" : "no";
       if (stamp.crudeEffect === "closed_form_2x2") {
         exp.cell_a = "yes";
         exp.cell_d = "yes";

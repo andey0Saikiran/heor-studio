@@ -171,6 +171,21 @@ const MUTATIONS: Mutation[] = [
     apply: (t) => t.replace(/round\(t_stat \/ sqrt\(var_t\)/, "round(t_stat / (var_t)"),
   },
   {
+    /* The recurrent response collapses back to an indicator: every subject with
+     * two events silently becomes a subject with one, and the rate drops by an
+     * amount nothing in the output explains. */
+    name: "SQL recurrent response collapses to a 0/1 indicator (repeat events vanish)",
+    kind: "regression", lang: "sql", pathMatch: /glm_a_glm_nb/,
+    apply: (t) => t.replace(/COUNT\(DISTINCT a\.event_date\) AS n_events/, "MIN(1) AS n_events"),
+  },
+  {
+    /* Person-time stops at the first event while counts keep accruing — the
+     * incoherent combination readiness refuses, reintroduced downstream. */
+    name: "SAS recurrent model censors person-time at the first event (later events uncountable)",
+    kind: "regression", lang: "sas", pathMatch: /glm_a_glm_nb/,
+    apply: (t) => t.replace(/censor_date = admin_censor;/, "censor_date = min(coalesce(fu_date, '31DEC9999'd), admin_censor);"),
+  },
+  {
     /* THE ESTIMAND SWAP: dividing counts instead of rates turns a rate ratio
      * into a risk-of-count ratio. The person-time is still computed, still
      * reported, and simply stops being used. */

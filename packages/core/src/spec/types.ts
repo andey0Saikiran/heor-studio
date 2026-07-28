@@ -351,6 +351,14 @@ export interface RegressionAnalysis extends AnalysisCommon {
   /** two-level exposure -> GroupVariable.id; its referenceLevel is the baseline
    *  category, so the reported effect is for the OTHER level */
   groupVarId: string;
+  /** "first_only" (default) makes the response a 0/1 indicator; "all_events"
+   *  makes it a COUNT of qualifying events in the horizon.
+   *
+   *  This is not cosmetic. A negative binomial fitted to a 0/1 response is
+   *  degenerate — a Bernoulli variance is always BELOW its mean, so the
+   *  dispersion parameter is not identified and the model collapses to Poisson.
+   *  NB therefore requires "all_events". */
+  recurrence?: Recurrence;
   /** REQUIRED for count families: how each subject's person-time (the model's
    *  log offset) is accrued. Shared with the rate modules via rate-core's
    *  censoring plan, so the offset cannot disagree with the incidence table. */
@@ -925,21 +933,33 @@ export function validateAnalyses(spec: StudySpec): string[] {
          * half-emitted, because each needs a feeder this emitter does not
          * construct and would otherwise produce a complete-looking model of the
          * wrong thing. */
-        if (a.family !== "logistic" && a.family !== "poisson")
+        const COUNT_FAMILIES = ["poisson", "negative_binomial"];
+        if (!["logistic", "poisson", "negative_binomial"].includes(a.family))
           problems.push(
-            `${w}: regression family "${a.family}" is not emitted yet — "logistic" and "poisson" are built. ` +
-              (a.family === "negative_binomial"
-                ? `Negative binomial needs a dispersion parameter, which has no closed form and therefore no saturated anchor to check the fit against. `
-                : a.family === "gamma_log"
-                  ? `A cost model needs the claim-line ledger's per-subject totals as its response, which this emitter does not build. `
-                  : `An OLS model needs a continuous response, which this emitter does not construct. `) +
-              `Set family:"logistic" or "poisson", or disable the analysis to keep it visible as planned work.`
+            `${w}: regression family "${a.family}" is not emitted yet — "logistic", "poisson" and "negative_binomial" are built. ` +
+              (a.family === "gamma_log"
+                ? `A cost model needs the claim-line ledger's per-subject totals as its response, which this emitter does not build. `
+                : `An OLS model needs a continuous response, which this emitter does not construct. `) +
+              `Disable the analysis to keep it visible as planned work.`
           );
         /* A count model without person-time would silently become a model of
          * the COUNT rather than the RATE — same coefficients, different
          * estimand, no way to tell from the output. */
-        if (a.family === "poisson" && !a.personTimeRule)
-          problems.push(`${w}: a poisson regression requires personTimeRule — without it the log offset is undefined and the model would fit counts, not rates.`);
+        if (COUNT_FAMILIES.includes(a.family) && !a.personTimeRule)
+          problems.push(`${w}: a ${a.family} regression requires personTimeRule — without it the log offset is undefined and the model would fit counts, not rates.`);
+        /* NB on a 0/1 response is degenerate: a Bernoulli variance is always
+         * BELOW its mean, so the dispersion parameter is not identified and the
+         * fit collapses to Poisson while still reporting a dispersion estimate. */
+        if (a.family === "negative_binomial" && (a.recurrence ?? "first_only") !== "all_events")
+          problems.push(
+            `${w}: a negative_binomial regression requires recurrence:"all_events". With "first_only" the response is a 0/1 indicator, whose variance is always below its mean — the dispersion parameter is not identified and the model degenerates to Poisson while still printing a dispersion estimate.`
+          );
+        /* Counting every event while stopping the clock at the first one is
+         * incoherent: events after the first could never be observed. */
+        if ((a.recurrence ?? "first_only") === "all_events" && a.personTimeRule?.censorAt.includes("outcome"))
+          problems.push(
+            `${w}: recurrence:"all_events" with personTimeRule censoring at "outcome" is contradictory — follow-up would stop at the first event, so no later event could ever be counted. Remove "outcome" from censorAt for a recurrent-event model.`
+          );
         const gv = groupVars.find((g) => g.id === a.groupVarId);
         if (!gv) problems.push(`${w}: groupVarId "${a.groupVarId}" is not in groupVars[].`);
         else {
