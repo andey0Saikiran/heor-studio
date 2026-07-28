@@ -2,7 +2,7 @@
 
 _Snapshot of what exists vs what's left. Last updated 2026-07-28 (after Analysis Waves
 1.6 through 3 — calendar trend, the claim-line ledger, the comorbidity-index
-engine and its Table 1 / SMD wiring, and the GLM emitter; **700 harness
+engine and its Table 1 / SMD wiring, and the GLM emitter; **728 harness
 checks**). See
 `docs/NIGHT-REPORT-2026-07-26.md` for the overnight build and **`docs/PENDING.md`
 for the audited, authoritative roadmap** — a 9-agent audit found 151 pending items
@@ -45,7 +45,7 @@ Everything below is committed and pushed unless noted.
 - **Outcome care-setting filter** applied in both twins (shared `outcomeSettingPlan`), with a planted inpatient negative control.
 - **Honest labeling:** unimplemented options (Clopper-Pearson, Wald, KM, competing risk, minClaims>1, dx-position) → computed-with-closest-method + visible `REVIEW` note in both languages.
 
-### Verification harness (the "machine-verified" engine) — **700 passing checks**
+### Verification harness (the "machine-verified" engine) — **728 passing checks**
 _(the figure once quoted as 207 was miscounted — a live run printed 206. Waves 0-4 took it to 308.)_
 - PGlite (real Postgres-16 wasm) executes the **actual emitted SQL** against a 12-patient synthetic MarketScan fixture with hand-computed ground truth.
 - **Gold Case A passes:** spine 12→11→10; incidence 3/8/2425/451.86/Byar CI + 6 stratum rows; point prevalence 4/10 + 7 strata; period prevalence 3/10 + 6 strata; cumulative incidence 3/8 = 0.375 Wilson (0.13684, 0.69426) + strata; plus zero-denominator and horizon-bound edge cases.
@@ -132,7 +132,7 @@ Each has a real prerequisite — deliberately left for an awake session (see NIG
 
 ## Analysis Waves 1.6 + 2 (2026-07-28) — 8 analyses now verified
 
-**Score: 13 of 69 done, 4 partial. 2 gold cases.** Harness: **700 checks, 0 failing** (was 396).
+**Score: 14 of 69 done, 4 partial. 2 gold cases.** Harness: **728 checks, 0 failing** (was 396).
 
 ### Calendar trend (`4758e5a`) — the 7th analysis
 Cochran-Armitage over calendar buckets. The statistic **z is closed form, computed
@@ -319,8 +319,35 @@ while leaving the point estimate untouched.
 Poisson model. An odds-ratio label on a rate ratio reads as correct and is not.
 The statistic now follows the family and is stamped and asserted.
 
-**Still refused:** `gamma_log`, `ols`. Overdispersion is an emitted limitation,
-not a silent assumption.
+**Still refused:** `ols`. Overdispersion is an emitted limitation, not a silent
+assumption.
+
+### Gamma-log cost model (Wave 3.3) — the 14th
+
+The response comes through the **shared ledger**, so the model's costs are the
+resource-use table's costs — inpatient double-count rule included (P04's stay is
+its $10,000 admission total, not $17,000). The ledger is now parameterizable so
+it can coexist with rate-core's chain in one WITH clause.
+
+The anchor holds: a saturated gamma-log model reproduces the observed arm means,
+so its MLE is ln(mean_exposed / mean_reference).
+
+**The interval is labeled for what it is.** The fitted model's interval needs the
+gamma dispersion parameter and is SAS-primary. What both twins can compute is
+the **delta method** on the log ratio of means — a different, named estimator,
+shipped as `delta_method_ratio_of_means` with a check on the label itself.
+
+**The zeros are the point.** The cost window excludes the index date (the index
+fill *is* the exposure), which leaves two subjects at zero cost — what a gamma
+response cannot take. They are counted and excluded, named as the second part of
+a two-part model, never dropped silently and never rescued with a small constant.
+
+Hand-derived and matched: cost ratio = 850/3975 = **34/159 = 0.21384**, delta SE
+0.95555, CI (0.03286, 1.39143).
+
+*A correction:* my hand derivation gave SE 0.95554. Execution said 0.95555. I
+recomputed independently rather than assume the code was right — a long-division
+slip in my working. The fixture comment records it.
 
 ### Negative binomial + the recurrence feeder (`d32de98`→ Wave 3.2) — the 13th
 
