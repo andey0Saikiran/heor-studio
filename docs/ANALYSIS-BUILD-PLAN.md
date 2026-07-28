@@ -5,7 +5,7 @@ analyses, 1 sequencer, and 2 adversarial reviewers (a MarketScan methodologist a
 a code-truth reviewer reading the actual repo). Both reviewers' corrections are
 folded in below and marked **[CORRECTION]**._
 
-**Status: 16 done, 4 partial (updated 2026-07-28 — see docs/STATUS.md).**
+**Status: 17 done, 4 partial (updated 2026-07-28 — see docs/STATUS.md).**
 
 ---
 
@@ -129,6 +129,15 @@ Stated up front so no one has to discover it later.
 - **Fitted coefficients are unverifiable except at a saturated design.** Logistic,
   Poisson, NB, gamma-log, Cox all need IRLS/Newton. The saturated anchor (a 2×2 whose
   MLE equals the closed-form odds ratio) is the only real check available.
+  **[CORRECTED — Wave 6.2]** Cox has a saturated analogue this plan missed. When every
+  risk set carries the same exposed share *p*, the partial likelihood collapses to a
+  binomial and its maximum is closed form: HR = [q/(1−q)] / [p/(1−p)], with *q* the
+  exposed share of events. It almost never applies on real data — and says NOT
+  APPLICABLE when it does not — but it makes the Cox coefficient checkable against
+  something other than itself, and Gold Case C is built to satisfy it. Separately,
+  `U(beta_hat) = 0` is closed form for a binary exposure and holds on ANY data, so
+  the emitted SAS checks the fitted coefficient against its own defining equation
+  regardless. See `emitters/cox-core.ts`.
 - **Bootstrap CIs need an RNG and break byte-stable emission outright.**
 - **Greedy / nearest-neighbour PS matching is order-dependent** and cannot be
   byte-stable. Ship deterministic frequency matching or imported match sets.
@@ -238,9 +247,20 @@ did not anticipate, both recorded in `docs/STATUS.md`:
    than a defect, and it makes S(t) at fixed horizons the releasable form of a
    curve. The life table now sits behind an explicit opt-in.
 
-**Still unbuilt in this family**: the Cox model (the partial-likelihood MLE has no
-closed form, so unlike KM it cannot be anchored — the log-rank statistic IS its
-score test at β = 0, which is the relationship a Cox module should be checked
-against), competing-risks CIF, and the Brookmeyer-Crowley interval on the median
-(derivable from the band already computed, simply not built — and the emitted
-program says so rather than shipping a median with an invented interval).
+**Cox landed** in Wave 6.2 (`fc65694`), and the guess above was half right: the
+log-rank statistic IS the Cox score test at β = 0, and that identity is now
+asserted across the two modules. The other half was wrong — see the corrected
+bullet under "What will NOT be built": Cox does have an anchor.
+
+**Still unbuilt in this family**: competing-risks CIF (Aalen-Johansen), the
+Brookmeyer-Crowley interval on the median (derivable from the band already
+computed, simply not built — and the emitted program says so rather than shipping
+a median with an invented interval), and a proportional-hazards TEST. The last
+one is the most consequential gap: PH is currently assumed, stated as assumed,
+and not checked. The Schoenfeld residual at each event time is closed form given
+β̂, so a site with SAS can get it; what this project cannot yet do is compute it
+in the SQL twin, because β̂ only exists on the SAS side.
+
+**A fixture gap now closed**: Gold Case C (tied event times) makes the KM (n−d)/n
+factor, the log-rank tie correction, and the Breslow-vs-log-rank variance gap
+executable. Before it, all three were fingerprint-only.

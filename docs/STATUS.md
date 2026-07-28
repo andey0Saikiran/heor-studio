@@ -321,6 +321,80 @@ The statistic now follows the family and is stamped and asserted.
 
 Overdispersion is an emitted limitation, not a silent assumption.
 
+### Cox proportional hazards + Gold Case C (Wave 6.2) — the 17th
+
+**The build plan was wrong about Cox, in a useful direction.** It lists the
+coefficient with the families that are "unverifiable except at a saturated
+design". True of the coefficient. Not true of the model around it, and — it
+turns out — not true of the coefficient either, under one condition.
+
+**Executed in both twins**, all hand-derived before running:
+
+| | Gold A (no ties) | Gold C (one tie) |
+|---|---|---|
+| partial logL(0) | −5.81711 | −4.96981 |
+| score U(0) | −31/42 | −1/2 |
+| information I(0) | 1265/1764 | **3/4** |
+| log-rank variance | 1265/1764 | **13/20** |
+| score χ² | 0.75968 | 1/3 |
+
+The score at the null **is** the log-rank numerator O − E — the log-rank test is
+the Cox score test at β = 0 — and the harness asserts the survival module and
+this one produce the same number from different expressions over different CTEs.
+The information equals the log-rank variance **only when nothing is tied**,
+because the log-rank carries a (n−d)/(n−1) correction Breslow's does not. Gold A
+has them equal; Gold C has them apart. That difference is the whole reason Gold C
+exists.
+
+**The anchor.** If every risk set has the same exposed share *p*, the partial
+likelihood collapses to a binomial and its maximum is closed form:
+
+> HR = [q/(1−q)] / [p/(1−p)]
+
+— an odds ratio of "share of **events** exposed" over "share **at risk**
+exposed". Real risk sets drift, so this almost never applies and the program says
+NOT APPLICABLE. It is a verification device, exactly as the saturated 2×2 is.
+Both branches are exercised: Gold A's share runs 1/2, 4/7, 2/3 (not applicable);
+Gold C's is 1/2 throughout and gives **HR = 1/2 exactly**, confirmed against an
+independent Newton solve to ten decimals.
+
+**Three self-checks on PROC PHREG**, none shipping a reference value: the null
+−2 LOG L; **U(β̂) = 0**, the equation that *defines* the estimate and closed form
+here because the exposure is binary; and the anchor where it applies. The second
+is the strongest thing available about a coefficient with no closed form — not
+"the fit looks right" but "the fit solves the equation that defines it".
+
+The one-step estimator is reported because it is executable and **labelled**
+because it is not the answer: 0.35728 against a true maximum of 0.35583 on Gold
+A, 0.51342 against an exact 0.5 on Gold C.
+
+**Refusals, with reasons.** Proportional hazards is **assumed and not tested**,
+and the emitted program says so rather than leaving a reader to assume otherwise.
+No time-varying covariates, no stratified baseline hazard. `ties:"efron"` is
+refused because every closed form the SQL twin computes is Breslow's — a SAS fit
+maximizing Efron's likelihood would fail this program's own U(β̂)=0 check while
+being perfectly correct. The refusal also says when Efron would be the better
+choice, which is the part that matters.
+
+**Gold Case C.** Three pieces of arithmetic were unreachable on A and B: the KM
+factor (n−d)/n with d > 1, the log-rank tie correction, and the
+information-vs-variance gap. Two of the nine Cox mutations corrupt a quantity
+that is *numerically identical* on Gold A to what it was swapped with — the
+fingerprint catches them, and Gold C turns them into numbers. That pairing is the
+case for having both mechanisms.
+
+*Four harness defects and three in my own checks.* A UNION takes its column names
+from the first branch only, and that branch had no aliases; `sas-lint` saw only
+the first dataset in a multi-target `ods output`; the log-rank variance was built
+from a second construction of the risk sets; a loose critical-value scrape
+matched the tied-event-time counter first. Then, found by mutation testing:
+`cox_fit_in_sas` matched `/ties=breslow/` anywhere including the method *label*,
+so switching the real fit to Efron stayed green; `cox_null_loglik_check` tested
+the PASS string and not the comparison; and `cox_fit_null_in_sql` looked for
+**one** NULL adjusted estimate when the contract is that **every** one is NULL —
+the third time in this repo a single-occurrence pattern has hidden a partial
+corruption.
+
 ### Survival: Kaplan-Meier + log-rank (Wave 6.0/6.1) — the 16th, and the family with the smallest SAS carve-out
 
 **The mortality refusal shipped first, in its own commit**, before the module it
