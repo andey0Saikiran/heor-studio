@@ -18,6 +18,13 @@ moment to stop._
 Repo: `github.com/andey0Saikiran/heor-studio` · monorepo (`packages/core`,
 `packages/web`, `packages/mcp`) · AGPL-3.0 core/web, Apache-2.0 mcp.
 
+**Pre-publication purge (2026-07-29):** `docs/research/` was removed from all
+history before going public. It held an OCR transcription of a former client's
+"Market Scan Business Rules" BRD and bulk value-list transcriptions from the
+licensed IBM/Merative MarketScan Data Dictionary — neither publishable. Nothing
+in the product referenced it. The corpus is kept privately outside the repo and
+`.gitignore` now blocks its return.
+
 **One step outstanding before publication:** 68 commits are unpushed because the
 local `gh` token lacks the `workflow` scope and three of them touch
 `.github/workflows/ci.yml`. Fix with `gh auth refresh -h github.com -s workflow`,

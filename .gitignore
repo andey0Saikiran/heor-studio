@@ -25,3 +25,8 @@ dist-ssr
 
 # MCP runtime correction captures (local-only; the git-tracked ledger is /corrections)
 packages/mcp/heor-corrections/
+
+# Research scaffolding: contains transcriptions of licensed vendor documents
+# (IBM/Merative MarketScan data dictionary) and a former client BRD. Purged from
+# history 2026-07-29 before publication; kept privately outside the repo.
+docs/research/
