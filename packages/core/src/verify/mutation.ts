@@ -52,6 +52,15 @@ interface Mutation {
    *  whose path matches. Without this every mutation lands on the first one and
    *  a pattern meant for the second reads as vacuous. */
   pathMatch?: RegExp;
+  /**
+   * Set when the mutation is DELIBERATELY not idempotent, with the reason.
+   *
+   * See the partial-replacement check below for why this field exists. The only
+   * legitimate case so far is a mutation whose replacement text still contains
+   * the pattern it matched — a wrapping corruption — which would re-wrap
+   * forever if applied twice.
+   */
+  notIdempotent?: string;
 }
 
 /** Corruptions that MUST be caught. Each mirrors a real failure mode:
@@ -78,7 +87,7 @@ const MUTATIONS: Mutation[] = [
   {
     name: "SAS care-setting filter inverted (outpatient -> inpatient)",
     kind: "incidence", lang: "sas",
-    apply: (t) => t.replace(/(e\.setting\s*=\s*')OP(')/i, "$1IP$2"),
+    apply: (t) => t.replace(/(e\.setting\s*=\s*')OP(')/gi, "$1IP$2"),
   },
   {
     name: "SAS washout upper bound dropped (prevalent cases leak in)",
@@ -93,17 +102,17 @@ const MUTATIONS: Mutation[] = [
   {
     name: "SAS Byar CI loses its cube (**3 dropped)",
     kind: "incidence", lang: "sas",
-    apply: (t) => t.replace(/\*\*\s*3/, "**1"),
+    apply: (t) => t.replace(/\*\*\s*3/g, "**1"),
   },
   {
     name: "SQL washout window widened (365 -> 730 days)",
     kind: "incidence", lang: "sql",
-    apply: (t) => t.replace(/(index_date\s*-\s*)365(\s*\))/i, "$1730$2"),
+    apply: (t) => t.replace(/(index_date\s*-\s*)365(\s*\))/gi, "$1730$2"),
   },
   {
     name: "SQL point-prevalence anchor date shifted",
     kind: "point_prevalence", lang: "sql",
-    apply: (t) => t.replace(/DATE\s*'2019-07-20'/i, "DATE '2019-08-20'"),
+    apply: (t) => t.replace(/DATE\s*'2019-07-20'/gi, "DATE '2019-08-20'"),
   },
   {
     name: "SQL risk horizon doubled (365 -> 730)",
@@ -113,12 +122,12 @@ const MUTATIONS: Mutation[] = [
   {
     name: "SQL Wilson z^2/2 constant mistyped (1.9208 -> 1.96)",
     kind: "point_prevalence", lang: "sql",
-    apply: (t) => t.replace(/1\.9208/, "1.96"),
+    apply: (t) => t.replace(/1\.9208/g, "1.96"),
   },
   {
     name: "SAS period-prevalence window shifted by a year",
     kind: "period_prevalence", lang: "sas",
-    apply: (t) => t.replace(/'01JAN2019'd/i, "'01JAN2018'd"),
+    apply: (t) => t.replace(/'01JAN2019'd/gi, "'01JAN2018'd"),
   },
   {
     // POPULATION variance silently shrinks every SMD; the balance table would
@@ -679,7 +688,7 @@ const MUTATIONS: Mutation[] = [
   {
     name: "SAS deletes the subdistribution-vs-cause-specific self-check",
     kind: "fine_gray", lang: "sas",
-    apply: (t) => t.replace(/if wn_total > n_cs_total \+ 1e-9 then/, "if 1 then"),
+    apply: (t) => t.replace(/if wn_total > n_cs_total \+ 1e-9 then/g, "if 1 then"),
   },
   {
     name: "SAS deletes the U(beta_hat) = 0 check on the weighted risk sets",
@@ -806,6 +815,7 @@ const MUTATIONS: Mutation[] = [
      * is the one signal the diagnostic row exists to raise. */
     name: "SQL clamps the risk-difference interval into [-1, 1]",
     kind: "iptw_outcome", lang: "sql",
+    notIdempotent: "the replacement WRAPS the text it matched, so the pattern still matches afterwards and a second pass would wrap again. Nothing is left uncorrupted — this is the one shape the twice-applied test cannot distinguish from a partial replacement.",
     apply: (t) => t.replace(/ROUND\(CAST\(mu1 - mu0 - 1\.96 \* \(SQRT\(v1 \+ v0\)\) AS NUMERIC\), 5\)/, "GREATEST(-1.0, ROUND(CAST(mu1 - mu0 - 1.96 * (SQRT(v1 + v0)) AS NUMERIC), 5))"),
   },
   {
@@ -870,6 +880,41 @@ export function mutationChecks(): Check[] {
       : m.lang === "sql"
         ? mutatedSql !== sqlProg.content
         : mutatedSas !== sasProg.content;
+
+    /* THE PARTIAL-REPLACEMENT CHECK.
+     *
+     * `String.replace` with a non-global pattern corrupts only the FIRST
+     * occurrence. When the emitter writes the same expression several times —
+     * an adjusted row per model term, a pooled variance used twice, an at-risk
+     * table referenced throughout — the surviving copies satisfy any check that
+     * merely asks "does the correct text appear", and the mutation reads as
+     * CAUGHT or as vacuous for the wrong reason. That has happened FIVE times
+     * in this repo (the D3 spine, the OLS pooled variance, the Cox adjusted
+     * rows, the Fine-Gray self-check, the IPTW score population), and each time
+     * it was found by accident.
+     *
+     * A partial replacement has an exact signature: applying the mutation
+     * TWICE gives a different result from applying it once, because the second
+     * pass finds the copies the first one left. So that is what is tested.
+     *
+     * A mutation that is legitimately non-idempotent — one whose replacement
+     * still contains the pattern it matched — declares `notIdempotent` with a
+     * reason, which turns silence into an explicit acknowledgement. */
+    {
+      const before = m.setup ? setup : m.lang === "sql" ? sqlProg.content : sasProg.content;
+      const once = m.apply(before);
+      const twice = m.apply(once);
+      const idempotent = twice === once;
+      checks.push({
+        name: `mutation replaces EVERY occurrence: ${m.name}`,
+        status: idempotent || m.notIdempotent ? "pass" : "fail",
+        detail: m.notIdempotent
+          ? `declared non-idempotent: ${m.notIdempotent}`
+          : idempotent
+            ? "applying it twice changes nothing more, so no copy was left behind"
+            : "applying it TWICE changes the text again — the first pass left copies behind, so any check that asks whether the correct text still appears is satisfied by a survivor. Use the /g flag, or declare notIdempotent with the reason",
+      });
+    }
 
     if (!changed) {
       // The pattern no longer matches the emitted code: the mutation is a
