@@ -58,7 +58,7 @@ Some things are refused outright, in readiness, with the reason attached:
   which is in-hospital only and masked from data year 2016. A curve built on it
   would silently become "time to in-hospital death before 2016, with every other
   death censored."
-- **Greedy nearest-neighbour PS matching.** Order-dependent: the same data in a
+- **Greedy nearest-neighbor PS matching.** Order-dependent: the same data in a
   different row order produces a different matched set and a different estimate.
   Byte-stable emission cannot rescue that.
 - **Bootstrap intervals** (need an RNG, break reproducible emission), **Gray's
@@ -143,7 +143,7 @@ npm run dev
 starts the spec-review UI. Extracting a spec from a protocol needs an Anthropic
 API key; the emitters themselves are deterministic and offline.
 
-## Licence
+## License
 
 Split. `packages/core` and `packages/web` are **AGPL-3.0-only**, so improvements
 to the emitters stay available to the analysts who depend on them, including when
