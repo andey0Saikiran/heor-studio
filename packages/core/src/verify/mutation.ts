@@ -761,6 +761,64 @@ const MUTATIONS: Mutation[] = [
     kind: "propensity_score", lang: "sql",
     apply: (t) => t.replace(/POWER\(sw_t, 2\) \/ NULLIF\(sw2_t, 0\)/, "CAST(n_t AS DOUBLE PRECISION)"),
   },
+  /* ---- iptw_outcome -------------------------------------------------------- */
+  {
+    /* HAJEK -> HORVITZ-THOMPSON. SUM(wY)/n instead of SUM(wY)/SUM(w). It is a
+     * different estimator, it can produce a "risk" above 1, and on any data
+     * where the weights do not sum to n it silently reports the wrong number. */
+    name: "SQL weighted risk becomes Horvitz-Thompson instead of Hajek",
+    kind: "iptw_outcome", lang: "sql",
+    apply: (t) => t.replace(/SUM\(w \* y\) \/ NULLIF\(SUM\(w\), 0\) AS mu/, "SUM(w * y) / NULLIF(COUNT(*), 0) AS mu"),
+  },
+  {
+    /* THE SANDWICH REPLACED BY THE NAIVE FORM. p(1-p)/n_eff is the variance of
+     * a different estimator and is too small, so every interval in the module
+     * gets narrower and nothing about the output looks wrong. */
+    name: "SQL sandwich variance becomes the naive p(1-p)/n_effective",
+    kind: "iptw_outcome", lang: "sql",
+    apply: (t) => t.replace(
+      /SUM\(k\.w \* k\.w \* POWER\(k\.y - h\.mu, 2\)\) \/ NULLIF\(POWER\(h\.sw, 2\), 0\) AS var_mu/,
+      "MAX(h.mu * (1 - h.mu)) / NULLIF(MAX(h.sw), 0) AS var_mu"),
+  },
+  {
+    /* THE SCORE ESTIMATED ON THE WHOLE COHORT and applied to the at-risk set.
+     * Weights built in one population and used in another describe neither, and
+     * every number downstream still looks entirely ordinary. */
+    name: "SAS estimates the score on the cohort instead of the at-risk set",
+    kind: "iptw_outcome", lang: "sas",
+    /* /g: the at-risk table appears several times in the SAS, and corrupting
+     * only the first left the fingerprint's looser predecessor satisfied by a
+     * later one. Fifth time a single-occurrence replacement has hidden a
+     * partial corruption in this repo. */
+    apply: (t) => t.replace(/from work\.(_\w+)_atrisk as a/g, "from tz.060_cohort as a"),
+  },
+  {
+    // the identification row demoted below the estimates it qualifies
+    name: "SQL moves the identification row below the effect estimates",
+    kind: "iptw_outcome", lang: "sql",
+    apply: (t) => t.replace(
+      /(CAST\('identification' AS VARCHAR\) AS component, CAST\('subjects_off_support' AS VARCHAR\) AS statistic,\s*\n\s*)CAST\(0 AS INT\) AS ord/,
+      "$1CAST(99 AS INT) AS ord"),
+  },
+  {
+    /* THE RISK-DIFFERENCE INTERVAL CLAMPED. A limit pinned at exactly -1 reads
+     * as a boundary rather than as an approximation that has broken down, which
+     * is the one signal the diagnostic row exists to raise. */
+    name: "SQL clamps the risk-difference interval into [-1, 1]",
+    kind: "iptw_outcome", lang: "sql",
+    apply: (t) => t.replace(/ROUND\(CAST\(mu1 - mu0 - 1\.96 \* \(SQRT\(v1 \+ v0\)\) AS NUMERIC\), 5\)/, "GREATEST(-1.0, ROUND(CAST(mu1 - mu0 - 1.96 * (SQRT(v1 + v0)) AS NUMERIC), 5))"),
+  },
+  {
+    name: "SAS deletes the weighted saturated anchor",
+    kind: "iptw_outcome", lang: "sas",
+    apply: (t) => t.replace(/lsmeans treated;/, "/* lsmeans removed */"),
+  },
+  {
+    // the crude contrast dropped, so the weighted number stands alone
+    name: "SQL stops reporting the unadjusted contrast beside the weighted one",
+    kind: "iptw_outcome", lang: "sql",
+    apply: (t) => t.replace(/CAST\('unadjusted' AS VARCHAR\)/g, "CAST('effect' AS VARCHAR)"),
+  },
 ];
 
 interface Program {

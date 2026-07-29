@@ -29,6 +29,7 @@ import type {
   CompetingRisksAnalysis,
   FineGrayAnalysis,
   PropensityScoreAnalysis,
+  IptwOutcomeAnalysis,
   SurvivalAnalysis,
   TrendSpec,
 } from "../spec/types";
@@ -1537,6 +1538,78 @@ export function propensityScoreParity(
     trim: an.trim,
     score: "saturated_closed_form",
     variance: "frequency_weighted_sample",
+    sasPrimary: "none",
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ *  IPTW outcome model
+ * ------------------------------------------------------------------ */
+
+export interface IptwOutcomeParity {
+  id: string;
+  codeListId: string;
+  horizonDays: number;
+  washout: { start: number | "anytime_before"; end: number | "anytime_after"; includesIndex: boolean };
+  settingFilter: string;
+  referenceLevel: string;
+  treatedLevel: string;
+  cellAxes: string[];
+  estimand: string;
+  stabilized: boolean;
+  trim: number;
+  /** the score is estimated in the AT-RISK set, not the whole cohort */
+  scorePopulation: "at_risk_after_washout";
+  estimator: "hajek_ratio";
+  variance: "sandwich_weights_treated_as_known";
+  sasPrimary: "none";
+}
+
+export function iptwOutcomeLimitations(an: IptwOutcomeAnalysis, listSystem: CodeSystem): string[] {
+  const out: string[] = [];
+  const note = outcomeSettingPlan(an.outcomeDefinition, listSystem).note;
+  if (note) out.push(note);
+  if (an.outcomeDefinition.minClaims > 1)
+    out.push(`outcome minClaims=${an.outcomeDefinition.minClaims} is NOT yet enforced - any single qualifying claim counts as an event`);
+  out.push(`the outcome is a BINARY indicator over a fixed horizon. Nobody is censored: a subject who leaves the data before the horizon is counted as event-free, which understates risk. Use the survival or competing-risks modules when follow-up is incomplete`);
+  out.push(`the sandwich variance treats the WEIGHTS AS KNOWN. They come from a fitted score, and propagating that estimation generally NARROWS the interval rather than widening it (Lunceford & Davidian 2004), so what is reported is conservative for the ATE and is labelled weights_treated_as_known rather than simply "robust"`);
+  out.push(`NO doubly-robust augmentation. With categorical covariates the outcome regression would also be saturated, so this is buildable and simply not built - the missing piece is the augmentation term's own influence function, since the AIPW variance is not the Hajek sandwich`);
+  out.push(`NO bootstrap interval: it needs an RNG and would break byte-stable emission outright`);
+  if (an.estimand === "att")
+    out.push(`the ATT weights make this the effect among the TREATED, so the risk in the control arm is a counterfactual for the treated population and not a description of the controls themselves`);
+  return out;
+}
+
+export const IPTW_OUTCOME_METHOD_NOTES = [
+  `READ THE IDENTIFICATION ROWS FIRST. Subjects in covariate cells that are entirely one arm have no counterpart at ANY weight. The arithmetic below them succeeds regardless; the estimand does not exist for those subjects, and no weighting can create it`,
+  `the score is estimated on the AT-RISK set this analysis defines, not on the whole cohort. Weights built in one population and applied in another describe neither`,
+  `the weighted risk is the HAJEK ratio SUM(wY)/SUM(w), not the Horvitz-Thompson SUM(wY)/n. The two differ whenever the weights do not sum to n, which is almost always, and only the Hajek form is guaranteed to stay inside [0,1]`,
+  `the variance is the SANDWICH form for that ratio, SUM(w^2 (Y-mu)^2)/(SUM w)^2. The naive p(1-p)/n_effective is the variance of a different estimator and is too small`,
+  `it treats the WEIGHTS AS KNOWN, which is conservative: propagating the score's own estimation generally narrows the interval. The label says weights_treated_as_known rather than "robust", because "robust" would claim more than this computes`,
+  `the UNADJUSTED contrast is reported beside the weighted one. Weighting is a claim that the crude number is wrong, and a reader cannot judge that claim without both`,
+  `a Wald interval on a risk difference can leave [-1, 1], which a difference of two probabilities cannot. It is reported UNCLAMPED with a diagnostic row - clamping would hide the one signal saying the approximation has broken down`,
+  `SAS-PRIMARY: nothing. Every number here is computed by both twins`,
+];
+
+export function iptwOutcomeParity(
+  an: IptwOutcomeAnalysis,
+  consumed: { referenceLevel: string; treatedLevel: string; cellAxes: string[]; settingFilter: string },
+): IptwOutcomeParity {
+  return {
+    id: an.id,
+    codeListId: an.outcomeDefinition.codeListId,
+    horizonDays: an.horizonDays,
+    washout: { start: an.washout.start, end: an.washout.end, includesIndex: an.washout.includesIndex },
+    settingFilter: consumed.settingFilter,
+    referenceLevel: consumed.referenceLevel,
+    treatedLevel: consumed.treatedLevel,
+    cellAxes: consumed.cellAxes,
+    estimand: an.estimand,
+    stabilized: an.stabilized,
+    trim: an.trim,
+    scorePopulation: "at_risk_after_washout",
+    estimator: "hajek_ratio",
+    variance: "sandwich_weights_treated_as_known",
     sasPrimary: "none",
   };
 }

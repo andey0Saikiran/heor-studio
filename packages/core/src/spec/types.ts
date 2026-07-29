@@ -465,6 +465,37 @@ export interface PropensityScoreAnalysis extends AnalysisCommon {
 }
 
 /**
+ * An OUTCOME model on the inverse-probability-weighted pseudo-population.
+ *
+ * The propensity module produces weights and balance; this one produces the
+ * effect estimate. It is a separate analysis rather than an option on that one
+ * because the two answer different questions and fail differently: a beautifully
+ * balanced weighted sample can still be a population in which the effect is not
+ * identified, and that is exactly the case this module is built to surface.
+ *
+ * Everything is closed form — the Hajek weighted risk and its sandwich variance
+ * (emitters/ps-core.ts) — so nothing is deferred to SAS.
+ *
+ * Ref: Hajek (1971); Lunceford & Davidian Stat Med 2004;23:2937 (the sandwich,
+ * and why treating the weights as known is conservative).
+ */
+export interface IptwOutcomeAnalysis extends AnalysisCommon {
+  kind: "iptw_outcome";
+  groupVarId: string;
+  /** the score's covariates. Must ALL be categorical — same gate as propensity_score. */
+  psCovariateIds: string[];
+  estimand: "ate" | "att";
+  stabilized: boolean;
+  trim: number;
+  /** the outcome, ascertained on the at-risk set the washout defines */
+  outcomeDefinition: OutcomeDefinition;
+  washout: RelativeWindow;
+  horizonDays: number;
+  /** augmented / doubly-robust estimation — refused, with the reason */
+  doublyRobust: boolean;
+}
+
+/**
  * Fine-Gray subdistribution hazard model.
  *
  * The one thing that differs from Cox is the RISK SET: a subject who fails from
@@ -771,6 +802,7 @@ export type Analysis =
   | CompetingRisksAnalysis
   | FineGrayAnalysis
   | PropensityScoreAnalysis
+  | IptwOutcomeAnalysis
   | StatisticalEngineAnalysis
   | FutureAnalysisStub;
 
@@ -801,6 +833,7 @@ export const EMITTABLE_ANALYSIS_KINDS: ReadonlySet<AnalysisKind> = new Set<Analy
   "competing_risks",
   "fine_gray",
   "propensity_score",
+  "iptw_outcome",
 ]);
 
 export type DescriptiveAnalysis =
@@ -1400,6 +1433,35 @@ export function validateAnalyses(spec: StudySpec): string[] {
             );
         }
         a.balanceCovariateIds.forEach((b) => requireBaseline(b, `${w} balance covariate`));
+        if (a.trim < 0 || a.trim >= 0.5) problems.push(`${w}: trim must be in [0, 0.5); got ${a.trim}.`);
+        break;
+      }
+      case "iptw_outcome": {
+        const gvI = groupVars.find((g) => g.id === a.groupVarId);
+        if (!gvI) problems.push(`${w}: groupVarId "${a.groupVarId}" is not in groupVars[].`);
+        else {
+          if (gvI.levels.length !== 2) problems.push(`${w}: exposure "${gvI.id}" has ${gvI.levels.length} levels — exactly 2 are required.`);
+          if (!gvI.referenceLevel) problems.push(`${w}: exposure "${gvI.id}" has no referenceLevel, so the direction of the effect is undefined.`);
+        }
+        requireCodeList(a.outcomeDefinition.codeListId, `${w} outcome`);
+        if (a.horizonDays <= 0) problems.push(`${w}: horizonDays must be positive.`);
+        if (a.psCovariateIds.length === 0) problems.push(`${w}: psCovariateIds[] is empty, so there is no propensity model.`);
+        /* THE SAME SATURATION GATE as propensity_score, for the same reason —
+         * and it matters more here, because a score that is not the MLE
+         * produces an EFFECT ESTIMATE that is wrong rather than a diagnostic
+         * that is wrong. */
+        for (const id of a.psCovariateIds) {
+          const b = spec.baseline.find((x) => x.id === id);
+          if (!b) { problems.push(`${w}: psCovariateIds references "${id}", which is not in baseline[].`); continue; }
+          if (!["sex", "region", "plan_type", "year"].includes(b.kind))
+            problems.push(
+              `${w}: propensity covariate "${id}" is kind "${b.kind}", which is not categorical. The weighted effect estimate here is closed form ONLY because a logistic score over categorical cells is SATURATED. A continuous covariate makes the score something only iteratively reweighted least squares can produce, and the effect estimate would then be computed from weights that are not the maximum-likelihood ones — a wrong number rather than a missing one.`,
+            );
+        }
+        if (a.doublyRobust)
+          problems.push(
+            `${w}: doubly-robust (augmented IPTW) estimation is not built yet. With categorical covariates the outcome regression would ALSO be saturated, so this is closed form and buildable — it is a gap, not a refusal. What it needs beyond what is here is the augmentation term's own influence function, since the AIPW variance is not the Hajek sandwich.`,
+          );
         if (a.trim < 0 || a.trim >= 0.5) problems.push(`${w}: trim must be in [0, 0.5); got ${a.trim}.`);
         break;
       }

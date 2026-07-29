@@ -231,6 +231,19 @@ export const SUPPRESSION_SHAPES: Record<string, SuppressionShape> = {
     keepCols: ["ord", "method"],
     tieBreakCol: "time_days",
   },
+  iptw_outcome: {
+    /* The DESIGN rows carry raw event counts, which are the disclosive
+     * quantity; the effect rows are computed from them. Everything masks
+     * together, and the identification rows keep their method text because a
+     * suppressed table that hid "the effect is not identified" would be worse
+     * than one that hid the estimate. */
+    labelCols: ["measure", "component", "statistic"],
+    groupCols: ["measure", "component"],
+    countCol: "estimate",
+    maskCols: ["estimate", "se", "ci_low", "ci_high"],
+    keepCols: ["ord", "method"],
+    tieBreakCol: "statistic",
+  },
   propensity_score: {
     /* Cell counts and pseudo-population sizes are the disclosive quantities
      * here — a cell of one is one identifiable person, and the positivity rows

@@ -31,7 +31,7 @@ const DEMO_AXES = new Set(["age_band", "sex", "region", "plan_type", "year"]);
 const ANALYSIS_KINDS = new Set([
   "attrition", "table1", "point_prevalence", "period_prevalence", "cumulative_incidence",
   "incidence_rate", "standardization", "calendar_trend", "resource_use",
-  "comorbidity_index", "regression", "survival", "cox", "competing_risks", "fine_gray", "propensity_score", "statistical_engine", "future_stub",
+  "comorbidity_index", "regression", "survival", "cox", "competing_risks", "fine_gray", "propensity_score", "iptw_outcome", "statistical_engine", "future_stub",
 ]);
 const SURVIVAL_CI = new Set(["log_log", "linear"]);
 const SURVIVAL_ENDPOINTS = new Set(["claims_event", "death"]);
@@ -398,6 +398,19 @@ function checkAnalysis(p: Problems, v: unknown, path: string): void {
         if (!Array.isArray(arr)) p.push(`${path}.${key}`, `expected an array of baseline ids, got ${typeOf(arr)}`);
         else arr.forEach((x, j) => need(p, `${path}.${key}[${j}]`, isStr(x), `expected a baseline id string, got ${typeOf(x)}`));
       }
+      break;
+    }
+    case "iptw_outcome": {
+      needStr(p, v, "groupVarId", path, { nonEmpty: true });
+      needStr(p, v, "estimand", path, { nonEmpty: true });
+      needBool(p, v, "stabilized", path);
+      needBool(p, v, "doublyRobust", path);
+      needNum(p, v, "trim", path);
+      needNum(p, v, "horizonDays", path);
+      checkOutcomeDefinition(p, v.outcomeDefinition, `${path}.outcomeDefinition`);
+      checkWindow(p, v.washout, `${path}.washout`);
+      if (!Array.isArray(v.psCovariateIds)) p.push(`${path}.psCovariateIds`, `expected an array of baseline ids, got ${typeOf(v.psCovariateIds)}`);
+      else v.psCovariateIds.forEach((x, j) => need(p, `${path}.psCovariateIds[${j}]`, isStr(x), `expected a baseline id string, got ${typeOf(x)}`));
       break;
     }
     case "standardization":

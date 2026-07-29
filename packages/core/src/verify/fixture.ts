@@ -548,6 +548,42 @@ export const EXPECTED = {
     biasInterest365: 0,      // EXACTLY zero, not approximately
     identitySum: 0.375,
   },
+  /* ---------------- IPTW OUTCOME MODEL ---------------- *
+   * The score here is estimated on the AT-RISK set (8, after the washout drops
+   * P01 and P06), NOT on the cohort of 10 — so its cells differ from the
+   * propensity module's above, deliberately: weights built in one population
+   * and applied in another describe neither.
+   *
+   *   region 1 {P02,P09}    n=2 t=1  ps=1/2
+   *   region 2 {P03,P04,P10} n=3 t=1 ps=1/3
+   *   region 3 {P05}        n=1 t=0  ps=0   <- single-arm
+   *   region 4 {P07,P08}    n=2 t=2  ps=1   <- single-arm
+   *
+   * THREE of the eight are off support, so the effect is NOT IDENTIFIED. Every
+   * number below is still computed — the arithmetic never fails, which is the
+   * whole reason the identification row is emitted first and pinned here.
+   *
+   *   ATE weights  treated P07 1, P08 1, P09 2, P10 3  -> SUM 7
+   *                control P02 2, P03 3/2, P04 3/2, P05 1 -> SUM 6
+   *   Hajek risks  treated 1/7, control 7/12
+   *   sandwich     Var = SUM(w^2 (Y-mu)^2)/(SUM w)^2 -> 50/2401 and 631/10368
+   *   RD -37/84, RR 12/49, OR 5/42     (crude: -1/4, 1/2, 1/3)
+   *
+   * The RD interval runs from -1.00066: BELOW the range a difference of two
+   * probabilities can occupy. Reported unclamped, with the diagnostic row. */
+  iptwOutcome: {
+    rowCount: 19,
+    offSupport: 3, analysisSetN: 8, identified: 0,
+    nTreated: 4, nControl: 4, eventsTreated: 1, eventsControl: 2,
+    weightedNTreated: 7, weightedNControl: 6,
+    riskTreated: 0.14286, riskControl: 0.58333,
+    seTreated: 0.14431, seControl: 0.2467,
+    riskDifference: -0.44048, rdSe: 0.28581, rdCi: [-1.00066, 0.1197] as [number, number],
+    riskRatio: 0.2449, oddsRatio: 0.11905,
+    crudeRiskTreated: 0.25, crudeRiskControl: 0.5, crudeRiskDifference: -0.25,
+    weightingShift: -0.19048,
+    intervalWithinRange: 0,
+  },
   /* ---------------- Propensity score (IPTW on region) ---------------- *
    * Cells are the four regions: {P01,P02,P09}, {P03,P04,P10}, {P05,P06} and
    * {P07,P08}. Saturated scores 1/3, 1/3, 1/2 and 1 — the last because region 4
@@ -1368,6 +1404,30 @@ export const GOLD_A_SPEC: StudySpec = {
       psCovariateIds: ["b_region"],
       balanceCovariateIds: ["b_age", "b_sex"],
       method: "iptw", estimand: "ate", stabilized: false, trim: 0,
+    },
+    /* THE IPTW OUTCOME MODEL, on the same score covariate (region) and the
+     * same AE outcome the rest of Gold A uses.
+     *
+     * Note what changes when the score is estimated on the AT-RISK set rather
+     * than the cohort: the washout removes P01 and P06, so region 3 becomes
+     * {P05} alone (score 0) and region 1 becomes {P02, P09} (score 1/2). THREE
+     * of the eight subjects now sit in single-arm cells, so the effect is NOT
+     * IDENTIFIED — which is exactly the configuration this module exists to
+     * refuse to report quietly.
+     *
+     * Weighted risks 1/7 and 7/12; risk difference -37/84 against a crude
+     * -1/4, so weighting moves it by -0.19048. And the Wald interval on the
+     * risk difference runs from -1.00066, below the range a difference of two
+     * probabilities can occupy — reported UNCLAMPED, with the diagnostic row
+     * that says the normal approximation has broken down. */
+    {
+      id: "a_iptw", label: "IPTW outcome model (AE at 365d, weighted on region)", kind: "iptw_outcome", enabled: true,
+      groupVarId: "g_arm",
+      psCovariateIds: ["b_region"],
+      estimand: "ate", stabilized: false, trim: 0, doublyRobust: false,
+      outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "outpatient", diagnosisPosition: "any" },
+      washout: { start: -365, end: 0, includesIndex: true },
+      horizonDays: 365,
     },
     /* A SECOND propensity analysis, scored on REGION x SEX.
      *

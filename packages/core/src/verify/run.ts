@@ -2017,6 +2017,74 @@ export async function verifyGoldA(): Promise<VerificationResult> {
       detail: (g2?.method ?? "no row").slice(0, 110),
     });
 
+    /* ---- IPTW outcome model: the estimate, and whether it exists ---- */
+    const iw = EXPECTED.iptwOutcome;
+    const IW_T = "tz_study_iptw";
+    eq(`iptw rows = ${iw.rowCount}`, await scalar<number>(db, `SELECT count(*)::int FROM ${IW_T}`), iw.rowCount);
+    const iwRow = async (statistic: string, component?: string) =>
+      (
+        await rows<{ estimate: number | null; se: number | null; ci_low: number | null; ci_high: number | null; method: string }>(
+          db,
+          `SELECT estimate::float8, se::float8, ci_low::float8, ci_high::float8, method FROM ${IW_T}
+            WHERE statistic = '${statistic}'${component ? ` AND component = '${component}'` : ``}`,
+        )
+      )[0];
+
+    /* IDENTIFICATION FIRST — and it is emitted first, which is itself pinned.
+     * Every number after it is arithmetic that succeeds whether or not the
+     * estimand exists, so the order is part of the contract. */
+    eq("iptw: 3 of 8 subjects are off support", Number((await iwRow("subjects_off_support"))?.estimate), iw.offSupport);
+    eq("iptw: the analysis set is the AT-RISK 8, not the cohort of 10", Number((await iwRow("analysis_set_n"))?.estimate), iw.analysisSetN);
+    const ident = await iwRow("identified");
+    eq("iptw: the effect is NOT identified", Number(ident?.estimate), iw.identified);
+    checks.push({
+      name: "iptw: the identification row is ord 0, ahead of every estimate",
+      status: (await rows<{ statistic: string }>(db, `SELECT statistic FROM ${IW_T} ORDER BY ord LIMIT 1`))[0]?.statistic === "subjects_off_support" ? "pass" : "fail",
+      detail: `first row is ${(await rows<{ statistic: string }>(db, `SELECT statistic FROM ${IW_T} ORDER BY ord LIMIT 1`))[0]?.statistic}`,
+    });
+    checks.push({
+      name: "iptw: and it says the estimate describes a population that does not exist",
+      status: /NOT IDENTIFIED/.test((await iwRow("subjects_off_support"))?.method ?? "") ? "pass" : "fail",
+      detail: ((await iwRow("subjects_off_support"))?.method ?? "").slice(0, 90),
+    });
+
+    eq("iptw: weighted n treated = 7", Number((await iwRow("weighted_n_treated"))?.estimate), iw.weightedNTreated);
+    eq("iptw: weighted n control = 6", Number((await iwRow("weighted_n_control"))?.estimate), iw.weightedNControl);
+    approx("iptw: Hajek weighted risk (treated) = 1/7", Number((await iwRow("weighted_risk_treated"))?.estimate), iw.riskTreated, 0.00001);
+    approx("iptw: Hajek weighted risk (control) = 7/12", Number((await iwRow("weighted_risk_control"))?.estimate), iw.riskControl, 0.00001);
+    /* The sandwich SEs. sqrt(50/2401) and sqrt(631/10368) — NOT what
+     * p(1-p)/n_effective would give, which is the wrong estimator's variance. */
+    approx("iptw: sandwich se (treated) = sqrt(50/2401)", Number((await iwRow("weighted_risk_treated"))?.se), iw.seTreated, 0.00001);
+    approx("iptw: sandwich se (control) = sqrt(631/10368)", Number((await iwRow("weighted_risk_control"))?.se), iw.seControl, 0.00001);
+
+    const rdw = await iwRow("risk_difference", "effect");
+    approx("iptw: risk difference = -37/84", Number(rdw?.estimate), iw.riskDifference, 0.00001);
+    approx("iptw: its sandwich se", Number(rdw?.se), iw.rdSe, 0.00001);
+    approx("iptw: RD CI low", Number(rdw?.ci_low), iw.rdCi[0], 0.00001);
+    approx("iptw: RD CI high", Number(rdw?.ci_high), iw.rdCi[1], 0.00001);
+    checks.push({
+      name: "iptw: the interval is labelled weights_treated_as_known, not simply robust",
+      status: /weights_treated_as_known/.test(rdw?.method ?? "") ? "pass" : "fail",
+      detail: (rdw?.method ?? "").slice(0, 80),
+    });
+    approx("iptw: risk ratio = 12/49", Number((await iwRow("risk_ratio"))?.estimate), iw.riskRatio, 0.00001);
+    approx("iptw: odds ratio = 5/42", Number((await iwRow("odds_ratio"))?.estimate), iw.oddsRatio, 0.00001);
+
+    /* THE CRUDE CONTRAST BESIDE IT. Weighting is a claim that the crude number
+     * is wrong, and it cannot be judged without both. */
+    approx("iptw: crude risk difference = -1/4", Number((await iwRow("risk_difference", "unadjusted"))?.estimate), iw.crudeRiskDifference, 0.00001);
+    approx("iptw: weighting moved it by -0.19048", Number((await iwRow("weighting_shift"))?.estimate), iw.weightingShift, 0.00001);
+
+    /* THE INTERVAL LEFT THE RANGE, and is reported unclamped. A clamped -1.0
+     * would look like a boundary rather than a broken approximation. */
+    const rng = await iwRow("rd_interval_within_range");
+    eq("iptw: the RD interval does NOT stay inside [-1, 1]", Number(rng?.estimate), iw.intervalWithinRange);
+    checks.push({
+      name: "iptw: the lower limit is reported UNCLAMPED at -1.00066, below what a risk difference can be",
+      status: Number(rdw?.ci_low) < -1 && /UNCLAMPED/.test(rng?.method ?? "") ? "pass" : "fail",
+      detail: `ci_low ${rdw?.ci_low}; ${(rng?.method ?? "").slice(0, 70)}`,
+    });
+
     /* ---- Table 1 comorbidity-index row (executed) ----
      * The row is scored by the SAME shared engine as the index analysis and the
      * balance table, so this asserts the wiring rather than the arithmetic:

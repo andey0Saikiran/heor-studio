@@ -576,6 +576,48 @@ export function verifySilenceGuards(): Check[] {
     );
   }
 
+  /* 3f-septies. IPTW outcome readiness. The saturation gate matters MORE here
+   * than in the propensity module: there, a non-MLE score produces a wrong
+   * DIAGNOSTIC; here it produces a wrong EFFECT ESTIMATE, which is the number a
+   * study reports. */
+  {
+    const base: StudySpec = JSON.parse(JSON.stringify(GOLD_A_SPEC));
+    const iwAnalysis = (over: Record<string, unknown>) => ({
+      id: "guard_iw", label: "guard iw", kind: "iptw_outcome", enabled: true,
+      groupVarId: "g_arm", psCovariateIds: ["b_region"],
+      estimand: "ate", stabilized: false, trim: 0, doublyRobust: false,
+      outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "outpatient", diagnosisPosition: "any" },
+      washout: { start: -365, end: 0, includesIndex: true },
+      horizonDays: 365,
+      ...over,
+    });
+    const probeIw = (over: Record<string, unknown>) => {
+      const sp: StudySpec = JSON.parse(JSON.stringify(base));
+      sp.analyses.push(iwAnalysis(over) as never);
+      return specReadiness(sp).problems.find((p) => p.includes("guard_iw"));
+    };
+
+    const contIw = probeIw({ psCovariateIds: ["b_age"] });
+    push(
+      "guard: a continuous score covariate is refused on the OUTCOME model too, naming the wrong-number risk",
+      !!contIw && contIw.includes("SATURATED") && contIw.includes("wrong number rather than a missing one"),
+      contIw?.slice(0, 140) ?? "accepted a continuous covariate",
+    );
+    /* Doubly-robust is a GAP, not a refusal, and the message has to say which —
+     * the same distinction PS stratification needed. */
+    const dr = probeIw({ doublyRobust: true });
+    push(
+      "guard: doubly-robust estimation is named a GAP, not a refusal",
+      !!dr && dr.includes("it is a gap, not a refusal"),
+      dr?.slice(0, 130) ?? "accepted doublyRobust",
+    );
+    push(
+      "guard: a well-formed IPTW outcome model is NOT refused",
+      !probeIw({}),
+      probeIw({}) ?? "no problems",
+    );
+  }
+
   /* 3g. Reproducibility provenance. "Identical spec in, identical code out" is
      only auditable against a generator VERSION and a spec identity — otherwise
      a reviewer re-running a study a year later cannot tell a legitimate emitter

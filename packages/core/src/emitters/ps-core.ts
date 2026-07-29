@@ -307,3 +307,168 @@ export function psSasAnchor(o: { num: string; subjT: string }): string[] {
     `title;`,
   ];
 }
+
+/* ------------------------------------------------------------------ *
+ *  The weighted outcome model
+ * ------------------------------------------------------------------ */
+
+/**
+ * `<p>hj` — the Hajek estimator and its sandwich variance, per arm.
+ *
+ * THE ESTIMATOR. The weighted risk in an arm is the Hajek ratio
+ * SUM(w Y) / SUM(w), not the Horvitz-Thompson SUM(w Y)/n. The two differ
+ * whenever the weights do not sum to n, which is almost always, and the Hajek
+ * form is the one that stays inside [0,1] — a "risk" above 1 is the classic
+ * symptom of the other.
+ *
+ * THE VARIANCE, and this is where weighted analyses usually go wrong. The naive
+ * move is to treat the weights as frequencies and use p(1-p)/n_effective. That
+ * is not the variance of a ratio estimator, and it is too small. The sandwich
+ * form for the Hajek ratio is closed form:
+ *
+ *     Var(mu) = SUM( w^2 (Y - mu)^2 ) / ( SUM(w) )^2
+ *
+ * which is what the influence function of the ratio gives, and it is what this
+ * emits.
+ *
+ * WHAT IT ASSUMES, stated because it is easy to overclaim. This treats the
+ * WEIGHTS AS KNOWN. They are not — they come from a fitted score, even a
+ * saturated one — and propagating that estimation generally makes the interval
+ * NARROWER, not wider (Lunceford & Davidian Stat Med 2004;23:2937). So the
+ * interval here is conservative for the ATE and is labeled
+ * "weights_treated_as_known" rather than simply "robust".
+ */
+export function hajekSqlCtes(o: { subjectsCte: string; outcomeCol: string; prefix?: string }): string[] {
+  const p = o.prefix ?? "";
+  const y = o.outcomeCol;
+  return [
+    `${p}hj0 AS (   -- weighted totals per arm`,
+    `  SELECT treated,`,
+    `         SUM(w) AS sw,`,
+    `         SUM(w * ${y}) AS swy,`,
+    `         SUM(w * ${y}) / NULLIF(SUM(w), 0) AS mu,`,
+    `         COUNT(*) AS n,`,
+    `         SUM(${y}) AS events_raw`,
+    `  FROM ${o.subjectsCte}`,
+    `  GROUP BY treated`,
+    `),`,
+    `${p}hj AS (   -- the SANDWICH variance of the Hajek ratio, closed form`,
+    `  -- Var(mu) = SUM(w^2 (Y - mu)^2) / (SUM w)^2. NOT p(1-p)/n_eff, which is`,
+    `  -- the variance of something else and is too small.`,
+    `  SELECT h.treated, h.sw, h.swy, h.mu, h.n, h.events_raw,`,
+    `         SUM(k.w * k.w * POWER(k.${y} - h.mu, 2)) / NULLIF(POWER(h.sw, 2), 0) AS var_mu`,
+    `  FROM ${p}hj0 h`,
+    `  JOIN ${o.subjectsCte} k ON k.treated = h.treated`,
+    `  GROUP BY h.treated, h.sw, h.swy, h.mu, h.n, h.events_raw`,
+    `),`,
+    `${p}arms AS (`,
+    `  SELECT MAX(CASE WHEN treated = 1 THEN mu END) AS mu1,`,
+    `         MAX(CASE WHEN treated = 0 THEN mu END) AS mu0,`,
+    `         MAX(CASE WHEN treated = 1 THEN var_mu END) AS v1,`,
+    `         MAX(CASE WHEN treated = 0 THEN var_mu END) AS v0,`,
+    `         MAX(CASE WHEN treated = 1 THEN sw END) AS sw1,`,
+    `         MAX(CASE WHEN treated = 0 THEN sw END) AS sw0,`,
+    `         MAX(CASE WHEN treated = 1 THEN n END) AS n1,`,
+    `         MAX(CASE WHEN treated = 0 THEN n END) AS n0,`,
+    `         MAX(CASE WHEN treated = 1 THEN events_raw END) AS e1,`,
+    `         MAX(CASE WHEN treated = 0 THEN events_raw END) AS e0`,
+    `  FROM ${p}hj`,
+    `),`,
+  ];
+}
+
+/** The SAS twin of the same two steps. */
+export function hajekSasSteps(o: { num: string; subjT: string; outcomeCol: string }): string[] {
+  const y = o.outcomeCol;
+  return [
+    `/*----------------------------------------------------------------------------`,
+    `  The HAJEK weighted risk per arm, and its SANDWICH variance.`,
+    `    mu      = SUM(w Y) / SUM(w)        - a ratio, not SUM(w Y)/n`,
+    `    Var(mu) = SUM(w^2 (Y - mu)^2) / (SUM w)^2`,
+    `  The naive p(1-p)/n_effective is the variance of a different estimator and`,
+    `  is too small. This one treats the WEIGHTS AS KNOWN, which is conservative`,
+    `  for the ATE - propagating the score's own estimation generally NARROWS the`,
+    `  interval (Lunceford & Davidian 2004).`,
+    `----------------------------------------------------------------------------*/`,
+    `proc sql;`,
+    `  create table work._${o.num}_hj0 as`,
+    `  select treated, sum(w) as sw, sum(w * ${y}) as swy,`,
+    `         sum(w * ${y}) / sum(w) as mu, count(*) as n, sum(${y}) as events_raw`,
+    `  from ${o.subjT}`,
+    `  group by treated;`,
+    ``,
+    `  create table work._${o.num}_hj as`,
+    `  select h.treated, h.sw, h.swy, h.mu, h.n, h.events_raw,`,
+    `         sum(k.w * k.w * (k.${y} - h.mu)**2) / (h.sw ** 2) as var_mu`,
+    `  from work._${o.num}_hj0 as h, ${o.subjT} as k`,
+    `  where k.treated = h.treated`,
+    `  group by h.treated, h.sw, h.swy, h.mu, h.n, h.events_raw;`,
+    ``,
+    `  create table work._${o.num}_arms as`,
+    `  select max(case when treated = 1 then mu end) as mu1,`,
+    `         max(case when treated = 0 then mu end) as mu0,`,
+    `         max(case when treated = 1 then var_mu end) as v1,`,
+    `         max(case when treated = 0 then var_mu end) as v0,`,
+    `         max(case when treated = 1 then sw end) as sw1,`,
+    `         max(case when treated = 0 then sw end) as sw0,`,
+    `         max(case when treated = 1 then n end) as n1,`,
+    `         max(case when treated = 0 then n end) as n0,`,
+    `         max(case when treated = 1 then events_raw end) as e1,`,
+    `         max(case when treated = 0 then events_raw end) as e0`,
+    `  from work._${o.num}_hj;`,
+    `quit;`,
+  ];
+}
+
+/**
+ * THE SECOND ANCHOR: a weighted model with only the treatment term.
+ *
+ * Such a model is SATURATED for the weighted two-cell table, so its fitted
+ * values ARE the weighted arm means — the same argument as the saturated 2x2 in
+ * the regression family, now on a weighted sample. The emitted program fits it
+ * and compares, so the weighting machinery is checked against SAS's own rather
+ * than trusted.
+ *
+ * PROC GENMOD's model-based standard errors under WEIGHT are NOT the sandwich
+ * ones and are not comparable to the interval this program reports; only the
+ * POINT estimates are being checked here, and the program says so rather than
+ * letting a reader assume the intervals were compared too.
+ */
+export function hajekSasAnchor(o: { num: string; subjT: string; outcomeCol: string }): string[] {
+  return [
+    `/*----------------------------------------------------------------------------`,
+    `  ANCHOR: a weighted model with ONLY the treatment term is saturated for the`,
+    `  weighted two-cell table, so its fitted values ARE the weighted arm means.`,
+    `  NOTE: only the POINT estimates are compared. PROC GENMOD's model-based`,
+    `  standard errors under WEIGHT are not the sandwich ones this program`,
+    `  reports, and comparing them would be comparing two different quantities.`,
+    `----------------------------------------------------------------------------*/`,
+    `ods output LSMeans = work._${o.num}_lsm;`,
+    `proc genmod data=${o.subjT};`,
+    `  class treated;`,
+    `  weight w;`,
+    `  model ${o.outcomeCol} = treated / dist=normal link=identity;`,
+    `  lsmeans treated;`,
+    `run;`,
+    ``,
+    `proc sql;`,
+    `  create table work._${o.num}_wanchor as`,
+    `  select max(abs(l.Estimate - h.mu)) as gap`,
+    `  from work._${o.num}_lsm as l`,
+    `  inner join work._${o.num}_hj as h`,
+    `    on input(l.treated, best.) = h.treated;`,
+    `quit;`,
+    ``,
+    `data work._${o.num}_wanchor_v;`,
+    `  set work._${o.num}_wanchor;`,
+    `  length weighted_anchor_verdict $72;`,
+    `  if gap = . then weighted_anchor_verdict = 'NOT CHECKABLE (no fitted means returned)';`,
+    `  else if gap < 1e-9 then weighted_anchor_verdict = 'PASS: weighted saturated fit = Hajek weighted arm means';`,
+    `  else weighted_anchor_verdict = 'FAIL: weighted fit differs from the Hajek arm means';`,
+    `run;`,
+    ``,
+    `title "IPTW anchor: weighted saturated fit vs the Hajek arm means (POINT estimates only)";`,
+    `proc print data=work._${o.num}_wanchor_v noobs; run;`,
+    `title;`,
+  ];
+}

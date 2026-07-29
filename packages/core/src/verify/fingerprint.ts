@@ -626,6 +626,41 @@ function sqlFingerprint(kind: string, raw: string): Fingerprint {
       put(fp, "balance_terms", [...sql.matchAll(/CAST\('balance' AS VARCHAR\) AS component, CAST\('([^']*)' AS VARCHAR\) AS term,\n\s*CAST\('smd_unweighted'/g)].map((m) => m[1]).join(","));
       break;
     }
+    case "iptw_outcome": {
+      put(fp, "treated_level", grab(sql, [/WHEN (?:nl\.pattern|c\.index_code) = '([^']+)' THEN 1 ELSE 0 END AS treated/i]));
+      put(fp, "horizon_days", grab(sql, [
+        /a\.event_date <= DATEADD\(\s*day\s*,\s*(\d+)\s*,/i,
+        /a\.event_date <= \(c\.index_date \+ (\d+)\)/i,
+      ]));
+      put(fp, "score_is_cell_fraction", /SUM\(treated\) \* 1\.0 \/ COUNT\(\*\) AS ps/i.test(sql) ? "yes" : "no");
+      /* THE SCORE POPULATION. Estimating it on the whole cohort and applying it
+       * to the at-risk set gives weights that describe neither, and every
+       * number downstream would still look ordinary. */
+      /* Scraped from the SUBJ CTE specifically — the one place the score
+       * population is decided. A bare "does 'atrisk' appear anywhere" test is
+       * satisfied by the washout chain that BUILDS it, so it stayed green when
+       * the subject set was switched to the whole cohort. */
+      put(fp, "score_population",
+        (/subj AS \([\s\S]{0,900}?\n\s*FROM (\w+) c\b/i.exec(sql) ?? [])[1] ?? "ABSENT");
+      /* HAJEK, not Horvitz-Thompson. SUM(wY)/n instead of SUM(wY)/SUM(w) can
+       * produce a "risk" above 1 and is a different estimator. */
+      put(fp, "estimator_is_hajek_ratio",
+        /SUM\(w \* y\) \/ NULLIF\(SUM\(w\), 0\) AS mu/i.test(sql) ? "yes" : "no");
+      /* THE SANDWICH. The naive p(1-p)/n_eff is the variance of something else
+       * and is too small - this is the single most consequential expression in
+       * the module and the easiest to replace with a plausible wrong one. */
+      put(fp, "variance_is_sandwich",
+        /SUM\(k\.w \* k\.w \* POWER\(k\.y - h\.mu, 2\)\) \/ NULLIF\(POWER\(h\.sw, 2\), 0\) AS var_mu/i.test(sql) ? "yes" : "no");
+      put(fp, "identification_row_first",
+        /CAST\('identification' AS VARCHAR\) AS component, CAST\('subjects_off_support' AS VARCHAR\) AS statistic,\s*\n\s*CAST\(0 AS INT\) AS ord/i.test(sql) ? "yes" : "no");
+      put(fp, "reports_unadjusted_beside", /CAST\('unadjusted' AS VARCHAR\)/i.test(sql) ? "yes" : "no");
+      /* The risk-difference interval must NOT be clamped: clamping hides the
+       * one signal saying the normal approximation has broken down. */
+      put(fp, "rd_interval_unclamped",
+        /GREATEST\(-1[.,]/i.test(sql) || /LEAST\(1\.0, mu1 - mu0/i.test(sql) ? "no" : "yes");
+      put(fp, "range_diagnostic_emitted", /'rd_interval_within_range'/i.test(sql) ? "yes" : "no");
+      break;
+    }
     case "comorbidity_index": {
       /* The index IS its weights and its hierarchy. A dropped supersession or a
        * shifted weight produces a score that is wrong by a plausible amount on
@@ -1033,6 +1068,30 @@ function sasFingerprint(kind: string, rawSas: string, setup: string): Fingerprin
         /ps_anchor_verdict = 'PASS: saturated closed form = PROC LOGISTIC fitted probability'/i.test(sas) ? "yes" : "no");
       break;
     }
+    case "iptw_outcome": {
+      put(fp, "treated_level", grab(sas, [/treated = \(arm = "([^"]+)"\)/i]));
+      put(fp, "horizon_days", grab(sas, [/e\.svcdate <= a\.index_date \+ (\d+)/i]));
+      put(fp, "score_is_cell_fraction", /sum\(treated\) \/ count\(\*\) as ps/i.test(sas) ? "yes" : "no");
+      /* Scraped from the _s0 build, which is what feeds _subj — not from
+       * anywhere the at-risk table merely appears. */
+      put(fp, "score_population",
+        ((/create table work\.\w+_s0 as[\s\S]{0,900}?\n\s*from ([\w.]+) as a\b/i.exec(sas) ?? [])[1] ?? "ABSENT")
+          .replace(/^work\._\w+?_/, "").replace(/^tz\.\d*_?/, ""));
+      put(fp, "estimator_is_hajek_ratio", /sum\(w \* y\) \/ sum\(w\) as mu/i.test(sas) ? "yes" : "no");
+      put(fp, "variance_is_sandwich",
+        /sum\(k\.w \* k\.w \* \(k\.y - h\.mu\)\*\*2\) \/ \(h\.sw \*\* 2\) as var_mu/i.test(sas) ? "yes" : "no");
+      put(fp, "identification_row_first",
+        /component='identification'; statistic='subjects_off_support'; ord=0;/i.test(sas) ? "yes" : "no");
+      put(fp, "reports_unadjusted_beside", /component='unadjusted'/i.test(sas) ? "yes" : "no");
+      put(fp, "rd_interval_unclamped",
+        /ci_low = round\(mu1 - mu0 - 1\.96 \* _serd, 0\.00001\);/i.test(sas) ? "yes" : "no");
+      put(fp, "range_diagnostic_emitted", /'rd_interval_within_range'/i.test(sas) ? "yes" : "no");
+      /* Language-local: the weighted saturated anchor. */
+      put(fp, "iptw_anchor_present",
+        /weighted_anchor_verdict = 'PASS: weighted saturated fit = Hajek weighted arm means'/i.test(sas) &&
+        /lsmeans treated;/i.test(sas) ? "yes" : "no");
+      break;
+    }
     case "comorbidity_index": {
       const conds = [...sas.matchAll(/cond_id = "([^"]+)"; cond_label = "[^"]*"; weight = (\d+); cond_ord = (\d+)/g)];
       put(fp, "condition_ids", conds.map((m) => m[1]).join(","));
@@ -1382,6 +1441,12 @@ export function expectedFromStamp(kind: string, stamp: Record<string, unknown>):
       exp.horizons = (stamp.horizonDays as number[] ?? []).join(",");
       break;
     }
+    case "iptw_outcome": {
+      exp.treated_level = String(stamp.treatedLevel ?? "");
+      exp.horizon_days = String(stamp.horizonDays ?? "");
+      exp.score_population = String(stamp.scorePopulation ?? "") === "at_risk_after_washout" ? "atrisk" : "OTHER";
+      break;
+    }
     case "propensity_score": {
       exp.treated_level = String(stamp.treatedLevel ?? "");
       exp.arm_levels = [stamp.referenceLevel, stamp.treatedLevel].filter(Boolean).join(",");
@@ -1565,6 +1630,14 @@ const EXPECTED_CONSTANTS: Record<string, Record<"sql" | "sas", ConstantProfileSp
     sql: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
     sas: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
   },
+  iptw_outcome: {
+    /* z = 10 in each twin: two bounds each on the risk difference, the risk
+     * ratio and the odds ratio, plus the two the odds-ratio delta method needs
+     * spelled out. NO z^2 — this module estimates no proportion by the Wilson
+     * form and runs no chi-square test. */
+    sql: { z: 10, z2_half: 0, z2: 0, z2_quarter: 0 },
+    sas: { z: 10, z2_half: 0, z2: 0, z2_quarter: 0 },
+  },
   propensity_score: {
     /* NO z and NO z^2, in either twin. This module emits no confidence
      * interval at all: standardized differences are reported as point
@@ -1718,6 +1791,7 @@ export const LANGUAGE_LOCAL_KEYS: Record<string, { language: "sql" | "sas"; must
   cox_fit_in_sas: { language: "sas", must: "yes", means: "PROC PHREG fits the model, with ties=breslow stated explicitly rather than left to the default" },
   cox_null_loglik_check: { language: "sas", must: "yes", means: "PHREG's null -2 LOG L is checked against the closed-form partial log-likelihood" },
   cox_score_zero_check: { language: "sas", must: "yes", means: "U(beta_hat) = 0 is verified — the fitted coefficient is checked against the equation that defines it" },
+  iptw_anchor_present: { language: "sas", must: "yes", means: "the weighted saturated fit is run beside the Hajek arm means and compared to them (POINT estimates only — GENMOD's weighted standard errors are not the sandwich ones)" },
   ps_anchor_present: { language: "sas", must: "yes", means: "PROC LOGISTIC is run beside the saturated closed form and compared to it, so the saturation claim is checked rather than asserted" },
   fg_fit_null_in_sql: { language: "sql", must: "yes", means: "the fitted subdistribution coefficient is NULL in SQL, not approximated by the one-step estimate above it" },
   fg_fit_in_sas: { language: "sas", must: "yes", means: "PROC PHREG fits with eventcode= — without it it fits a cause-specific Cox model, cleanly, answering a different question" },

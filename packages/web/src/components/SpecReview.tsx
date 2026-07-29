@@ -794,6 +794,7 @@ const ANALYSIS_KIND_LABELS: Record<AnalysisKind, string> = {
   competing_risks: "Cumulative incidence with competing risks",
   fine_gray: "Fine-Gray subdistribution hazard model",
   propensity_score: "Propensity-score adjustment (IPTW)",
+  iptw_outcome: "IPTW outcome model (weighted effect estimate)",
   statistical_engine: "Statistical comparison",
   future_stub: "Planned (not generated yet)",
 };
