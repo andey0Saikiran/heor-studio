@@ -1,15 +1,31 @@
 # HEOR Studio — Status & Roadmap
 
-_Snapshot of what exists vs what's left. Last updated 2026-07-28 (after Analysis Waves
-1.6 through 3 — calendar trend, the claim-line ledger, the comorbidity-index
-engine and its Table 1 / SMD wiring, and the GLM emitter; **751 harness
-checks**). See
-`docs/NIGHT-REPORT-2026-07-26.md` for the overnight build and **`docs/PENDING.md`
-for the audited, authoritative roadmap** — a 9-agent audit found 151 pending items
-and corrected several claims previously made here)._
+**PAUSED — 2026-07-29, at a deliberate stopping point, not an abandoned one.**
 
-Repo: private `github.com/andey0Saikiran/heor-studio` · monorepo (`packages/core`, `packages/web`, `packages/mcp`).
-Everything below is committed and pushed unless noted.
+_22 of the 69 planned analyses are built, verified and documented. **1377 harness
+checks, 0 failing.** That 69 was a planning number rather than a specification;
+see `docs/ROADMAP.md` for what is built, what is not, and what is refused by
+design. The largest genuine gap is treatment patterns and adherence._
+
+_Why paused here: the differentiator was never the analysis count — it is the
+verification harness, and that is mature. Over the last three waves the most
+significant findings were defects in the **verification** rather than in the
+generated code (a coverage guard passing vacuously for three shipped modules, a
+positivity claim that was false in one direction, thirteen mutation tests weaker
+than they looked). That is what diminishing returns look like, and it is a good
+moment to stop._
+
+Repo: `github.com/andey0Saikiran/heor-studio` · monorepo (`packages/core`,
+`packages/web`, `packages/mcp`) · AGPL-3.0 core/web, Apache-2.0 mcp.
+
+**One step outstanding before publication:** 68 commits are unpushed because the
+local `gh` token lacks the `workflow` scope and three of them touch
+`.github/workflows/ci.yml`. Fix with `gh auth refresh -h github.com -s workflow`,
+then `git push origin main`. Nothing else blocks going public — no secrets are
+tracked, licences are in place, and CI gates the full verify.
+
+Everything below is committed. The entries worth reading are the ones where the
+harness caught defects in itself.
 
 ---
 
