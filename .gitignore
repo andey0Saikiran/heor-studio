@@ -30,3 +30,7 @@ packages/mcp/heor-corrections/
 # (IBM/Merative MarketScan data dictionary) and a former client BRD. Purged from
 # history 2026-07-29 before publication; kept privately outside the repo.
 docs/research/
+
+# CI workflow is re-added via the GitHub web UI (pushing it needs a token with
+# the "workflow" scope, which the local gh token lacks).
+.github/workflows/
