@@ -2085,6 +2085,75 @@ export async function verifyGoldA(): Promise<VerificationResult> {
       detail: `ci_low ${rdw?.ci_low}; ${(rng?.method ?? "").slice(0, 70)}`,
     });
 
+    /* ---- Standardization (g-formula + AIPW) ---- */
+    const gx = EXPECTED.gFormula;
+    const GF_T = "tz_study_gform";
+    eq(`g-formula rows = ${gx.rowCount}`, await scalar<number>(db, `SELECT count(*)::int FROM ${GF_T}`), gx.rowCount);
+    const gfRow = async (statistic: string, component?: string) =>
+      (
+        await rows<{ estimate: number | null; se: number | null; ci_low: number | null; method: string }>(
+          db,
+          `SELECT estimate::float8, se::float8, ci_low::float8, method FROM ${GF_T}
+            WHERE statistic = '${statistic}'${component ? ` AND component = '${component}'` : ``}`,
+        )
+      )[0];
+
+    /* THE RESTRICTION, which defines what population every estimate describes. */
+    eq("gform: 4 cells, 2 with both arms", Number((await gfRow("cells_with_both_arms"))?.estimate), gx.cellsWithBothArms);
+    eq("gform: 5 subjects in the analysis", Number((await gfRow("subjects_in_analysis"))?.estimate), gx.subjectsInAnalysis);
+    const exc = await gfRow("subjects_excluded");
+    eq("gform: 3 excluded — their cell holds one arm", Number(exc?.estimate), gx.subjectsExcluded);
+    checks.push({
+      name: "gform: the exclusion row says these estimates describe a DIFFERENT population",
+      status: /DIFFERENT population/.test(exc?.method ?? "") ? "pass" : "fail",
+      detail: (exc?.method ?? "").slice(0, 90),
+    });
+
+    approx("gform: standardized risk (treated) = 0", Number((await gfRow("standardized_risk_treated"))?.estimate), gx.g1, 0.00001);
+    approx("gform: standardized risk (control) = 7/10", Number((await gfRow("standardized_risk_control"))?.estimate), gx.g0, 0.00001);
+    approx("gform: risk difference = -7/10", Number((await gfRow("risk_difference", "g_formula"))?.estimate), gx.riskDifference, 0.00001);
+
+    /* THE IDENTITY. Two expressions — one over cells, one over subjects — that
+     * must agree exactly under double saturation. Nothing is shipped to compare
+     * against; each checks the other. */
+    const idr = await gfRow("aipw_minus_g_formula");
+    checks.push({
+      name: "gform: AIPW EQUALS the g-formula exactly (double saturation)",
+      status: Number(idr?.estimate) === 0 && /HOLDS/.test(idr?.method ?? "") ? "pass" : "fail",
+      detail: `residual ${idr?.estimate}`,
+    });
+    approx("gform: AIPW risk difference agrees", Number((await gfRow("risk_difference", "aipw"))?.estimate), gx.riskDifference, 0.00001);
+    approx("gform: AIPW se includes the between-arm covariance", Number((await gfRow("risk_difference", "aipw"))?.se), gx.aipwRdSe, 0.00001);
+
+    /* A ZERO VARIANCE IS A BOUNDARY. Every treated subject in the restricted
+     * cells is event-free, so the influence function is identically zero. A
+     * standard error of 0 must not read as an exact estimate. */
+    const zv = await gfRow("zero_variance_arm");
+    eq("gform: an arm has zero estimated variance", Number(zv?.estimate), gx.zeroVarianceArm);
+    checks.push({
+      name: "gform: and it is called a BOUNDARY, not precision",
+      status: /BOUNDARY, not precision/.test(zv?.method ?? "") ? "pass" : "fail",
+      detail: (zv?.method ?? "").slice(0, 80),
+    });
+
+    /* THE CROSS-MODULE COMPARISON this fixture pair exists to make. Same data,
+     * same score, same outcome — and 0.25952 apart, entirely because weighting
+     * carries the off-support subjects and standardization cannot. Asserted
+     * against the LIVE iptw table, so neither number can drift alone. */
+    {
+      const gRd = Number((await gfRow("risk_difference", "g_formula"))?.estimate);
+      const iRd = Number(
+        (await rows<{ estimate: number | null }>(db, `SELECT estimate::float8 FROM ${IW_T} WHERE component = 'effect' AND statistic = 'risk_difference'`))[0]?.estimate,
+      );
+      approx("gform: the IPTW risk difference on the same data is -37/84", iRd, gx.iptwRiskDifference, 0.00001);
+      approx("gform: the two estimators are 0.25952 apart", Math.abs(gRd - iRd), gx.gapVsIptw, 0.00001);
+      checks.push({
+        name: "gform: the gap is LARGER than half either estimate — the positivity violation, quantified",
+        status: Math.abs(gRd - iRd) > Math.abs(gRd) / 2 || Math.abs(gRd - iRd) > Math.abs(iRd) / 2 ? "pass" : "fail",
+        detail: `g-formula ${gRd} over 5 subjects vs IPTW ${iRd} over 8; gap ${Math.abs(gRd - iRd).toFixed(5)}`,
+      });
+    }
+
     /* ---- Table 1 comorbidity-index row (executed) ----
      * The row is scored by the SAME shared engine as the index analysis and the
      * balance table, so this asserts the wiring rather than the arithmetic:

@@ -496,6 +496,32 @@ export interface IptwOutcomeAnalysis extends AnalysisCommon {
 }
 
 /**
+ * Standardization (g-formula) and the doubly-robust AIPW estimator.
+ *
+ * Both models saturated over the same categorical cells, so both are closed
+ * form — and under double saturation AIPW is algebraically IDENTICAL to the
+ * g-formula, which the module checks rather than assumes.
+ *
+ * The distinguishing property, and the reason this exists beside iptw_outcome:
+ * the g-formula CANNOT be computed in a cell holding one arm. That is an
+ * undefined term, not a small number, so the estimator is forced to restrict
+ * itself to where the contrast exists and to say how many people that drops —
+ * where weighting silently carries them along.
+ *
+ * Ref: Robins Math Modelling 1986;7:1393; Robins, Rotnitzky & Zhao JASA
+ * 1994;89:846; Hernan & Robins, Causal Inference (2020) ch.13.
+ */
+export interface GFormulaAnalysis extends AnalysisCommon {
+  kind: "g_formula";
+  groupVarId: string;
+  /** cell axes. Must ALL be categorical — same gate as the other causal kinds. */
+  covariateIds: string[];
+  outcomeDefinition: OutcomeDefinition;
+  washout: RelativeWindow;
+  horizonDays: number;
+}
+
+/**
  * Fine-Gray subdistribution hazard model.
  *
  * The one thing that differs from Cox is the RISK SET: a subject who fails from
@@ -803,6 +829,7 @@ export type Analysis =
   | FineGrayAnalysis
   | PropensityScoreAnalysis
   | IptwOutcomeAnalysis
+  | GFormulaAnalysis
   | StatisticalEngineAnalysis
   | FutureAnalysisStub;
 
@@ -834,6 +861,7 @@ export const EMITTABLE_ANALYSIS_KINDS: ReadonlySet<AnalysisKind> = new Set<Analy
   "fine_gray",
   "propensity_score",
   "iptw_outcome",
+  "g_formula",
 ]);
 
 export type DescriptiveAnalysis =
@@ -1463,6 +1491,23 @@ export function validateAnalyses(spec: StudySpec): string[] {
             `${w}: doubly-robust (augmented IPTW) estimation is not built yet. With categorical covariates the outcome regression would ALSO be saturated, so this is closed form and buildable — it is a gap, not a refusal. What it needs beyond what is here is the augmentation term's own influence function, since the AIPW variance is not the Hajek sandwich.`,
           );
         if (a.trim < 0 || a.trim >= 0.5) problems.push(`${w}: trim must be in [0, 0.5); got ${a.trim}.`);
+        break;
+      }
+      case "g_formula": {
+        const gvG = groupVars.find((g) => g.id === a.groupVarId);
+        if (!gvG) problems.push(`${w}: groupVarId "${a.groupVarId}" is not in groupVars[].`);
+        else if (gvG.levels.length !== 2) problems.push(`${w}: exposure "${gvG.id}" has ${gvG.levels.length} levels — exactly 2 are required.`);
+        requireCodeList(a.outcomeDefinition.codeListId, `${w} outcome`);
+        if (a.horizonDays <= 0) problems.push(`${w}: horizonDays must be positive.`);
+        if (a.covariateIds.length === 0) problems.push(`${w}: covariateIds[] is empty, so there is nothing to standardize over.`);
+        for (const id of a.covariateIds) {
+          const b = spec.baseline.find((x) => x.id === id);
+          if (!b) { problems.push(`${w}: covariateIds references "${id}", which is not in baseline[].`); continue; }
+          if (!["sex", "region", "plan_type", "year"].includes(b.kind))
+            problems.push(
+              `${w}: covariate "${id}" is kind "${b.kind}", which is not categorical. The g-formula here standardizes over CELLS, and a continuous covariate has no cells — it would need a fitted outcome model, which is a different estimator than the one this module implements and checks.`,
+            );
+        }
         break;
       }
       case "statistical_engine": {

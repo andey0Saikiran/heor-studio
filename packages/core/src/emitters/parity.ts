@@ -30,6 +30,7 @@ import type {
   FineGrayAnalysis,
   PropensityScoreAnalysis,
   IptwOutcomeAnalysis,
+  GFormulaAnalysis,
   SurvivalAnalysis,
   TrendSpec,
 } from "../spec/types";
@@ -1610,6 +1611,71 @@ export function iptwOutcomeParity(
     scorePopulation: "at_risk_after_washout",
     estimator: "hajek_ratio",
     variance: "sandwich_weights_treated_as_known",
+    sasPrimary: "none",
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ *  Standardization (g-formula) / AIPW
+ * ------------------------------------------------------------------ */
+
+export interface GFormulaParity {
+  id: string;
+  codeListId: string;
+  horizonDays: number;
+  washout: { start: number | "anytime_before"; end: number | "anytime_after"; includesIndex: boolean };
+  settingFilter: string;
+  referenceLevel: string;
+  treatedLevel: string;
+  cellAxes: string[];
+  outcomeModel: "saturated_cell_means";
+  scoreModel: "saturated_cell_fraction";
+  /** the population the estimates describe, which is NOT the cohort */
+  population: "cells_with_both_arms";
+  variance: "influence_function_with_covariance";
+  sasPrimary: "none";
+}
+
+export function gFormulaLimitations(an: GFormulaAnalysis, listSystem: CodeSystem): string[] {
+  const out: string[] = [];
+  const note = outcomeSettingPlan(an.outcomeDefinition, listSystem).note;
+  if (note) out.push(note);
+  out.push(`the estimates describe the population in CELLS CONTAINING BOTH ARMS, not the cohort. That restriction is forced: a cell with one arm has no mean to standardize for the other, and there is no defensible value to put there. The support rows say how many subjects it drops`);
+  out.push(`this is a DIFFERENT population from the one an IPTW outcome model reports on. Weighting carries single-arm subjects along at weight 1 and produces a number for a population that includes people with no comparison group; standardization cannot, so the two estimates can differ substantially on the same data and both be computed correctly`);
+  out.push(`the outcome model is SATURATED over the cells - a mean per cell per arm. It cannot be misspecified in the usual sense, which is why "doubly robust" buys nothing extra here: both models are exactly right by construction, and AIPW reduces to the g-formula`);
+  out.push(`the variance is the influence-function form and treats the cell means as estimated, but the CELL PROPORTIONS as fixed. That is standard and is a small understatement at these sample sizes`);
+  out.push(`NO continuous covariate: standardization here is over cells, and a continuous covariate has none. It would need a fitted outcome model, which is a different estimator than the one this module implements and checks`);
+  out.push(`the outcome is a BINARY indicator over a fixed horizon, with nobody censored - a subject who leaves the data early is counted event-free`);
+  return out;
+}
+
+export const G_FORMULA_METHOD_NOTES = [
+  `READ THE SUPPORT ROWS FIRST. The g-formula cannot be computed in a covariate cell holding only one arm: the missing arm's mean is an UNDEFINED TERM, not a small number. So these estimates describe the population in cells with both arms, which is narrower than the cohort`,
+  `that restriction is the difference from an IPTW outcome model on the same data. Weighting does not exclude single-arm subjects - it carries them at weight 1 - so the two estimators can differ substantially and both be computed correctly. Report which population you mean`,
+  `the outcome model is the SATURATED one: a mean per cell per arm, which is exactly what a fully interacted regression would fit. Both it and the score are exact by construction, which is why "doubly robust" buys nothing extra here`,
+  `THE IDENTITY: with both models saturated over the same cells, the augmentation term cancels the weighting exactly and AIPW IS the g-formula. They are computed by different expressions - one over cells, one over subjects - and the module emits their difference as a checked row rather than assuming it`,
+  `the interval uses the influence-function variance INCLUDING the covariance between arms. Every subject contributes to both influence functions, so treating the arms as independent would overstate it`,
+  `a standard error of ZERO is a BOUNDARY, not precision: it means every subject in an arm had the same outcome, which at small samples is an accident. The module flags it rather than letting a zero be read as an exact estimate`,
+  `SAS-PRIMARY: nothing`,
+];
+
+export function gFormulaParity(
+  an: GFormulaAnalysis,
+  consumed: { referenceLevel: string; treatedLevel: string; cellAxes: string[]; settingFilter: string },
+): GFormulaParity {
+  return {
+    id: an.id,
+    codeListId: an.outcomeDefinition.codeListId,
+    horizonDays: an.horizonDays,
+    washout: { start: an.washout.start, end: an.washout.end, includesIndex: an.washout.includesIndex },
+    settingFilter: consumed.settingFilter,
+    referenceLevel: consumed.referenceLevel,
+    treatedLevel: consumed.treatedLevel,
+    cellAxes: consumed.cellAxes,
+    outcomeModel: "saturated_cell_means",
+    scoreModel: "saturated_cell_fraction",
+    population: "cells_with_both_arms",
+    variance: "influence_function_with_covariance",
     sasPrimary: "none",
   };
 }

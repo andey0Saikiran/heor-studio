@@ -548,6 +548,42 @@ export const EXPECTED = {
     biasInterest365: 0,      // EXACTLY zero, not approximately
     identitySum: 0.375,
   },
+  /* ---------------- STANDARDIZATION (g-formula + AIPW) ---------------- *
+   * Same score covariate, outcome, horizon and washout as the IPTW model
+   * below — deliberately, so the two are comparable.
+   *
+   *   region 1 {P02(C,Y=1), P09(T,Y=0)}          m1 = 0,   m0 = 1
+   *   region 2 {P03(C,1), P04(C,0), P10(T,0)}    m1 = 0,   m0 = 1/2
+   *   region 3 {P05(C,0)}                        m1 UNDEFINED
+   *   region 4 {P07(T,1), P08(T,0)}              m0 UNDEFINED
+   *
+   * Regions 3 and 4 have no mean to standardize for one arm, so the estimator
+   * is RESTRICTED to regions 1 and 2 — 5 of 8 subjects — and reports the other
+   * 3 as excluded. Standardized over {r1: 2, r2: 3}: mu1 = 0, mu0 = 7/10.
+   *
+   *   g-formula risk difference   -7/10   = -0.70000   over 5 subjects
+   *   IPTW risk difference       -37/84   = -0.44048   over all 8
+   *
+   * 0.25952 apart, on the same data with the same score. The entire gap is the
+   * three subjects weighting carries at weight 1 and standardization cannot.
+   *
+   * AIPW computed independently over subjects must equal the g-formula exactly
+   * under double saturation, and does — the identity row is 0.
+   *
+   * Var(mu1) is exactly ZERO: every treated subject in the restricted cells is
+   * event-free. A boundary, not precision, and the module flags it. */
+  gFormula: {
+    rowCount: 14,
+    cellsTotal: 4, cellsWithBothArms: 2,
+    subjectsInAnalysis: 5, subjectsExcluded: 3, restrictedShare: 0.625,
+    g1: 0, g0: 0.7, riskDifference: -0.7,
+    aipwSeControl: 0.23875, aipwRdSe: 0.23875, aipwRdCiLow: -1.16794,
+    identityResidual: 0,
+    zeroVarianceArm: 1,
+    /** the comparison this fixture pair exists to make */
+    iptwRiskDifference: -0.44048,
+    gapVsIptw: 0.25952,
+  },
   /* ---------------- IPTW OUTCOME MODEL ---------------- *
    * The score here is estimated on the AT-RISK set (8, after the washout drops
    * P01 and P06), NOT on the cohort of 10 — so its cells differ from the
@@ -1404,6 +1440,35 @@ export const GOLD_A_SPEC: StudySpec = {
       psCovariateIds: ["b_region"],
       balanceCovariateIds: ["b_age", "b_sex"],
       method: "iptw", estimand: "ate", stabilized: false, trim: 0,
+    },
+    /* STANDARDIZATION (g-formula + AIPW) on EXACTLY the inputs the IPTW outcome
+     * model above uses — same score covariate, same outcome, same horizon,
+     * same washout. The pair exists to make one comparison possible.
+     *
+     * The g-formula cannot use regions 3 and 4 at all: region 3 has no treated
+     * subject to average and region 4 has no control, so one term in each is
+     * undefined rather than small. It is therefore restricted to regions 1 and
+     * 2 — FIVE of the eight subjects — and reports the other three as excluded.
+     *
+     *   m1(r1)=0, m0(r1)=1     m1(r2)=0, m0(r2)=1/2
+     *   standardized over {r1: 2, r2: 3}:  mu1 = 0, mu0 = 7/10
+     *   risk difference = -7/10 = -0.70000
+     *
+     * Against the IPTW model's -37/84 = -0.44048 over all eight. Same data,
+     * same score, 0.25952 apart — and the entire gap is the three subjects
+     * weighting carried along at weight 1 and standardization could not.
+     *
+     * AIPW, computed independently over subjects, must equal the g-formula
+     * exactly under double saturation. Var(mu1) comes out at exactly ZERO,
+     * because every treated subject in the restricted cells is event-free —
+     * a boundary, not precision, and the module says so. */
+    {
+      id: "a_gform", label: "Standardization (g-formula) over region", kind: "g_formula", enabled: true,
+      groupVarId: "g_arm",
+      covariateIds: ["b_region"],
+      outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "outpatient", diagnosisPosition: "any" },
+      washout: { start: -365, end: 0, includesIndex: true },
+      horizonDays: 365,
     },
     /* THE IPTW OUTCOME MODEL, on the same score covariate (region) and the
      * same AE outcome the rest of Gold A uses.

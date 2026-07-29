@@ -829,6 +829,52 @@ const MUTATIONS: Mutation[] = [
     kind: "iptw_outcome", lang: "sql",
     apply: (t) => t.replace(/CAST\('unadjusted' AS VARCHAR\)/g, "CAST('effect' AS VARCHAR)"),
   },
+  /* ---- g_formula ----------------------------------------------------------- */
+  {
+    /* THE UNDEFINED TERM IMPUTED TO ZERO. A cell with no treated subject has no
+     * treated mean; COALESCE-ing it to 0 invents an outcome for a group that
+     * does not exist, and the estimator then reports on the whole cohort with a
+     * number partly made up. */
+    name: "SQL imputes a missing cell mean to zero instead of leaving it undefined",
+    kind: "g_formula", lang: "sql",
+    apply: (t) => t.replace(/AVG\(CASE WHEN treated = 1 THEN y END\) AS m1/g, "COALESCE(AVG(CASE WHEN treated = 1 THEN y END), 0) AS m1"),
+  },
+  {
+    /* THE RESTRICTION DROPPED. Single-arm cells re-enter, and every estimate
+     * silently becomes a statement about a population where the contrast does
+     * not exist. */
+    name: "SQL stops restricting to cells with both arms",
+    kind: "g_formula", lang: "sql",
+    apply: (t) => t.replace(/WHERE n_t > 0 AND n_c > 0/g, "WHERE 1 = 1"),
+  },
+  {
+    /* Cells weighted EQUALLY rather than by size. A different estimand, and one
+     * that looks exactly like the right answer. */
+    name: "SAS standardizes over equally-weighted cells instead of cell sizes",
+    kind: "g_formula", lang: "sas",
+    apply: (t) => t.replace(/sum\(n_cell \* m1\) \/ sum\(n_cell\) as g1/g, "mean(m1) as g1"),
+  },
+  {
+    /* THE AUGMENTATION TERM DELETED. AIPW collapses to plain IPTW, the identity
+     * with the g-formula breaks, and the module's own check catches it — which
+     * is the point of emitting the identity as a row. */
+    name: "SQL drops the AIPW augmentation term",
+    kind: "g_formula", lang: "sql",
+    apply: (t) => t.replace(/\s*- \(s\.treated - c\.e\) \/ NULLIF\(c\.e, 0\) \* c\.m1 AS a1_i/g, " AS a1_i"),
+  },
+  {
+    /* The covariance dropped from the variance. The arms share every subject,
+     * so this OVERSTATES the interval — the safe direction, and therefore the
+     * one nobody questions. */
+    name: "SQL treats the two arms as independent in the AIPW variance",
+    kind: "g_formula", lang: "sql",
+    apply: (t) => t.replace(/v1 \+ v0 - 2 \* cov10/g, "v1 + v0"),
+  },
+  {
+    name: "SAS deletes the zero-variance boundary warning",
+    kind: "g_formula", lang: "sas",
+    apply: (t) => t.replace(/if v1 <= 0 or v0 <= 0 then method='AN ARM HAS ZERO/g, "if 0 then method='AN ARM HAS ZERO"),
+  },
 ];
 
 interface Program {

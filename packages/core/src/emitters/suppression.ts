@@ -231,6 +231,14 @@ export const SUPPRESSION_SHAPES: Record<string, SuppressionShape> = {
     keepCols: ["ord", "method"],
     tieBreakCol: "time_days",
   },
+  g_formula: {
+    labelCols: ["measure", "component", "statistic"],
+    groupCols: ["measure", "component"],
+    countCol: "estimate",
+    maskCols: ["estimate", "se", "ci_low", "ci_high"],
+    keepCols: ["ord", "method"],
+    tieBreakCol: "statistic",
+  },
   iptw_outcome: {
     /* The DESIGN rows carry raw event counts, which are the disclosive
      * quantity; the effect rows are computed from them. Everything masks

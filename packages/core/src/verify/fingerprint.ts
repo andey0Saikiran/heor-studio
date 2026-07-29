@@ -661,6 +661,41 @@ function sqlFingerprint(kind: string, raw: string): Fingerprint {
       put(fp, "range_diagnostic_emitted", /'rd_interval_within_range'/i.test(sql) ? "yes" : "no");
       break;
     }
+    case "g_formula": {
+      put(fp, "treated_level", grab(sql, [/WHEN (?:nl\.pattern|c\.index_code) = '([^']+)' THEN 1 ELSE 0 END AS treated/i]));
+      put(fp, "horizon_days", grab(sql, [
+        /a\.event_date <= DATEADD\(\s*day\s*,\s*(\d+)\s*,/i,
+        /a\.event_date <= \(c\.index_date \+ (\d+)\)/i,
+      ]));
+      /* THE SATURATED OUTCOME MODEL. Cell means, with NULL where an arm is
+       * absent — an undefined term, and the whole reason this estimator
+       * restricts itself. COALESCE-ing them to 0 would silently invent an
+       * outcome for a group that does not exist. */
+      put(fp, "outcome_model_is_cell_means",
+        /AVG\(CASE WHEN treated = 1 THEN y END\) AS m1/i.test(sql) &&
+        /AVG\(CASE WHEN treated = 0 THEN y END\) AS m0/i.test(sql) ? "yes" : "no");
+      put(fp, "restricted_to_cells_with_both_arms",
+        /ok_cells AS \(SELECT \* FROM cellm WHERE n_t > 0 AND n_c > 0\)/i.test(sql) ? "yes" : "no");
+      /* The g-formula standardizes over the cells' OWN sizes. Weighting each
+       * cell equally instead is a different estimand and looks identical. */
+      put(fp, "standardizes_over_cell_sizes",
+        /SUM\(n_cell \* m1\) \/ NULLIF\(SUM\(n_cell\), 0\) AS g1/i.test(sql) ? "yes" : "no");
+      put(fp, "aipw_augmentation_present",
+        /- \(s\.treated - c\.e\) \/ NULLIF\(c\.e, 0\) \* c\.m1 AS a1_i/i.test(sql) &&
+        /\+ \(s\.treated - c\.e\) \/ NULLIF\(1 - c\.e, 0\) \* c\.m0 AS a0_i/i.test(sql) ? "yes" : "no");
+      /* The arms share subjects, so the covariance is a real term. Dropping it
+       * OVERSTATES the interval, which is the safe direction and therefore the
+       * one nobody notices. */
+      put(fp, "variance_includes_covariance",
+        /SUM\(\(i\.a1_i - a\.a1\) \* \(i\.a0_i - a\.a0\)\)/i.test(sql) &&
+        /v1 \+ v0 - 2 \* cov10/i.test(sql) ? "yes" : "no");
+      put(fp, "identity_row_emitted", /'aipw_minus_g_formula'/i.test(sql) ? "yes" : "no");
+      /* The CONDITION, not just the row label. A row named zero_variance_arm
+       * whose test is `0` still appears in the table and still says nothing. */
+      put(fp, "zero_variance_flagged",
+        /'zero_variance_arm'/i.test(sql) && /CASE WHEN v\.v1 <= 0 OR v\.v0 <= 0/i.test(sql) ? "yes" : "no");
+      break;
+    }
     case "comorbidity_index": {
       /* The index IS its weights and its hierarchy. A dropped supersession or a
        * shifted weight produces a score that is wrong by a plausible amount on
@@ -1092,6 +1127,27 @@ function sasFingerprint(kind: string, rawSas: string, setup: string): Fingerprin
         /lsmeans treated;/i.test(sas) ? "yes" : "no");
       break;
     }
+    case "g_formula": {
+      put(fp, "treated_level", grab(sas, [/treated = \(arm = "([^"]+)"\)/i]));
+      put(fp, "horizon_days", grab(sas, [/e\.svcdate <= a\.index_date \+ (\d+)/i]));
+      put(fp, "outcome_model_is_cell_means",
+        /mean\(case when treated = 1 then y else \. end\) as m1/i.test(sas) &&
+        /mean\(case when treated = 0 then y else \. end\) as m0/i.test(sas) ? "yes" : "no");
+      put(fp, "restricted_to_cells_with_both_arms",
+        /where n_t > 0 and n_c > 0/i.test(sas) ? "yes" : "no");
+      put(fp, "standardizes_over_cell_sizes",
+        /sum\(n_cell \* m1\) \/ sum\(n_cell\) as g1/i.test(sas) ? "yes" : "no");
+      put(fp, "aipw_augmentation_present",
+        /- \(s\.treated - c\.e\) \/ c\.e \* c\.m1 as a1_i/i.test(sas) &&
+        /\+ \(s\.treated - c\.e\) \/ \(1 - c\.e\) \* c\.m0 as a0_i/i.test(sas) ? "yes" : "no");
+      put(fp, "variance_includes_covariance",
+        /sum\(\(i\.a1_i - a\.a1\) \* \(i\.a0_i - a\.a0\)\)/i.test(sas) &&
+        /v1 \+ v0 - 2\*cov10/i.test(sas) ? "yes" : "no");
+      put(fp, "identity_row_emitted", /'aipw_minus_g_formula'/i.test(sas) ? "yes" : "no");
+      put(fp, "zero_variance_flagged",
+        /'zero_variance_arm'/i.test(sas) && /if v1 <= 0 or v0 <= 0 then method='AN ARM HAS ZERO/i.test(sas) ? "yes" : "no");
+      break;
+    }
     case "comorbidity_index": {
       const conds = [...sas.matchAll(/cond_id = "([^"]+)"; cond_label = "[^"]*"; weight = (\d+); cond_ord = (\d+)/g)];
       put(fp, "condition_ids", conds.map((m) => m[1]).join(","));
@@ -1441,6 +1497,13 @@ export function expectedFromStamp(kind: string, stamp: Record<string, unknown>):
       exp.horizons = (stamp.horizonDays as number[] ?? []).join(",");
       break;
     }
+    case "g_formula": {
+      exp.treated_level = String(stamp.treatedLevel ?? "");
+      exp.horizon_days = String(stamp.horizonDays ?? "");
+      exp.restricted_to_cells_with_both_arms = String(stamp.population ?? "") === "cells_with_both_arms" ? "yes" : "no";
+      exp.variance_includes_covariance = String(stamp.variance ?? "") === "influence_function_with_covariance" ? "yes" : "no";
+      break;
+    }
     case "iptw_outcome": {
       exp.treated_level = String(stamp.treatedLevel ?? "");
       exp.horizon_days = String(stamp.horizonDays ?? "");
@@ -1629,6 +1692,14 @@ const EXPECTED_CONSTANTS: Record<string, Record<"sql" | "sas", ConstantProfileSp
   smd_balance: {
     sql: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
     sas: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
+  },
+  g_formula: {
+    /* z = 2: the two bounds of the AIPW risk-difference interval. The
+     * g-formula rows carry point estimates only — their interval is the AIPW
+     * one, since under double saturation the two estimators are the same
+     * quantity and emitting a second interval would imply otherwise. */
+    sql: { z: 2, z2_half: 0, z2: 0, z2_quarter: 0 },
+    sas: { z: 2, z2_half: 0, z2: 0, z2_quarter: 0 },
   },
   iptw_outcome: {
     /* z = 10 in each twin: two bounds each on the risk difference, the risk
