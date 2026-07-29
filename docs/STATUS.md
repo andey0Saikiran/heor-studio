@@ -321,6 +321,43 @@ The statistic now follows the family and is stamped and asserted.
 
 Overdispersion is an emitted limitation, not a silent assumption.
 
+### The g-formula and AIPW (Wave 7.2) — the 22nd, and two answers that disagree
+
+Wave 7.1 called doubly-robust estimation a **gap, not a refusal**. This closes
+it, and closes something more useful than a missing feature.
+
+**The identity.** With both the score and the outcome model saturated over the
+same cells, the augmentation term cancels the weighting exactly — **AIPW *is*
+the g-formula**. Two entirely different expressions, one over cells and one over
+subjects, producing one number. The module emits their difference as a row and
+the harness pins it at zero. Cheapest strong check in the family: no reference
+value, no second fixture, two routes to one quantity.
+
+**And the point of the whole thing.** The g-formula *cannot* be computed in a
+cell holding one arm — the missing mean is an undefined **term**, not a small
+number — so it must restrict itself and say who it dropped:
+
+| estimator | population | risk difference |
+|---|---|---|
+| IPTW | all 8 subjects | −37/84 = **−0.44048** |
+| g-formula | the 5 where the contrast exists | −7/10 = **−0.70000** |
+
+Same data, same score, same outcome, same horizon. **0.25952 apart** — larger
+than half of either estimate — and the entire gap is the three subjects in
+single-arm cells that weighting carries at weight 1 and standardization cannot.
+Neither is a mistake. The IPTW module emits its identification row first for
+exactly this reason; this module is what that row was warning about. The harness
+now asserts the gap against the **live** IPTW table, so neither can drift alone.
+
+**A zero standard error is a boundary.** Var(μ₁) here is exactly 0 — every
+treated subject in the restricted cells is event-free. That is a small-sample
+accident, not certainty, and the module says so rather than letting a 0 read as
+an exact estimate.
+
+Six mutations, all caught — one needed the check tightened: a row named
+`zero_variance_arm` whose condition had been replaced by `0` still appears and
+still says nothing, so the fingerprint scrapes the **condition**, not the label.
+
 ### IPTW outcome models (Wave 7.1) — the 21st, and the estimate that does not exist
 
 The propensity module makes the weights; this one makes the number a study
