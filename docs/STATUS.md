@@ -321,6 +321,56 @@ The statistic now follows the family and is stamped and asserted.
 
 Overdispersion is an emitted limitation, not a silent assumption.
 
+### IPTW outcome models (Wave 7.1) — the 21st, and the estimate that does not exist
+
+The propensity module makes the weights; this one makes the number a study
+reports. They are separate because they **fail differently** — a beautifully
+balanced weighted sample can still be a population in which the effect is not
+identified, and the arithmetic will not tell you.
+
+**Everything executed, nothing deferred to SAS**: the saturated score on the
+**at-risk** set (not the cohort — weights built in one population and applied in
+another describe neither), the **Hájek** ratio SUM(wY)/SUM(w), and its
+**sandwich** variance SUM(w²(Y−μ)²)/(SUM w)².
+
+Verified on Gold A, every value an exact fraction:
+
+| | weighted | crude |
+|---|---|---|
+| risk, treated | 1/7 | 1/4 |
+| risk, control | 7/12 | 1/2 |
+| risk difference | −37/84 | −1/4 |
+
+**Three things it refuses to let pass quietly.** The washout changes the score
+cells, so **3 of 8 subjects sit in single-arm cells** and the effect is *not
+identified* — the identification row is emitted at **ord 0**, ahead of every
+estimate, and the harness pins that order as part of the contract. The variance
+is labelled `weights_treated_as_known`, not "robust", because treating the
+weights as fixed is *conservative* and "robust" would claim more than it
+computes. And the risk-difference interval runs from **−1.00066** — below what a
+difference of two probabilities can be — reported **unclamped**, because a limit
+pinned at exactly −1 reads as a boundary rather than as a broken approximation.
+
+### The partial-replacement trap, made detectable — and eight more found
+
+`String.replace` without `/g` corrupts only the first occurrence. When the
+emitter writes an expression several times, the survivors satisfy any check that
+asks "does the correct text still appear" — so the mutation reads as **caught**
+while most of the program was never corrupted.
+
+That had happened **five times**, each found by accident. It has an exact
+signature: applying the mutation *twice* changes the text again. That is now a
+check over the whole suite, and **it found eight more on its first run**, most
+from waves that shipped long ago — the incidence care-setting filter, the Byar
+cube, the washout window, the point-prevalence anchor, the Wilson constant, the
+period-prevalence window, the Fine-Gray self-check, the IPTW clamp.
+
+Thirteen mutations across nine waves were weaker than they appeared. **No
+emitted number was ever wrong** — but each was a verification claim with less
+behind it than the report said. The one legitimate exception (a mutation that
+*wraps* the text it matches, so it re-matches by design) now declares
+`notIdempotent` with its reason.
+
 ### Propensity scores (Wave 7.0) — the 20th, and two things that were wrong
 
 **The family posed a problem the others did not.** A propensity score is a fitted

@@ -5,7 +5,7 @@ analyses, 1 sequencer, and 2 adversarial reviewers (a MarketScan methodologist a
 a code-truth reviewer reading the actual repo). Both reviewers' corrections are
 folded in below and marked **[CORRECTION]**._
 
-**Status: 20 done, 4 partial (updated 2026-07-28 — see docs/STATUS.md).**
+**Status: 21 done, 4 partial (updated 2026-07-28 — see docs/STATUS.md).**
 
 ---
 
