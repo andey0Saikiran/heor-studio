@@ -1620,7 +1620,7 @@ export function validateAnalyses(spec: StudySpec): string[] {
           );
         if (a.method === "stratification")
           problems.push(
-            `${w}: propensity-score STRATIFICATION is not built yet. It is deterministic and closed form, so this is an unbuilt feature and not a refusal — method:"iptw" is available now.`,
+            `${w}: propensity-score STRATIFICATION is not built yet. It is deterministic and closed form, so this is an unbuilt feature and not a refusal, and the algebra is written down in emitters/psstrat-core.ts. Worth knowing before you reach for it elsewhere: the conventional NTILE-into-quintiles recipe does NOT work on this score. A saturated score is constant within a covariate cell, so NTILE cuts through tied groups and which subjects fall on each side depends on row order - the same order-dependence that makes greedy matching unusable here. Boundaries have to fall BETWEEN distinct score values, which also means K strata cannot always be formed. method:"iptw" is available now.`,
           );
         if (a.psCovariateIds.length === 0)
           problems.push(`${w}: psCovariateIds[] is empty, so there is no propensity model.`);

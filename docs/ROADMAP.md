@@ -128,7 +128,19 @@ fills. The stockpiling closed form is unverified on those two shapes.
 ### 2. The rest of the causal family
 
 - matched-cohort designs (deterministic frequency matching, or imported match sets)
-- propensity-score stratification — closed form and deterministic, simply unbuilt
+- **propensity-score stratification** — still unbuilt, but the algebra and the
+  trap in it are now written down in `emitters/psstrat-core.ts`. Worth reading
+  before reaching for stratification anywhere: **the conventional NTILE-into-
+  quintiles recipe does not work on a saturated score.** The score is constant
+  within a covariate cell, so NTILE cuts through tied groups and which subjects
+  land on each side depends on row order. That is the same order-dependence that
+  got greedy matching refused. Boundaries have to fall BETWEEN distinct score
+  values, which has a consequence worth reporting rather than hiding: **K strata
+  cannot always be formed.** With four cells and K=5 there are at most four, and
+  a program printing "quintiles" would be describing something it did not build.
+  The file is deliberately NOT registered and NOT verified, and says so at the
+  top: nothing has executed it against hand-derived truth, no fingerprint
+  scrapes it, and no mutation proves the harness would notice it going wrong.
 - difference-in-differences, instrumental variables
 - negative-control outcomes, E-values
 

@@ -561,6 +561,16 @@ export function verifySilenceGuards(): Check[] {
       !!strat && strat.includes("not a refusal"),
       strat?.slice(0, 120) ?? "accepted stratification",
     );
+    /* An unbuilt feature should hand over what was learned building toward it.
+     * The NTILE trap is the whole reason this is harder than it looks: the
+     * conventional recipe is order-dependent on a saturated score, so anyone
+     * who reaches for stratification elsewhere needs to know before they use
+     * NTILE and get an estimate that moves with row order. */
+    push(
+      "guard: and the message warns that NTILE is order-dependent on a saturated score",
+      !!strat && /NTILE/.test(strat) && /row order/.test(strat),
+      strat?.slice(120, 300) ?? "no message",
+    );
 
     const cont = probeFor({ psCovariateIds: ["b_age"] });
     push(
