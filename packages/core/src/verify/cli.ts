@@ -3,6 +3,7 @@ import { verifyGoldA, verifyDaysPerYearChoice, verifySettingFilterControl, verif
 import { fingerprintCoverageChecks, coverageGuardSelfTest, standardPopulationChecks } from "./coverage";
 import { verifySilenceGuards } from "./guards";
 import { specChatGuards } from "./chat";
+import { reviewQueueGuards } from "./review-queue";
 
 async function main() {
   const r = await verifyGoldA();
@@ -20,6 +21,7 @@ async function main() {
   const sup = await verifySuppression();
   const sg = verifySilenceGuards();
   const sc = specChatGuards();
+  const rq = reviewQueueGuards();
 
   console.log("=== emitted Postgres SQL execution ===");
   for (const s of r.execution) console.log(`  ${s.ok ? "ok  " : "FAIL"} ${s.path}${s.error ? "  :: " + s.error : ""}`);
@@ -70,6 +72,9 @@ async function main() {
   console.log("\n=== spec chat (a model cannot mark its own work reviewed) ===");
   for (const c of sc) console.log(`  ${c.status === "pass" ? "PASS" : "FAIL"}  ${c.name} — ${c.detail}`);
 
+  console.log("\n=== review queue (the gate, asked one question at a time) ===");
+  for (const c of rq) console.log(`  ${c.status === "pass" ? "PASS" : "FAIL"}  ${c.name} — ${c.detail}`);
+
   console.log("\n=== prevalent-case washout (incidence <-> prevalence toggle) ===");
   for (const c of wt) console.log(`  ${c.status === "pass" ? "PASS" : "FAIL"}  ${c.name} — ${c.detail}`);
 
@@ -91,10 +96,11 @@ async function main() {
   const gfOk = gf.every((c) => c.status === "pass");
   const ggOk = gg.every((c) => c.status === "pass");
   const scOk = sc.every((c) => c.status === "pass");
+  const rqOk = rq.every((c) => c.status === "pass");
   const wtOk = wt.every((c) => c.status === "pass");
   const supOk = sup.every((c) => c.status === "pass");
   const sgOk = sg.every((c) => c.status === "pass");
-  console.log(`\nGold Case A: ${r.status.toUpperCase()}${dpyOk ? "" : "  (daysPerYear regression FAILED)"}${sfcOk ? "" : "  (setting-filter control FAILED)"}${covOk ? "" : "  (coverage guard FAILED)"}${awOk ? "" : "  (ascertainment window FAILED)"}${dcOk ? "" : "  (data cut FAILED)"}${gbOk ? "" : "  (Gold Case B FAILED)"}${gcOk ? "" : "  (Gold Case C FAILED)"}${gdOk ? "" : "  (Gold Case D FAILED)"}${geOk ? "" : "  (Gold Case E FAILED)"}${gfOk ? "" : "  (Gold Case F FAILED)"}${ggOk ? "" : "  (Gold Case G FAILED)"}${wtOk ? "" : "  (washout toggle FAILED)"}${supOk ? "" : "  (suppression FAILED)"}${sgOk ? "" : "  (silence guards FAILED)"}${scOk ? "" : "  (spec-chat guards FAILED)"}`);
+  console.log(`\nGold Case A: ${r.status.toUpperCase()}${dpyOk ? "" : "  (daysPerYear regression FAILED)"}${sfcOk ? "" : "  (setting-filter control FAILED)"}${covOk ? "" : "  (coverage guard FAILED)"}${awOk ? "" : "  (ascertainment window FAILED)"}${dcOk ? "" : "  (data cut FAILED)"}${gbOk ? "" : "  (Gold Case B FAILED)"}${gcOk ? "" : "  (Gold Case C FAILED)"}${gdOk ? "" : "  (Gold Case D FAILED)"}${geOk ? "" : "  (Gold Case E FAILED)"}${gfOk ? "" : "  (Gold Case F FAILED)"}${ggOk ? "" : "  (Gold Case G FAILED)"}${wtOk ? "" : "  (washout toggle FAILED)"}${supOk ? "" : "  (suppression FAILED)"}${sgOk ? "" : "  (silence guards FAILED)"}${scOk ? "" : "  (spec-chat guards FAILED)"}${rqOk ? "" : "  (review-queue guards FAILED)"}`);
   process.exit(r.status === "passed" && dpyOk && sfcOk && covOk && awOk && dcOk && gbOk && gcOk && gdOk && geOk && wtOk && supOk && sgOk ? 0 : 1);
 }
 

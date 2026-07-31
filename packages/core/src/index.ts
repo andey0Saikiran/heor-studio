@@ -14,6 +14,7 @@
 export * from "./spec/types";
 export * from "./spec/shape";
 export * from "./spec/diff";
+export * from "./spec/review-queue";
 export * from "./extract/prompt";
 export * from "./extract/anthropic";
 export * from "./emitters/types";
