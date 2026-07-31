@@ -9,7 +9,7 @@ import type { StudySpec } from "@heor-studio/core";
  */
 export const PSO_DEMO_SPEC: StudySpec = {
   meta: {
-    title: "PsO index biologics — new-user treatment patterns (demo)",
+    title: "PsO index biologics, new-user treatment patterns (demo)",
     version: "0.1.0",
     database: "marketscan_ccae",
     studyPeriod: { start: "2016-01-01", end: "2021-09-30" },
@@ -63,7 +63,7 @@ export const PSO_DEMO_SPEC: StudySpec = {
     },
     {
       id: "serious_infection_dx",
-      label: "Serious infection (hospitalized) — outcome",
+      label: "Serious infection (hospitalized), outcome",
       system: "icd10cm",
       codes: [
         { code: "A41.9", description: "Sepsis, unspecified organism", source: "user_entered", verified: true },
