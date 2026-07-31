@@ -455,7 +455,13 @@ export default function App() {
           </section>
         )}
         {step === 2 && spec && (
-          <SpecReview spec={spec} onChange={updateSpec} onFlag={setFlagRequest} />
+          <SpecReview
+            spec={spec}
+            settings={settings}
+            onChange={updateSpec}
+            onFlag={setFlagRequest}
+            onOpenSettings={() => setSettingsOpen(true)}
+          />
         )}
         {step === 3 && spec && (
           <CodelistWorkbench spec={spec} onChange={updateSpec} onFlag={setFlagRequest} />

@@ -12,6 +12,8 @@ import type {
 } from "@heor-studio/core";
 import { findCodeList, specReadiness, EMITTABLE_ANALYSIS_KINDS } from "@heor-studio/core";
 import { FlagButton } from "./CorrectionModal";
+import SpecChat from "./SpecChat";
+import type { AppSettings } from "./SettingsModal";
 import type { FlagRequest } from "../lib/corrections";
 
 type Test = Criterion["test"];
@@ -1117,12 +1119,16 @@ function AddAnalysisForm({ onAdd }: { onAdd: (kind: AnalysisKind) => void }) {
 
 export default function SpecReview({
   spec,
+  settings,
   onChange,
   onFlag,
+  onOpenSettings,
 }: {
   spec: StudySpec;
+  settings: AppSettings;
   onChange: (s: StudySpec) => void;
   onFlag: (r: FlagRequest) => void;
+  onOpenSettings: () => void;
 }) {
   const readiness = specReadiness(spec);
   const dbId = useId();
@@ -1190,6 +1196,13 @@ export default function SpecReview({
           </div>
         </div>
       )}
+
+      <SpecChat
+        spec={spec}
+        settings={settings}
+        onChange={onChange}
+        onOpenSettings={onOpenSettings}
+      />
 
       <section className="card" aria-labelledby="meta-title">
         <h2 className="card-title" id="meta-title">

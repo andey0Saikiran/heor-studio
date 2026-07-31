@@ -1,0 +1,456 @@
+/* Spec chat — component-scoped styles.
+   Consumes brand.css tokens ONLY; no palette values are declared here.
+   Sits among the App.css `.card` sections on the review step, so the shell
+   deliberately matches a card's surface, radius and shadow. */
+
+.sc {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  margin-bottom: var(--space-5);
+  font-family: var(--font-body);
+  color: var(--ink);
+}
+
+.sc :is(button, input, select, textarea):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ---------- header ---------- */
+
+.sc-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  flex-wrap: wrap;
+}
+
+.sc-toggle {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-left: calc(-1 * var(--space-1));
+  padding: var(--space-1);
+  background: none;
+  border: none;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  color: var(--ink);
+}
+
+.sc-chevron {
+  color: var(--ink-faint);
+  font-size: 0.8em;
+  flex: none;
+}
+
+.sc-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.15rem;
+  font-weight: 600;
+}
+
+.sc-toggle:hover .sc-title {
+  color: var(--accent-ink);
+}
+
+.sc-head-note {
+  font-size: 0.8rem;
+  color: var(--ink-faint);
+}
+
+.sc-pill {
+  flex: none;
+  font-size: 0.72rem;
+  color: var(--warn);
+  background: var(--warn-wash);
+  padding: 0.14rem 0.6rem;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+/* ---------- body ---------- */
+
+.sc-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-5);
+  border-top: 1px solid var(--line);
+}
+
+.sc-sub {
+  margin: 0;
+  font-size: 0.88rem;
+  color: var(--ink-soft);
+}
+
+.sc-hint {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--ink-faint);
+}
+
+.sc-hint code,
+.sc-path {
+  font-family: var(--font-mono);
+}
+
+/* ---------- no-key gate ---------- */
+
+.sc-gate {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  align-items: flex-start;
+  padding: var(--space-4);
+  background: var(--paper);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+}
+
+/* ---------- transcript ---------- */
+
+.sc-log {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  max-height: 22rem;
+  overflow-y: auto;
+}
+
+.sc-turn {
+  max-width: 46rem;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-size: 0.9rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.sc-turn--user {
+  align-self: flex-end;
+  background: var(--accent-wash);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.sc-turn--assistant {
+  align-self: flex-start;
+  background: var(--paper);
+}
+
+.sc-turn--pending {
+  opacity: 0.7;
+}
+
+.sc-who {
+  display: block;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin-bottom: var(--space-1);
+}
+
+/* ---------- composer ---------- */
+
+.sc-composer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.sc-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--ink-soft);
+}
+
+.sc-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  font-size: 0.9rem;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-3);
+  resize: vertical;
+}
+
+.sc-textarea::placeholder {
+  color: var(--ink-faint);
+}
+
+.sc-composer-row {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.sc-status {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+}
+
+.sc-error {
+  margin: 0;
+  color: var(--danger);
+  background: var(--danger-wash);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-3);
+  font-size: 0.9rem;
+}
+
+/* ---------- proposal ---------- */
+
+.sc-proposal {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  background: var(--paper);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-lg);
+}
+
+.sc-proposal-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.sc-notes {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--ink);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.sc-block {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: var(--space-3) var(--space-4);
+}
+
+.sc-block--cost {
+  background: var(--warn-wash);
+  border-color: var(--warn);
+}
+
+.sc-block--forged {
+  background: var(--surface-deep);
+}
+
+.sc-block--empty {
+  background: var(--surface-deep);
+}
+
+.sc-block-title {
+  margin: 0 0 var(--space-1);
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.sc-block p {
+  margin: 0;
+  font-size: 0.88rem;
+}
+
+.sc-block-list {
+  margin: var(--space-2) 0 0;
+  padding-left: 1.2rem;
+  font-size: 0.88rem;
+}
+
+.sc-block-list li + li {
+  margin-top: var(--space-1);
+}
+
+.sc-block-list code {
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+}
+
+/* ---------- grouped diff ---------- */
+
+.sc-groups {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.sc-group-title {
+  margin: 0 0 var(--space-2);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+.sc-changes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.sc-changes li + li {
+  border-top: 1px solid var(--line);
+}
+
+.sc-change {
+  padding: var(--space-3) var(--space-4);
+}
+
+.sc-change--costly {
+  background: color-mix(in srgb, var(--warn-wash) 45%, transparent);
+}
+
+.sc-change-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-1);
+}
+
+.sc-kind {
+  flex: none;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 0.12rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
+  white-space: nowrap;
+}
+
+.sc-kind--added {
+  color: var(--ok);
+  background: var(--ok-wash);
+}
+
+.sc-kind--removed {
+  color: var(--danger);
+  background: var(--danger-wash);
+}
+
+.sc-kind--changed {
+  color: var(--accent-ink);
+  background: var(--accent-wash);
+}
+
+.sc-path {
+  font-size: 0.75rem;
+  color: var(--ink-faint);
+  overflow-wrap: anywhere;
+}
+
+.sc-cost {
+  flex: none;
+  font-size: 0.7rem;
+  color: var(--warn);
+  background: var(--warn-wash);
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
+  padding: 0.12rem 0.5rem;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.sc-summary {
+  margin: 0;
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+
+.sc-ba {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-1) var(--space-3);
+  margin-top: var(--space-2);
+  font-size: 0.82rem;
+}
+
+.sc-ba-label {
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  padding-top: 0.15rem;
+}
+
+.sc-ba-val {
+  font-family: var(--font-mono);
+  color: var(--ink-soft);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+/* ---------- proposal actions ---------- */
+
+.sc-actions {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+/* ---------- buttons ---------- */
+
+.sc-btn {
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--accent-ink);
+  background: var(--accent-wash);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-4);
+  cursor: pointer;
+}
+
+.sc-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 16%, var(--accent-wash));
+}
+
+.sc-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.sc-btn--ghost {
+  color: var(--ink-soft);
+  background: transparent;
+  border-color: var(--line);
+  font-weight: 500;
+}
+
+.sc-btn--ghost:hover:not(:disabled) {
+  background: var(--surface-deep);
+}
