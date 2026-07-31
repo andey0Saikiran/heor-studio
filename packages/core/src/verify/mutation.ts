@@ -35,6 +35,7 @@ import {
 import { sasStructureChecks } from "./sas-lint";
 import { GOLD_A_SPEC, GOLD_A_OPTS } from "./fixture";
 import { GOLD_F_SPEC, GOLD_F_OPTS } from "./fixture-f";
+import { GOLD_G_SPEC, GOLD_G_OPTS } from "./fixture-g";
 import type { StudySpec } from "../spec/types";
 import type { Check } from "./run";
 
@@ -692,6 +693,90 @@ const MUTATIONS: Mutation[] = [
     apply: (t) => t.replace(/if wn_total > n_cs_total \+ 1e-9 then/g, "if 1 then"),
   },
 
+  /* ---- TREATMENT SWITCHING --------------------------------------------
+   * Every corruption below leaves a program reporting a switch rate between
+   * 0% and 100%. Nothing raises, nothing looks impossible. */
+  {
+    /* THE OFF-BY-ONE, which decides P4 in Gold Case G: a 30-day supply from
+     * day 0 ends on day 29, so a new drug on day 30 overlaps by ZERO. Drop the
+     * -1 and P4's overlap becomes 1, flipping it out of the strict-rule group
+     * with no impossible number anywhere. */
+    name: "SQL drops the off-by-one on the index drug's last covered day",
+    kind: "treatment_switching", lang: "sql",
+    apply: (t) => t.replace(/\+ f\.days_supply - 1 AS d_end/g, "+ f.days_supply AS d_end"),
+  },
+  {
+    name: "SAS drops the off-by-one on the index drug's last covered day",
+    kind: "treatment_switching", lang: "sas",
+    apply: (t) => t.replace(/\+ f\.daysupp - 1/g, "+ f.daysupp"),
+  },
+  {
+    /* STRICTLY AFTER INDEX. Relaxing this reports a switch for every patient
+     * who started BOTH drugs on day one - combination initiators become
+     * switchers, and the switch rate rises for a reason that is pure
+     * definition error. */
+    name: "SQL lets a to-drug dispensed ON the index date count as a switch",
+    kind: "treatment_switching", lang: "sql",
+    apply: (t) => t.replace(/WHERE d_start > 0 AND/g, "WHERE d_start >= 0 AND"),
+  },
+  {
+    name: "SAS lets a to-drug dispensed ON the index date count as a switch",
+    kind: "treatment_switching", lang: "sas",
+    apply: (t) => t.replace(/f\.svcdate - a\.index_date > 0/g, "f.svcdate - a.index_date >= 0"),
+  },
+  {
+    /* THE THRESHOLD, moved rather than removed. Every count stays plausible
+     * and a different set of patients is called switchers. */
+    name: "SQL widens the permissible overlap to 90 days",
+    kind: "treatment_switching", lang: "sql",
+    apply: (t) => t.replace(/overlap_days <= 30/g, "overlap_days <= 90").replace(/overlap_days > 30/g, "overlap_days > 90"),
+  },
+  {
+    name: "SAS widens the permissible overlap to 90 days",
+    kind: "treatment_switching", lang: "sas",
+    apply: (t) => t.replace(/overlap_days <= 30/g, "overlap_days <= 90").replace(/overlap_days > 30/g, "overlap_days > 90"),
+  },
+  {
+    /* THE SENSITIVITY BAND. Collapsing the strict bound onto the declared rule
+     * makes the band look narrow: the program then reports that the rule
+     * decided almost nobody, which is the opposite of the truth on Gold G. */
+    name: "SQL collapses the strict bound onto the declared rule, hiding the band",
+    kind: "treatment_switching", lang: "sql",
+    apply: (t) => t.replace(/overlap_days <= 0 THEN 1 ELSE 0 END AS switched_strict/g,
+      "overlap_days <= 30 THEN 1 ELSE 0 END AS switched_strict"),
+  },
+  {
+    /* THE OVERLAP FLOOR. Without GREATEST(...,0) a patient whose index supply
+     * ended long before the new drug gets a NEGATIVE overlap, which is still
+     * <= the threshold, so it keeps classifying as a switch - the mutation is
+     * caught by the expression, not by the count. */
+    name: "SQL removes the floor on overlap days",
+    kind: "treatment_switching", lang: "sql",
+    apply: (t) => t.replace(
+      /GREATEST\(COALESCE\(fc\.from_last_day, t\.to_day - 1\) - t\.to_day \+ 1, 0\)/g,
+      "COALESCE(fc.from_last_day, t.to_day - 1) - t.to_day + 1"),
+  },
+  {
+    /* THE DEFINITIONAL CAVEAT on line of therapy. Deleting it leaves a line
+     * number that travels without its definition, which is the single most
+     * quietly wrong thing this module can emit. */
+    name: "SQL deletes the line-of-therapy definitional caveat",
+    kind: "treatment_switching", lang: "sql",
+    apply: (t) => t.replace(/DEFINITIONAL, NOT MEASURED/g, "line of therapy"),
+  },
+  {
+    name: "SAS deletes the line-of-therapy definitional caveat",
+    kind: "treatment_switching", lang: "sas",
+    apply: (t) => t.replace(/DEFINITIONAL, NOT MEASURED/g, "line of therapy"),
+  },
+  {
+    /* THE SAS TWIN READING THE WRONG TABLE - the same defect class that
+     * actually shipped in the adherence module. */
+    name: "SAS switching reads an index-drug table no emitter creates",
+    kind: "treatment_switching", lang: "sas",
+    apply: (t) => t.replace(/tz\.&tag\._ev_\w+/g, "tz.&tag._020_rx"),
+  },
+
   /* ---- ADHERENCE ------------------------------------------------------
    * Every corruption below leaves a program that runs and reports a PDC
    * between 0 and 1. That is the whole failure mode of this module: there is
@@ -1006,6 +1091,7 @@ export function mutationChecks(): Check[] {
   const SOURCES = [
     { spec: GOLD_A_SPEC, opts: GOLD_A_OPTS },
     { spec: GOLD_F_SPEC, opts: GOLD_F_OPTS },
+    { spec: GOLD_G_SPEC, opts: GOLD_G_OPTS },
   ].map(({ spec, opts }) => {
     const sas = emitSas(spec, opts);
     return {

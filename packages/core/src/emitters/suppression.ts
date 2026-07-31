@@ -231,6 +231,18 @@ export const SUPPRESSION_SHAPES: Record<string, SuppressionShape> = {
     keepCols: ["ord", "method"],
     tieBreakCol: "time_days",
   },
+  treatment_switching: {
+    /* Every switching statistic is a count of PEOPLE, or a mean computed from
+     * one, so the whole block masks together. mean_days_to_switch is the
+     * disclosive one to watch: with a single switcher it IS that person's
+     * switch date. */
+    labelCols: ["measure", "component", "statistic"],
+    groupCols: ["measure", "component"],
+    countCol: "estimate",
+    maskCols: ["estimate"],
+    keepCols: ["ord", "method"],
+    tieBreakCol: "statistic",
+  },
   adherence: {
     /* Patient counts are the disclosive quantity — n_adherent and
      * n_discontinued are counts of people. The means are computed from them, so

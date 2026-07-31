@@ -178,11 +178,25 @@ export const PSO_DEMO_SPEC: StudySpec = {
       ciMethod: "wilson",
       stratifyBy: [],
     },
-    // Recorded but disabled until their emitters land (P2+): visible in review, non-blocking.
+    /* Adherence and switching both ship, so the demo runs them rather than
+     * parking them as planned work. Both read the per-fill feeder the spine
+     * emits only when an analysis asks for it. */
     {
-      id: "a_treatment_patterns", label: "Treatment patterns", kind: "future_stub",
-      plannedKind: "treatment_switching", enabled: false,
-      notes: "Switching, discontinuation (60-day gap), adherence (PDC) over 12-month follow-up.",
+      id: "a_adherence", label: "Adherence and persistence to the index biologic", kind: "adherence", enabled: true,
+      drugCodeListId: "index_biologics",
+      window: { start: 0, end: 364, includesIndex: true },
+      permissibleGapDays: 60,
+      adherenceThreshold: 0.8,
+      notes: "PDC and MPR over 12-month follow-up, with the stockpiling variant beside them.",
+    },
+    {
+      id: "a_switching", label: "Switching off the index biologic", kind: "treatment_switching", enabled: false,
+      fromCodeListId: "index_biologics",
+      toCodeListIds: ["baseline_excl_drugs"],
+      window: { start: 0, end: 364, includesIndex: true },
+      permissibleOverlapDays: 30,
+      lineRule: "new_line_on_switch",
+      notes: "Disabled in the demo: the to-list here is the baseline exclusion list, which is a stand-in rather than a real switch target. Set a genuine destination list before enabling.",
     },
     { id: "a_hcru_cost", label: "HCRU & cost", kind: "future_stub", plannedKind: "cost", enabled: false },
     { id: "a_km", label: "Kaplan-Meier survival", kind: "future_stub", plannedKind: "km_survival", enabled: false },

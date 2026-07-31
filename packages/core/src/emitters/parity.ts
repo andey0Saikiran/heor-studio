@@ -32,6 +32,7 @@ import type {
   IptwOutcomeAnalysis,
   GFormulaAnalysis,
   AdherenceAnalysis,
+  TreatmentSwitchingAnalysis,
   SurvivalAnalysis,
   TrendSpec,
 } from "../spec/types";
@@ -687,6 +688,19 @@ export function ascertainmentWindow(spec: StudySpec): AscertainmentWindow {
       consider(back, `analysis "${a.id}" needs fills reaching into its window: ${cap}d max supply before day ${wStart}`);
       if (typeof a.window.end === "number" && a.window.end > fwdDays) {
         fwdDays = a.window.end; reasons.push(`analysis "${a.id}" adherence window ends day ${a.window.end}`);
+      }
+    }
+    /* Switching reaches the pull the same way adherence does, and for the same
+     * reason: the index drug's supply has to be visible for the overlap rule to
+     * mean anything, and a to-drug dispensed near the window end has to be
+     * pulled at all. A window ending past followupDays would otherwise report
+     * "nobody switched" for a tail nobody looked at. */
+    if (a.kind === "treatment_switching") {
+      const cap = daysSupplyCleaningFor(a).maxDaysSupplyCap;
+      const wStart = typeof a.window.start === "number" ? a.window.start : 0;
+      consider(Math.max(0, -wStart) + cap, `analysis "${a.id}" needs index-drug supply reaching into its window: ${cap}d max supply before day ${wStart}`);
+      if (typeof a.window.end === "number" && a.window.end > fwdDays) {
+        fwdDays = a.window.end; reasons.push(`analysis "${a.id}" switching window ends day ${a.window.end}`);
       }
     }
     if (a.kind === "period_prevalence") {
@@ -1738,6 +1752,76 @@ export interface AdherenceParity {
   dropMissingSupply: boolean;
   dropZeroNegativeSupply: boolean;
   maxDaysSupplyCap: number;
+}
+
+export interface SwitchingParity {
+  id: string;
+  fromCodeListId: string;
+  /** joined, so a twin following a DIFFERENT set of to-drugs cannot match */
+  toCodeListIds: string;
+  windowStart: number;
+  windowEnd: number;
+  windowDays: number;
+  /** THE decision this module turns on. A twin using a different threshold
+   *  classifies different patients as switchers while every count still looks
+   *  entirely plausible. */
+  permissibleOverlapDays: number;
+  /** a to-drug dispensed ON the index date is the starting regimen, not a
+   *  switch. Stamped because dropping the strictness would report a switch for
+   *  every combination initiator on day 0. */
+  newDrugMustStartAfterIndex: "strictly_after_index";
+  overlapDefinition: "remaining_from_supply_on_to_start_day";
+  lineRule: string;
+  lineRuleIsDefinitional: "yes";
+  dropMissingSupply: boolean;
+  dropZeroNegativeSupply: boolean;
+  maxDaysSupplyCap: number;
+  sasPrimary: "none";
+}
+
+export function switchingLimitations(an: TreatmentSwitchingAnalysis): string[] {
+  const out: string[] = [];
+  out.push(`LINE OF THERAPY IS DEFINITIONAL. Only the rule "${an.lineRule}" is emitted - a new line at each switch. Protocols that advance a line on an add-on, after a gap, only within a drug class, or on documented clinical intent will produce DIFFERENT line numbers on the same patients, and none of them is more correct than another. Execution here proves the twins agree with each other, never that either agrees with your protocol`);
+  out.push(`the switch is defined on DISPENSINGS, not on prescriptions or on intent. A patient who was told to stop the index drug but had supply left is classified by that leftover supply, because it is the only signal in the data`);
+  out.push(`only the FIRST switch is characterized. Switching back, cycling between drugs, and third and later lines are not built - a patient who returns to the index drug still counts as having switched once`);
+  out.push(`NO drug-class logic. Every code list on the to-list is a distinct destination, so two brands of the same molecule count as a switch between them unless you put them on ONE code list`);
+  out.push(`add-on patients are counted and reported but their combination period is not characterized: no time on combination, and no later resolution of it`);
+  if (an.permissibleOverlapDays === 0)
+    out.push(`a permissible overlap of 0 days means ANY remaining index supply makes the new drug combination therapy. With 30-day dispensings that classifies most ordinary switches as add-ons`);
+  return out;
+}
+
+export const SWITCHING_METHOD_NOTES = [
+  `a patient dispensed a new drug either STOPPED the index drug (a switch) or KEPT taking it (combination therapy). Claims record dispensings, not intent, so the two are separated by a RULE: how much index supply was still unconsumed when the new drug began`,
+  `that rule is a study decision, so the program reports the FULL BAND - the switch count under a zero-overlap rule and under an unbounded one - beside the chosen threshold. A switch rate quoted without its rule is one arbitrary point inside that band`,
+  `the new drug must be dispensed STRICTLY AFTER the index date. A to-drug dispensed on day 0 is the patient's starting regimen, and counting it would report a switch for every combination initiator on their first day`,
+  `overlap is measured against the LAST DAY the index drug's supply reaches, which is the maximum of (fill start + days supply - 1) over its fills - the same off-by-one convention the adherence module uses`,
+  `LINE OF THERAPY IS DEFINITIONAL, NOT MEASURED. One declared rule is implemented and both twins are verified to implement the same one; that is the whole of what execution can establish about it`,
+  `SAS-PRIMARY: nothing`,
+];
+
+export function switchingParity(
+  an: TreatmentSwitchingAnalysis,
+  consumed: { windowStart: number; windowEnd: number; windowDays: number },
+): SwitchingParity {
+  const clean = daysSupplyCleaningFor(an);
+  return {
+    id: an.id,
+    fromCodeListId: an.fromCodeListId,
+    toCodeListIds: [...an.toCodeListIds].join(","),
+    windowStart: consumed.windowStart,
+    windowEnd: consumed.windowEnd,
+    windowDays: consumed.windowDays,
+    permissibleOverlapDays: an.permissibleOverlapDays,
+    newDrugMustStartAfterIndex: "strictly_after_index",
+    overlapDefinition: "remaining_from_supply_on_to_start_day",
+    lineRule: an.lineRule,
+    lineRuleIsDefinitional: "yes",
+    dropMissingSupply: clean.dropMissing,
+    dropZeroNegativeSupply: clean.dropZeroNegative,
+    maxDaysSupplyCap: clean.maxDaysSupplyCap,
+    sasPrimary: "none",
+  };
 }
 
 export function adherenceLimitations(an: AdherenceAnalysis): string[] {

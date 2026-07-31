@@ -34,6 +34,7 @@ import { GOLD_C_SPEC, GOLD_C_OPTS } from "./fixture-c";
 import { GOLD_D_SPEC, GOLD_D_OPTS } from "./fixture-d";
 import { GOLD_E_SPEC, GOLD_E_OPTS } from "./fixture-e";
 import { GOLD_F_SPEC, GOLD_F_OPTS } from "./fixture-f";
+import { GOLD_G_SPEC, GOLD_G_OPTS } from "./fixture-g";
 import type { Analysis, StudySpec } from "../spec/types";
 import type { EmitOptions } from "../emitters/types";
 import {
@@ -73,6 +74,7 @@ export function fingerprintCoverageChecks(): Check[] {
     { name: "D", spec: GOLD_D_SPEC, opts: GOLD_D_OPTS },
     { name: "E", spec: GOLD_E_SPEC, opts: GOLD_E_OPTS },
     { name: "F", spec: GOLD_F_SPEC, opts: GOLD_F_OPTS },
+    { name: "G", spec: GOLD_G_SPEC, opts: GOLD_G_OPTS },
   ];
   const emitted = GOLD_SPECS.map((g) => ({
     name: g.name,

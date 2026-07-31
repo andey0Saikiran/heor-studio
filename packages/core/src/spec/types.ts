@@ -591,7 +591,11 @@ export const DEFAULT_DAYS_SUPPLY_CLEANING: DaysSupplyCleaning = {
   maxDaysSupplyCap: 365,
 };
 
-export function daysSupplyCleaningFor(an: AdherenceAnalysis): DaysSupplyCleaning {
+/** Every analysis that reads the fills feeder cleans DAYSUPP the same way, so
+ *  this takes the field rather than a specific analysis kind — otherwise each
+ *  new fills consumer would need its own copy, and two copies of a cleaning
+ *  rule are two rules that can drift apart. */
+export function daysSupplyCleaningFor(an: { daysSupplyCleaning?: DaysSupplyCleaning }): DaysSupplyCleaning {
   return { ...DEFAULT_DAYS_SUPPLY_CLEANING, ...(an.daysSupplyCleaning ?? {}) };
 }
 
@@ -611,8 +615,69 @@ export function fillsCodeListIds(spec: StudySpec): string[] {
   for (const a of spec.analyses) {
     if (!a.enabled) continue;
     if (a.kind === "adherence") ids.add(a.drugCodeListId);
+    if (a.kind === "treatment_switching") {
+      ids.add(a.fromCodeListId);
+      for (const to of a.toCodeListIds) ids.add(to);
+    }
   }
   return [...ids].sort();
+}
+
+/**
+ * Treatment switching — and the overlap rule that decides what a switch IS.
+ *
+ * A patient dispensed drug B after starting on drug A has done one of two very
+ * different things, and claims cannot tell them apart without a rule:
+ *
+ *   - STOPPED A and started B. That is a switch.
+ *   - KEPT TAKING A and added B. That is combination therapy, and counting it
+ *     as a switch overstates how many patients abandoned the index drug.
+ *
+ * The only thing distinguishing them in a claims file is whether A's supply was
+ * still running when B began, and by how much. A day or two of overlap is a
+ * refill boundary; three months of overlap is combination therapy. Where the
+ * line falls is a study decision, not a fact, so `permissibleOverlapDays` is an
+ * explicit parameter and the module reports HOW MANY PATIENTS THE CHOICE MOVES
+ * rather than adopting one silently. That count is the honest measure of how
+ * much the conclusion rests on the rule.
+ *
+ * LINE OF THERAPY is derived from the same events, under the SIMPLEST possible
+ * rule: a new line begins at each switch. That rule is DECLARED, not discovered
+ * — see the caveat on `lineRule`.
+ *
+ * Ref: Hess et al. J Manag Care Pharm 2006;12:565 (switching definitions and
+ * how much they move estimates).
+ */
+export interface TreatmentSwitchingAnalysis extends AnalysisCommon {
+  kind: "treatment_switching";
+  /** the index drug the patient starts on */
+  fromCodeListId: string;
+  /** the drugs a patient can switch TO. Each is followed separately. */
+  toCodeListIds: string[];
+  /** observation window relative to index, INCLUSIVE both ends */
+  window: RelativeWindow;
+  /** Days of remaining `from`-supply at the moment `to` starts that still count
+   *  as a switch. Beyond this the patient is treated as being on BOTH drugs. */
+  permissibleOverlapDays: number;
+  /** how DAYSUPP is cleaned. Omitted = DEFAULT_DAYS_SUPPLY_CLEANING. */
+  daysSupplyCleaning?: DaysSupplyCleaning;
+  /**
+   * The line-of-therapy rule. Only one is emitted, and it is the simplest one:
+   * a new line begins at each switch.
+   *
+   * THIS IS DEFINITIONAL, and the distinction matters more here than anywhere
+   * else in this project. Every other module can be checked against arithmetic:
+   * a PDC either counts the right days or it does not. A line of therapy cannot
+   * be. Real protocols advance a line on a switch, or on an add-on, or after a
+   * gap of N days, or only for drugs in the same class, or on a physician's
+   * documented intent that claims do not record at all — and the same patient
+   * legitimately has a different line number under each.
+   *
+   * So execution can prove that the SAS and SQL twins implement the SAME rule.
+   * It can never prove the rule is the one a given protocol meant. The emitted
+   * code says so, in both languages, next to the number.
+   */
+  lineRule: "new_line_on_switch";
 }
 
 /**
@@ -894,7 +959,7 @@ export interface Table1Analysis extends AnalysisCommon {
 /* ----- P2-P4 extension point ----- */
 
 export type FutureAnalysisKind =
-  | "hcru" | "cost" | "adherence" | "line_of_therapy" | "treatment_switching"
+  | "hcru" | "cost" | "line_of_therapy"
   | "ps_matching" | "iptw" | "km_survival" | "cox_model" | "competing_risks";
 
 export interface FutureAnalysisStub extends AnalysisCommon {
@@ -925,6 +990,7 @@ export type Analysis =
   | IptwOutcomeAnalysis
   | GFormulaAnalysis
   | AdherenceAnalysis
+  | TreatmentSwitchingAnalysis
   | StatisticalEngineAnalysis
   | FutureAnalysisStub;
 
@@ -958,6 +1024,7 @@ export const EMITTABLE_ANALYSIS_KINDS: ReadonlySet<AnalysisKind> = new Set<Analy
   "iptw_outcome",
   "g_formula",
   "adherence",
+  "treatment_switching",
 ]);
 
 export type DescriptiveAnalysis =
@@ -989,7 +1056,14 @@ export function migrateLegacyAnalyses(old: LegacyAnalysisRequest[]): Analysis[] 
       case "incidence_prevalence":
         return { ...base, kind: "period_prevalence", outcomeDefinition: shellOutcome, caseStatus: "prevalent",
                  prevalencePeriod: { start: "", end: "" }, denominatorRule: "enrolled_anytime", ciMethod: "wilson", stratifyBy: [] };
-      case "treatment_patterns": return { ...base, kind: "future_stub", plannedKind: "treatment_switching" };
+      /* A protocol section about treatment patterns becomes a REAL switching
+       * analysis with its code lists left blank, exactly as incidence_prevalence
+       * does above. Readiness then blocks generation until an analyst fills them
+       * in, which is louder than a stub the extractor quietly parks. */
+      case "treatment_patterns":
+        return { ...base, kind: "treatment_switching", fromCodeListId: "", toCodeListIds: [],
+                 window: { start: 0, end: 364, includesIndex: true }, permissibleOverlapDays: 30,
+                 lineRule: "new_line_on_switch" };
       case "hcru_cost": return { ...base, kind: "future_stub", plannedKind: "cost" };
       case "km_survival": return { ...base, kind: "future_stub", plannedKind: "km_survival" };
       case "cox_model": return { ...base, kind: "future_stub", plannedKind: "cox_model" };

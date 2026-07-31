@@ -836,6 +836,7 @@ const ANALYSIS_KIND_LABELS: Record<AnalysisKind, string> = {
   iptw_outcome: "IPTW outcome model (weighted effect estimate)",
   g_formula: "Standardization / g-formula (doubly robust)",
   adherence: "Adherence and persistence (PDC / MPR)",
+  treatment_switching: "Treatment switching and line of therapy",
   statistical_engine: "Statistical comparison",
   future_stub: "Planned (not generated yet)",
 };

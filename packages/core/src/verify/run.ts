@@ -20,6 +20,7 @@ import { GOLD_C_SPEC, GOLD_C_OPTS, EXPECTED_C, fixtureCSeedSql } from "./fixture
 import { GOLD_D_SPEC, GOLD_D_OPTS, EXPECTED_D, fixtureDSeedSql } from "./fixture-d";
 import { GOLD_E_SPEC, GOLD_E_OPTS, EXPECTED_E, fixtureESeedSql } from "./fixture-e";
 import { GOLD_F_SPEC, GOLD_F_OPTS, EXPECTED_F, fixtureFSeedSql } from "./fixture-f";
+import { GOLD_G_SPEC, GOLD_G_OPTS, EXPECTED_G, fixtureGSeedSql } from "./fixture-g";
 import { EMITTABLE_ANALYSIS_KINDS } from "../spec/types";
 import type { StudySpec, EmitOptions } from "../index";
 
@@ -915,6 +916,84 @@ export async function verifyGoldF(): Promise<Check[]> {
 
   out.push(...sasSqlParityChecks(GOLD_F_SPEC, GOLD_F_OPTS));
   out.push(...sasStructureChecks(emitSas(GOLD_F_SPEC, GOLD_F_OPTS)));
+  return out;
+}
+
+/**
+ * Gold Case G — treatment switching, and the rule that decides what a switch is.
+ *
+ * The assertion that matters most here is not any single count: it is that the
+ * STRICT and LOOSE rules disagree by two patients on a cohort of five. A module
+ * that reported only the declared rule's answer would look equally confident on
+ * this fixture and would be hiding half of what the data supports.
+ */
+export async function verifyGoldG(): Promise<Check[]> {
+  const { db, ok, steps } = await seedAndRun(GOLD_G_SPEC, GOLD_G_OPTS, fixtureGSeedSql());
+  const out: Check[] = [];
+  if (!ok) {
+    return [{
+      name: "Gold Case G executes",
+      status: "fail",
+      detail: steps.filter((x) => !x.ok).map((x) => `${x.path}: ${x.error}`).join(" | "),
+    }];
+  }
+  const eq = (name: string, got: number | null | undefined, want: number) =>
+    out.push({ name, status: got === want ? "pass" : "fail", detail: `expected ${want}, got ${got}` });
+  const approx = (name: string, got: number, want: number, tol: number) =>
+    out.push({ name, status: Math.abs(got - want) <= tol ? "pass" : "fail", detail: `expected ${want}±${tol}, got ${got}` });
+
+  eq("G: cohort N = 5", await scalar<number>(db, "SELECT count(*)::int FROM tz_g_cohort"), EXPECTED_G.cohortN);
+  /* The feeder must carry BOTH drugs — a fills table that silently kept only
+   * the index drug would make every patient look like a non-switcher. */
+  eq("G: the feeder carries both drug code lists",
+    await scalar<number>(db, "SELECT count(DISTINCT code_list_id)::int FROM tz_g_fills"), 2);
+
+  const r = async (statistic: string) =>
+    (
+      await rows<{ estimate: number | null; method: string }>(
+        db,
+        `SELECT estimate::float8, method FROM tz_g_switch WHERE statistic = '${statistic}'`,
+      )
+    )[0];
+
+  eq("G: 4 patients start a second drug", Number((await r("n_started_new_drug"))?.estimate), EXPECTED_G.startedNew);
+  eq("G: 3 switch under the declared 30-day overlap rule", Number((await r("n_switched"))?.estimate), EXPECTED_G.switched);
+  /* P3 keeps filling X for another 120 days after starting Y. Counting that as
+   * a switch would say the patient abandoned X on a day they demonstrably did
+   * not. */
+  eq("G: 1 ADD-ON — P3 keeps filling X for 120 more days after starting Y",
+    Number((await r("n_add_on"))?.estimate), EXPECTED_G.addOn);
+
+  /* THE BAND. This is the finding. */
+  eq("G: strict zero-overlap rule gives 2 switches", Number((await r("n_switched_strict"))?.estimate), EXPECTED_G.switchedStrict);
+  eq("G: unbounded-overlap rule gives 4", Number((await r("n_switched_loose"))?.estimate), EXPECTED_G.switchedLoose);
+  const recl = await r("reclassified_by_overlap_rule");
+  eq("G: the rule alone decides 2 of 5 patients", Number(recl?.estimate), EXPECTED_G.reclassified);
+  out.push({
+    name: "G: and the program says the rule decided them, rather than quoting one point in the band",
+    status: /DEPENDS ENTIRELY ON THE OVERLAP RULE/.test(recl?.method ?? "") ? "pass" : "fail",
+    detail: (recl?.method ?? "no row").slice(0, 90),
+  });
+
+  approx("G: mean days to switch = (120+30+45)/3 = 65", Number((await r("mean_days_to_switch"))?.estimate), EXPECTED_G.meanDaysToSwitch, 0.00001);
+  /* P4's Y starts on day 30, the day after its 30-day supply from day 0 ends.
+   * If the emitter treated the supply as covering 0..30 this would be an
+   * overlap of 1 and P4 would leave the strict-rule group. */
+  eq("G: earliest switch is day 30 — P4, the day after a 30-day supply ends",
+    Number((await r("min_days_to_switch"))?.estimate), EXPECTED_G.minDaysToSwitch);
+
+  /* LINE OF THERAPY, and the fact that it is definitional. */
+  eq("G: 3 patients reach line 2 under the declared rule", Number((await r("n_reaching_line_2"))?.estimate), EXPECTED_G.reachingLine2);
+  approx("G: mean lines reached = 8/5 = 1.6", Number((await r("mean_lines_reached"))?.estimate), EXPECTED_G.meanLines, 0.00001);
+  const defn = await r("rule_is_definitional");
+  out.push({
+    name: "G: the line-of-therapy row carries NO estimate and says the rule is definitional",
+    status: defn?.estimate === null && /DEFINITIONAL, NOT MEASURED/.test(defn?.method ?? "") ? "pass" : "fail",
+    detail: `estimate=${defn?.estimate}, method="${(defn?.method ?? "").slice(0, 70)}"`,
+  });
+
+  out.push(...sasSqlParityChecks(GOLD_G_SPEC, GOLD_G_OPTS));
+  out.push(...sasStructureChecks(emitSas(GOLD_G_SPEC, GOLD_G_OPTS)));
   return out;
 }
 

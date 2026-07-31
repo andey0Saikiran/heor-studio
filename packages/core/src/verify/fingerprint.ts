@@ -427,6 +427,34 @@ function sqlFingerprint(kind: string, raw: string): Fingerprint {
       }
       break;
     }
+    case "treatment_switching": {
+      /* Every scrape here is an expression whose corruption still yields a
+       * switch rate between 0% and 100%. That is the module's only failure
+       * mode: there is no impossible value to notice. */
+      put(fp, "from_source_in_sql", grab(sql, [/f\.code_list_id = '([^']+)'\n?/i]));
+      put(fp, "to_list_in_sql", (sql.match(/f\.code_list_id IN \(([^)]*)\)/i) ?? [])[1]?.replace(/['\s]/g, "") ?? "ABSENT");
+      /* THE OFF-BY-ONE, which decides P4 in Gold Case G. */
+      put(fp, "from_last_day_is_supply_minus_one", /\+ f\.days_supply - 1 AS d_end/i.test(sql) ? "yes" : "no");
+      /* STRICTLY AFTER INDEX: a to-drug on day 0 is the starting regimen. */
+      put(fp, "new_drug_strictly_after_index", /WHERE d_start > 0 AND/i.test(sql) ? "yes" : "no");
+      /* THE OVERLAP DEFINITION and its floor. */
+      put(fp, "overlap_is_remaining_supply",
+        /GREATEST\(COALESCE\(fc\.from_last_day, t\.to_day - 1\) - t\.to_day \+ 1, 0\)/i.test(sql) ? "yes" : "no");
+      put(fp, "permissible_overlap_days", grab(sql, [/overlap_days <= (\d+)\n?\s*THEN 1 ELSE 0 END AS switched/i]));
+      /* THE BAND. Deleting either bound leaves a program that still reports a
+       * switch count and no longer says how much the rule decided. */
+      put(fp, "strict_bound_emitted", /overlap_days <= 0 THEN 1 ELSE 0 END AS switched_strict/i.test(sql) ? "yes" : "no");
+      put(fp, "loose_bound_emitted", /END AS switched_loose/i.test(sql) ? "yes" : "no");
+      put(fp, "reclassification_reported", /reclassified_by_overlap_rule/i.test(sql) ? "yes" : "no");
+      /* ADD-ON kept distinct from switching. */
+      put(fp, "add_on_kept_distinct", /overlap_days > (\d+)\n?\s*THEN 1 ELSE 0 END AS add_on/i.test(sql) ? "yes" : "no");
+      /* LINE OF THERAPY, and the row that says it is definitional. */
+      put(fp, "line_rule", grab(sql, [/under the DECLARED rule \((\w+)\)/i]));
+      put(fp, "line_definitional_row", /DEFINITIONAL, NOT MEASURED/i.test(sql) ? "yes" : "no");
+      put(fp, "line_estimate_is_null", /CAST\(NULL AS NUMERIC\) AS estimate[\s\S]{0,200}DEFINITIONAL/i.test(sql) || /rule_is_definitional/i.test(sql) ? "yes" : "no");
+      put(fp, "days_supply_cap", grab(sql, [/days_supply IS NULL OR days_supply <= (\d+)\)/i]));
+      break;
+    }
     case "adherence": {
       /* Adherence is arithmetic on intervals, so every scrape here is an
        * expression whose corruption still yields a PDC between 0 and 1. A
@@ -990,6 +1018,24 @@ function sasFingerprint(kind: string, rawSas: string, setup: string): Fingerprin
       put(fp, "km_anchor_present",
         /proc lifetest data=work\.\w+ method=km conftype=\w+ outsurv=/i.test(sas) &&
         /anchor_verdict = 'PASS: LIFETEST = closed-form product limit'/i.test(sas) ? "yes" : "no");
+      break;
+    }
+    case "treatment_switching": {
+      put(fp, "from_source_in_sas", grab(sas, [/from (tz\.\S*_ev_\w+) as f\s*\n\s*inner join work\.\w+_cohort as a[\s\S]{0,200}from_last_day/i, /create table work\.\w+_fromcov as[\s\S]{0,300}?from (tz\.\S*_ev_\w+)/i]));
+      put(fp, "to_list_in_sas", [...sas.matchAll(/"([^"]+)" as code_list_id/g)].map((m) => m[1]).join(",") || "ABSENT");
+      put(fp, "from_last_day_is_supply_minus_one", /f\.svcdate - a\.index_date \+ f\.daysupp - 1/i.test(sas) ? "yes" : "no");
+      put(fp, "new_drug_strictly_after_index", /f\.svcdate - a\.index_date > 0/i.test(sas) ? "yes" : "no");
+      put(fp, "overlap_is_remaining_supply",
+        /overlap_days = max\(coalesce\(from_last_day, to_day - 1\) - to_day \+ 1, 0\)/i.test(sas) ? "yes" : "no");
+      put(fp, "permissible_overlap_days", grab(sas, [/switched\s+= \(to_day ne \. and overlap_days <= (\d+)\)/i]));
+      put(fp, "strict_bound_emitted", /switched_strict = \(to_day ne \. and overlap_days <= 0\)/i.test(sas) ? "yes" : "no");
+      put(fp, "loose_bound_emitted", /switched_loose\s+= \(to_day ne \.\)/i.test(sas) ? "yes" : "no");
+      put(fp, "reclassification_reported", /reclassified_by_overlap_rule/i.test(sas) ? "yes" : "no");
+      put(fp, "add_on_kept_distinct", /add_on\s+= \(to_day ne \. and overlap_days > (\d+)\)/i.test(sas) ? "yes" : "no");
+      put(fp, "line_rule", grab(sas, [/under the DECLARED rule \((\w+)\)/i]));
+      put(fp, "line_definitional_row", /DEFINITIONAL, NOT MEASURED/i.test(sas) ? "yes" : "no");
+      put(fp, "line_estimate_is_null", /rule_is_definitional/i.test(sas) ? "yes" : "no");
+      put(fp, "days_supply_cap", grab(sas, [/daysupp = \. OR daysupp <= (\d+)\)/i]));
       break;
     }
     case "adherence": {
@@ -1575,6 +1621,18 @@ export function expectedFromStamp(kind: string, stamp: Record<string, unknown>):
       exp.horizons = (stamp.horizonDays as number[] ?? []).join(",");
       break;
     }
+    case "treatment_switching": {
+      /* The THRESHOLD is the one to cross-check hardest: twins using different
+       * overlap rules classify different patients while every count stays
+       * entirely plausible. */
+      exp.permissible_overlap_days = String(stamp.permissibleOverlapDays ?? "");
+      exp.line_rule = String(stamp.lineRule ?? "");
+      exp.days_supply_cap = String(stamp.maxDaysSupplyCap ?? "");
+      exp.new_drug_strictly_after_index = String(stamp.newDrugMustStartAfterIndex ?? "") === "strictly_after_index" ? "yes" : "no";
+      exp.overlap_is_remaining_supply = String(stamp.overlapDefinition ?? "") === "remaining_from_supply_on_to_start_day" ? "yes" : "no";
+      exp.line_definitional_row = String(stamp.lineRuleIsDefinitional ?? "") === "yes" ? "yes" : "no";
+      break;
+    }
     case "adherence": {
       /* The DENOMINATOR is the one worth cross-checking hardest: an off-by-one
        * in windowDays moves every PDC and MPR in the study by the same amount,
@@ -1746,6 +1804,16 @@ const EXPECTED_CONSTANTS: Record<string, Record<"sql" | "sas", ConstantProfileSp
      * table of ratios. */
     sql: { z: 2, z2_half: 0, z2: 0, z2_quarter: 0 },
     sas: { z: 2, z2_half: 0, z2: 0, z2_quarter: 0 },
+  },
+  treatment_switching: {
+    /* No interval anywhere. A switch count is a count, and the mean time to
+     * switch is a mean over switchers - neither carries a confidence interval,
+     * because the uncertainty an analyst cares about here is the DEFINITION,
+     * not sampling. The rule_sensitivity band is the honest substitute, and a z
+     * appearing here would mean somebody put a Wald interval around a number
+     * whose real uncertainty is a study decision. */
+    sql: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
+    sas: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
   },
   adherence: {
     /* No interval anywhere. PDC, MPR and the persistence mean are proportions
@@ -1959,6 +2027,10 @@ export const LANGUAGE_LOCAL_KEYS: Record<string, { language: "sql" | "sas"; must
    * report the design as drift; asserting each in its own language is what
    * catches a twin that stopped reading the feeder at all — which is the defect
    * that shipped here, as a SAS table name no emitter ever created. */
+  from_source_in_sql: { kind: "treatment_switching", language: "sql", must: "NONEMPTY", means: "the SQL twin narrows the feeder to the index drug" },
+  to_list_in_sql: { kind: "treatment_switching", language: "sql", must: "NONEMPTY", means: "the SQL twin knows which drugs count as a destination" },
+  from_source_in_sas: { kind: "treatment_switching", language: "sas", must: "NONEMPTY", means: "the SAS twin reads a real per-code-list event table for the index drug" },
+  to_list_in_sas: { kind: "treatment_switching", language: "sas", must: "NONEMPTY", means: "the SAS twin knows which drugs count as a destination" },
   fills_source_in_sql: { kind: "adherence", language: "sql", must: "NONEMPTY", means: "the SQL twin reads the <prefix>_fills feeder" },
   fills_selected_by_code_list_in_sql: { kind: "adherence", language: "sql", must: "NONEMPTY", means: "the SQL twin narrows the feeder to the measured drug" },
   fills_source_in_sas: { kind: "adherence", language: "sas", must: "NONEMPTY", means: "the SAS twin reads a real per-code-list event table, not a phantom one" },

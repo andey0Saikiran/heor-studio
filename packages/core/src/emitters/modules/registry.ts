@@ -31,6 +31,7 @@ import { propensityScoreModule } from "./propensity_score";
 import { iptwOutcomeModule } from "./iptw_outcome";
 import { gFormulaModule } from "./g_formula";
 import { adherenceModule } from "./adherence";
+import { treatmentSwitchingModule } from "./treatment_switching";
 
 
 export const ANALYSIS_MODULES: Partial<Record<Analysis["kind"], AnalysisModule<never>>> = {
@@ -52,6 +53,7 @@ export const ANALYSIS_MODULES: Partial<Record<Analysis["kind"], AnalysisModule<n
   iptw_outcome: iptwOutcomeModule as AnalysisModule<never>,
   g_formula: gFormulaModule as AnalysisModule<never>,
   adherence: adherenceModule as AnalysisModule<never>,
+  treatment_switching: treatmentSwitchingModule as AnalysisModule<never>,
 };
 
 /* Readiness (spec/types.ts EMITTABLE_ANALYSIS_KINDS) blocks enabled analyses

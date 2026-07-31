@@ -4,7 +4,7 @@ This file exists so nobody has to read the source to find out what is missing.
 It is honest rather than flattering: the project is paused at a useful point,
 not finished.
 
-**23 of the 69 analyses in the original build plan are implemented.** That 69 was
+**24 of the 69 analyses in the original build plan are implemented.** That 69 was
 a planning number, not a specification, and the remainder is not uniform — a
 meaningful slice of it is *refused by design* rather than pending.
 
@@ -23,10 +23,10 @@ against a synthetic MarketScan fixture, and mutation coverage.
 | Regression | one GLM emitter × 5 families (logistic, Poisson, negative binomial, gamma-log, OLS) |
 | Survival | Kaplan-Meier + log-rank, Cox, competing-risks CIF, Fine-Gray |
 | Causal | propensity scores (IPTW), IPTW outcome model, g-formula + AIPW |
-| Treatment patterns | adherence (PDC / MPR / stockpiled PDC), persistence and discontinuation |
+| Treatment patterns | adherence (PDC / MPR / stockpiled PDC), persistence and discontinuation, treatment switching vs add-on, line of therapy |
 
 Supporting: small-cell suppression (derivation-aware), results contract,
-provenance, MCP server, six gold fixtures (A-F) each built to exercise something
+provenance, MCP server, seven gold fixtures (A-G) each built to exercise something
 the others structurally cannot, and a byte-identity snapshot gate on spine changes.
 
 ---
@@ -35,7 +35,7 @@ the others structurally cannot, and a byte-identity snapshot gate on spine chang
 
 Ordered by how likely a real study is to need them.
 
-### 1. Treatment patterns: adherence LANDED, switching still open
+### 1. Treatment patterns: BUILT
 
 **Adherence and persistence now ship**, both twins, executed against Gold Case F.
 PDC, MPR, stockpiled PDC, persistence and discontinuation, with the measures
@@ -71,11 +71,32 @@ subtracts from the MPR numerator and can push MPR below PDC, at which point the
 program's own identity row reports "the interval merge is broken" about a merge
 that is fine, sending the analyst to debug correct code.
 
-**Still open here:** treatment switching and line-of-therapy. Both ride the same
-feeder, and both need a second drug code list plus a fixture of their own (Gold
-Case F is single-drug by construction). Line-of-therapy carries a caveat worth
-stating up front: it is **definitional**, so execution can only ever prove that
-the twins implement the same rule, never that the rule matches a given protocol.
+**Switching and line of therapy also ship**, on the same feeder, executed
+against Gold Case G (two drugs, five patients).
+
+The module refuses to answer "how many switched?" with a single number, because
+that number is not in the data. A patient dispensed a second drug either stopped
+the first or kept taking it, and claims record dispensings rather than intent.
+The only available signal is how much of the index supply was unconsumed when
+the new drug began, so the module reports the **full band**: the switch count
+under a zero-overlap rule, under an unbounded one, and under the threshold the
+study declares. On Gold Case G that band is 2 to 4 switches on a cohort of five.
+**Two of five patients are classified by the rule rather than by the data**, and
+a switch rate quoted without its rule is one arbitrary point inside that band.
+
+**Line of therapy is DEFINITIONAL, and that is different in kind** from
+everything else here. Every other number can be checked against arithmetic: a
+PDC either counts the right days or it does not. A line number cannot be.
+Protocols advance a line on a switch, on an add-on, after a gap, only within a
+drug class, or on clinical intent claims never record, and the same patient
+carries a different number under each. Execution proves the twins implement the
+SAME rule; it can never prove the rule is yours. The emitted row therefore
+carries **no estimate at all** in the definitional slot, and says why, in both
+languages, beside the number.
+
+**Still open here:** switching back and drug cycling (only the FIRST switch is
+characterized), third and later lines, drug-class logic, and any
+characterization of the combination period for add-on patients.
 
 Also not yet covered by any fixture: ragged supply lengths and same-day double
 fills. The stockpiling closed form is unverified on those two shapes.

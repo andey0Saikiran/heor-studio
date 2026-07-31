@@ -167,9 +167,7 @@ export const EMITTABLE_ANALYSIS_KINDS_EXTRACT = [
 export const FUTURE_ANALYSIS_KINDS = enumValues<FutureAnalysisKind>({
   hcru: true,
   cost: true,
-  adherence: true,
   line_of_therapy: true,
-  treatment_switching: true,
   ps_matching: true,
   iptw: true,
   km_survival: true,
