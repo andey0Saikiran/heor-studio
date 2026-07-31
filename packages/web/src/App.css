@@ -352,14 +352,16 @@ textarea.control {
   color: var(--ink);
 }
 
-.analysis-outcome {
+.analysis-outcome,
+.analysis-fieldset {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: var(--space-3);
   margin: var(--space-3) 0;
 }
 
-.analysis-outcome legend {
+.analysis-outcome legend,
+.analysis-fieldset legend {
   font-size: 0.82rem;
   font-weight: 600;
   color: var(--ink-soft);

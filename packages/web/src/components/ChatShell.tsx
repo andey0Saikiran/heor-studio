@@ -444,6 +444,25 @@ export default function ChatShell(props: ChatShellProps) {
             Changes are made to the study specification, never to the generated code. Nothing changes until you
             apply a proposal, and then the code is rebuilt from it.
           </span>
+          {/* THE EDITOR IS REACHABLE WHENEVER THERE IS A STUDY, not only once
+              the code exists. This button used to live inside the code pane,
+              which only opens when the spec is READY - so the full editor was
+              unreachable in exactly the state where an analyst needs it, which
+              is when readiness is blocked and something has to be fixed by
+              hand. */}
+          {spec && (
+            <div className="cs-progress">
+              <button type="button" className="btn btn-quiet btn-sm" onClick={props.onOpenPanels}>
+                Open the full editor
+              </button>
+              {readiness && !readiness.ready && (
+                <span className="cs-hint">
+                  {readiness.problems.length} thing{readiness.problems.length === 1 ? "" : "s"} still to settle
+                  before code can be generated
+                </span>
+              )}
+            </div>
+          )}
         </div>
       </section>
 
@@ -452,7 +471,6 @@ export default function ChatShell(props: ChatShellProps) {
           <div className="cs-pane-head">
             <h2 className="cs-pane-title">Generated code</h2>
             <button type="button" className="btn btn-sm" onClick={() => void download()}>Download bundle</button>
-            <button type="button" className="btn btn-quiet btn-sm" onClick={props.onOpenPanels}>Open full editor</button>
             <button type="button" className="btn btn-quiet btn-sm" aria-label="Close the code pane"
               onClick={() => setPaneOpen(false)}>&times;</button>
           </div>
