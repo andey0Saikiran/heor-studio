@@ -27,6 +27,8 @@ import { emitSas } from "../emitters/sas";
 import { parseParityStamps } from "../emitters/parity";
 import { ANALYSIS_MODULES, STAMP_KIND_BY_ANALYSIS } from "../emitters/modules/registry";
 import { SUPPRESSION_SHAPES } from "../emitters/suppression";
+import { SHAPE_CHECKED_ANALYSIS_KINDS } from "../spec/shape";
+import { EMITTABLE_ANALYSIS_KINDS } from "../spec/types";
 import { fingerprint, expectedFromStamp, hasConstantProfile, STAMP_SHARED_KEYS } from "./fingerprint";
 import { GOLD_A_SPEC, GOLD_A_OPTS } from "./fixture";
 import { GOLD_B_SPEC, GOLD_B_OPTS } from "./fixture-b";
@@ -93,6 +95,22 @@ export function fingerprintCoverageChecks(): Check[] {
     }
     return undefined;
   };
+
+  /* THE THIRD LIST. Registering a module has to teach three places about the
+   * new kind: the emitter registry, EMITTABLE_ANALYSIS_KINDS (readiness), and
+   * the structural gate in spec/shape.ts. The registry throws at load time if
+   * the first two disagree; nothing watched the third, and treatment_switching
+   * shipped with the MCP server rejecting its own demo spec while every
+   * emitter was happy. */
+  for (const kind of EMITTABLE_ANALYSIS_KINDS) {
+    checks.push({
+      name: `coverage ${kind}: the structural gate knows this kind`,
+      status: SHAPE_CHECKED_ANALYSIS_KINDS.has(kind) ? "pass" : "fail",
+      detail: SHAPE_CHECKED_ANALYSIS_KINDS.has(kind)
+        ? "spec/shape.ts accepts it, so untrusted JSON carrying it can reach the emitters"
+        : `spec/shape.ts does NOT list "${kind}", so checkSpecShape rejects any spec containing it — the MCP server and the chat would refuse a spec the emitters can generate`,
+    });
+  }
 
   for (const kind of kinds) {
     const stampKind = STAMP_KIND_BY_ANALYSIS[kind];

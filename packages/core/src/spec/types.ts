@@ -1111,7 +1111,13 @@ export interface StudySpec {
     daysPerYear?: number;
     /** Provenance: how this spec was produced. */
     provenance: {
-      method: "llm_extraction" | "manual";
+      /* "llm_assisted" is a spec a human authored (or a model extracted and a
+       * human then edited) which a model has since REVISED through the spec
+       * chat. It is a third case, not a rounding of the other two: reporting a
+       * chat-edited spec as "manual" would make the AI disclosure false, and
+       * reporting it as "llm_extraction" would credit the model with work a
+       * person did. */
+      method: "llm_extraction" | "llm_assisted" | "manual";
       model?: string;            // e.g. "claude-sonnet-5"
       extractedAt?: string;      // ISO timestamp
       sourceDocumentName?: string;

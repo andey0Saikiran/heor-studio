@@ -28,11 +28,23 @@ const PROP_CI = new Set(["wilson", "clopper_pearson", "wald"]);
 const RATE_CI = new Set(["poisson_byar", "poisson_exact", "wald_log"]);
 const RECURRENCE = new Set(["first_only", "all_events"]);
 const DEMO_AXES = new Set(["age_band", "sex", "region", "plan_type", "year"]);
-const ANALYSIS_KINDS = new Set([
+/** Analysis kinds this structural gate accepts.
+ *
+ * This list is SEPARATE from EMITTABLE_ANALYSIS_KINDS in spec/types.ts, and
+ * that separation once cost a working build: registering treatment_switching
+ * taught the emitters and readiness about it but not this checker, so the MCP
+ * server rejected its own demo spec with "unknown analysis kind" while every
+ * emitter was perfectly happy. The registry's load-time throws catch the
+ * registry/readiness disagreement; nothing was watching this third list.
+ *
+ * verify/coverage.ts now asserts the two agree, so the next kind cannot land
+ * half-registered. */
+export const SHAPE_CHECKED_ANALYSIS_KINDS = new Set([
   "attrition", "table1", "point_prevalence", "period_prevalence", "cumulative_incidence",
   "incidence_rate", "standardization", "calendar_trend", "resource_use",
-  "comorbidity_index", "regression", "survival", "cox", "competing_risks", "fine_gray", "propensity_score", "iptw_outcome", "g_formula", "adherence", "statistical_engine", "future_stub",
+  "comorbidity_index", "regression", "survival", "cox", "competing_risks", "fine_gray", "propensity_score", "iptw_outcome", "g_formula", "adherence", "treatment_switching", "statistical_engine", "future_stub",
 ]);
+const ANALYSIS_KINDS = SHAPE_CHECKED_ANALYSIS_KINDS;
 const SURVIVAL_CI = new Set(["log_log", "linear"]);
 const SURVIVAL_ENDPOINTS = new Set(["claims_event", "death"]);
 
@@ -429,6 +441,24 @@ function checkAnalysis(p: Problems, v: unknown, path: string): void {
       needNum(p, v, "adherenceThreshold", path);
       break;
     }
+    case "treatment_switching": {
+      needStr(p, v, "fromCodeListId", path, { nonEmpty: true });
+      /* The to-list is what the module follows. An empty one is not a
+       * degenerate case to tolerate: it would emit a program that reports
+       * zero switches for every patient and looks entirely well-behaved. */
+      need(p, `${path}.toCodeListIds`, Array.isArray(v.toCodeListIds) && v.toCodeListIds.length > 0,
+        `expected a non-empty array of code-list ids, got ${typeOf(v.toCodeListIds)}`);
+      if (Array.isArray(v.toCodeListIds)) {
+        v.toCodeListIds.forEach((id: unknown, i: number) =>
+          need(p, `${path}.toCodeListIds[${i}]`, typeof id === "string" && id.length > 0,
+            `expected a non-empty string, got ${typeOf(id)}`));
+      }
+      checkWindow(p, v.window, `${path}.window`);
+      needNum(p, v, "permissibleOverlapDays", path);
+      need(p, `${path}.lineRule`, v.lineRule === "new_line_on_switch",
+        `expected "new_line_on_switch" (the only line rule emitted), got ${JSON.stringify(v.lineRule)}`);
+      break;
+    }
     case "standardization":
     case "calendar_trend":
     case "statistical_engine":
@@ -463,7 +493,7 @@ export function checkSpecShape(raw: unknown): { ok: boolean; problems: string[] 
     if (!isObj(m.provenance)) p.push("meta.provenance", `expected an object, got ${typeOf(m.provenance)}`);
     else {
       const prov = m.provenance;
-      need(p, "meta.provenance.method", prov.method === "llm_extraction" || prov.method === "manual", `expected "llm_extraction" or "manual", got ${JSON.stringify(prov.method)}`);
+      need(p, "meta.provenance.method", prov.method === "llm_extraction" || prov.method === "llm_assisted" || prov.method === "manual", `expected "llm_extraction", "llm_assisted" or "manual", got ${JSON.stringify(prov.method)}`);
       // model / sourceDocumentName / extractedAt are printed into generated headers.
       if (prov.model !== undefined) needSafeText(p, prov, "model", "meta.provenance", { maxLen: 120 });
       if (prov.sourceDocumentName !== undefined) needSafeText(p, prov, "sourceDocumentName", "meta.provenance", { maxLen: 200 });

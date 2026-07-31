@@ -34,6 +34,8 @@ import type {
   StudySpec,
 } from "../spec/types";
 import { migrateLegacyAnalyses, EMITTABLE_ANALYSIS_KINDS } from "../spec/types";
+import { checkSpecShape } from "../spec/shape";
+import { sanitizeProposal } from "../spec/diff";
 import {
   ANALYSIS_TYPES,
   BASELINE_KINDS,
@@ -214,6 +216,195 @@ export async function extractSpec(args: ExtractSpecArgs): Promise<StudySpec> {
 
   status("Extraction complete.");
   return spec;
+}
+
+/* ================================================================== *
+ *  Spec chat — natural language in, a PROPOSED SPEC out
+ * ================================================================== */
+
+const EDIT_TOOL = "submit_revised_study_spec";
+
+const EDIT_SYSTEM_PROMPT = [
+  `You revise a HEOR study specification for MarketScan claims analyses.`,
+  ``,
+  `You are given the CURRENT specification and one instruction from an analyst.`,
+  `Return the COMPLETE revised specification through the ${EDIT_TOOL} tool.`,
+  `Return the whole spec every time, not a patch: unchanged parts must come`,
+  `back exactly as they were.`,
+  ``,
+  `SCOPE. Change ONLY what the instruction asks for. If an instruction is`,
+  `ambiguous, make the smallest change consistent with it and say what you`,
+  `assumed in the "notes" field. If an instruction cannot be carried out`,
+  `within the schema, return the spec UNCHANGED and explain why in "notes" -`,
+  `an honest refusal is far more useful here than a plausible guess, because`,
+  `the analyst is going to generate study code from whatever you return.`,
+  ``,
+  `NEVER set "reviewed": true on a criterion or "verified": true on a code.`,
+  `Those flags are assertions that a HUMAN checked that item. They are what`,
+  `code generation is gated on, and the AI disclosure shipped with every study`,
+  `bundle reports them as evidence of human oversight. Setting one is not a`,
+  `shortcut, it is a forged signature. New or altered items must come back`,
+  `with those flags FALSE. (They are stripped and reported either way, so`,
+  `setting them gains nothing and costs the analyst's trust.)`,
+  ``,
+  `Do not invent medical codes. If the analyst asks for codes you are not`,
+  `confident about, add them with "source": "ai_suggested" and say plainly in`,
+  `"notes" that each needs checking against a vocabulary before use.`,
+].join("\n");
+
+export interface ProposeSpecEditArgs {
+  apiKey: string;
+  model: string;
+  /** the spec as it stands now */
+  spec: StudySpec;
+  /** what the analyst asked for, in their own words */
+  instruction: string;
+  /** prior turns, oldest first, for follow-ups like "no, the other one" */
+  history?: Array<{ role: "user" | "assistant"; text: string }>;
+  onStatus?: (msg: string) => void;
+}
+
+export interface ProposedSpecEdit {
+  /** the revised spec, ALREADY sanitized — see spec/diff.ts sanitizeProposal */
+  spec: StudySpec;
+  /** the model's own account of what it did and what it assumed */
+  notes: string;
+  /** review flags the model tried to set, which were stripped */
+  forged: string[];
+  /** review flags reset because what they applied to changed */
+  invalidated: string[];
+}
+
+/**
+ * Ask a model to revise the spec, and return a proposal nobody has accepted yet.
+ *
+ * THREE THINGS HAPPEN TO THE MODEL'S OUTPUT BEFORE A HUMAN SEES IT, and the
+ * order matters:
+ *
+ *   1. checkSpecShape - the response is untrusted JSON from a network call, and
+ *      every emitter dereferences these fields. A spec with minClaims:"2" or a
+ *      quote inside a code string is rejected HERE, not discovered later in
+ *      generated SQL.
+ *   2. sanitizeProposal - review and verification flags are forced back to what
+ *      the human actually granted. A model cannot mark its own work reviewed.
+ *   3. diffSpecs, in the caller - the analyst accepts a DIFF, never a wall of
+ *      JSON they will not read.
+ *
+ * Nothing here mutates the caller's spec. The proposal is a separate object
+ * that is applied only if a person says so.
+ */
+export async function proposeSpecEdit(args: ProposeSpecEditArgs): Promise<ProposedSpecEdit> {
+  const { apiKey, model, spec, instruction, history, onStatus } = args;
+  const status = (m: string): void => { if (onStatus) onStatus(m); };
+
+  const priorTurns = (history ?? []).map((h) => ({
+    role: h.role,
+    content: [{ type: "text", text: h.text }],
+  }));
+
+  const body = {
+    model,
+    max_tokens: MAX_TOKENS,
+    system: EDIT_SYSTEM_PROMPT,
+    messages: [
+      ...priorTurns,
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text:
+              `CURRENT SPECIFICATION:\n\`\`\`json\n${JSON.stringify(spec, null, 2)}\n\`\`\`\n\n` +
+              `INSTRUCTION FROM THE ANALYST:\n${instruction}\n\n` +
+              `Return the complete revised specification via ${EDIT_TOOL}.`,
+          },
+        ],
+      },
+    ],
+    tools: [
+      {
+        name: EDIT_TOOL,
+        description:
+          "Submit the COMPLETE revised study specification, plus a short note " +
+          "describing what changed and anything you assumed. Called exactly once.",
+        input_schema: {
+          type: "object",
+          properties: {
+            spec: SPEC_JSON_SCHEMA,
+            notes: {
+              type: "string",
+              description:
+                "Plain-language summary of what you changed and why, including " +
+                "any assumption you made, or the reason you changed nothing.",
+            },
+          },
+          required: ["spec", "notes"],
+        },
+      },
+    ],
+    tool_choice: { type: "tool", name: EDIT_TOOL },
+  };
+
+  status(`Asking ${model} to revise the specification…`);
+
+  let response: Response;
+  try {
+    response = await fetch(API_URL, {
+      method: "POST",
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    throw new Error(
+      "Could not reach the Anthropic API from your browser. This is almost " +
+        "always a network or blocking issue rather than a bad key: check your " +
+        "connection, and disable ad-blockers or privacy extensions for this " +
+        "page (they often block api.anthropic.com)."
+    );
+  }
+  if (!response.ok) throw new Error(await describeHttpError(response));
+
+  let data: unknown;
+  try {
+    data = await response.json();
+  } catch {
+    throw new Error("The Anthropic API returned a response that could not be parsed as JSON. Please try again.");
+  }
+
+  const raw = pluckToolInput(data);
+  if (raw === undefined || !isObject(raw)) {
+    const stopReason = isObject(data) ? str(data.stop_reason) : "";
+    if (stopReason === "max_tokens")
+      throw new Error(
+        "The model ran out of output space before finishing the revised " +
+          "specification. Ask for a smaller change, or use a more capable model."
+      );
+    throw new Error("The model did not return a revised specification. Please try again.");
+  }
+
+  status("Checking the proposal before showing it to you…");
+
+  const notes = str(raw.notes) || "(the model returned no note)";
+  const proposedRaw = raw.spec;
+
+  /* GATE 1: structure. Untrusted JSON, and every emitter dereferences it. */
+  const shape = checkSpecShape(proposedRaw);
+  if (!shape.ok) {
+    throw new Error(
+      `The model's revised specification is not structurally valid, so it was discarded rather than shown:\n- ${shape.problems.join("\n- ")}`
+    );
+  }
+
+  /* GATE 2: review state cannot be asserted by a model. */
+  const { spec: sanitized, forged, invalidated } = sanitizeProposal(spec, proposedRaw as unknown as StudySpec);
+
+  status("Proposal ready for review.");
+  return { spec: sanitized, notes, forged, invalidated };
 }
 
 /* ---------- HTTP error mapping ---------- */

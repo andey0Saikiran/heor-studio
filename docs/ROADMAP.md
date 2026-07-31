@@ -29,6 +29,30 @@ Supporting: small-cell suppression (derivation-aware), results contract,
 provenance, MCP server, seven gold fixtures (A-G) each built to exercise something
 the others structurally cannot, and a byte-identity snapshot gate on spine changes.
 
+**Spec chat.** Plain-language instructions revise the SPECIFICATION, never the
+generated code. The distinction is not stylistic: generated SAS and SQL are a
+pure function of the reviewed spec, and every verification guarantee here stands
+on that (PARITY stamps compare two twins derived from one spec; fingerprints
+scrape values out of emitted text and check them against the spec's parameters;
+mutation tests prove corrupting the emitted code turns the suite red). A chat
+that edited generated code would break all three at once.
+
+A proposal passes three gates before a human sees it: the structural check that
+every emitter's assumptions depend on, a sanitizer, and an itemized diff.
+
+The sanitizer exists because **a model may never mark its own work reviewed**.
+`reviewed` on a criterion and `verified` on a code are what code generation is
+gated on, and the AI disclosure in every bundle reports them as evidence of
+human oversight, so a model emitting them is a forged signature rather than a
+shortcut. Anything the model changed comes back with those flags false;
+anything it left alone keeps exactly the flag the analyst gave it. That second
+clause is a safety property too: a sanitizer that reset everything would be
+trivially safe and unusable, and an unusable control is one people route around.
+Both halves are held by 21 adversarial guards in `verify/chat.ts`.
+
+A chat-edited spec also stops being provenance `manual`, so the exported AI
+disclosure cannot claim no model was involved.
+
 ---
 
 ## Not built — the gaps that matter

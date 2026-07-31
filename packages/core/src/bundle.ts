@@ -159,7 +159,22 @@ specification from the source document.
 
 The model's only artifact is the structured specification (\`spec.json\`). It
 did not write, edit, or select any statistical code.`
-      : `No language model was used to produce this specification; it was
+      : prov.method === "llm_assisted"
+        ? `A large language model REVISED this specification in response to
+plain-language instructions from the analyst, through HEOR Studio's spec chat.
+
+- Model: ${prov.model ?? "not recorded"}
+- Last revised: ${prov.extractedAt ?? "not recorded"}
+
+Every revision was presented to the analyst as an itemized diff and applied
+only on their explicit acceptance. The model could not mark any criterion as
+reviewed or any code as verified: those flags are reset for anything it changed
+and are otherwise carried over from the analyst's own earlier review, so the
+oversight counts below reflect human sign-off and nothing else.
+
+The model's only artifact is the structured specification (\`spec.json\`). It
+did not write, edit, or select any statistical code.`
+        : `No language model was used to produce this specification; it was
 authored manually in HEOR Studio.`;
 
   return `# Generative AI disclosure
