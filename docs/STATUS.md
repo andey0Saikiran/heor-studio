@@ -1,38 +1,38 @@
-# HEOR Studio — Status & Roadmap
+# HEOR Studio — Status
 
-**PAUSED — 2026-07-29, at a deliberate stopping point, not an abandoned one.**
+**docs/ROADMAP.md is the source of truth for what is built.** This file is a
+running log of how it got that way, kept because the reasoning in it is worth
+more than the summary. Everything below the first section is HISTORICAL and was
+accurate when written; where it disagrees with ROADMAP.md, ROADMAP.md wins.
 
-_22 of the 69 planned analyses are built, verified and documented. **1377 harness
-checks, 0 failing.** That 69 was a planning number rather than a specification;
-see `docs/ROADMAP.md` for what is built, what is not, and what is refused by
-design. The largest genuine gap is treatment patterns and adherence._
+## Current, 2026-07-31
 
-_Why paused here: the differentiator was never the analysis count — it is the
-verification harness, and that is mature. Over the last three waves the most
-significant findings were defects in the **verification** rather than in the
-generated code (a coverage guard passing vacuously for three shipped modules, a
-positivity claim that was false in one direction, thirteen mutation tests weaker
-than they looked). That is what diminishing returns look like, and it is a good
-moment to stop._
+**24 of the 69 planned analyses are built and verified. 1554 harness checks, 0
+failing.** That 69 was a planning number rather than a specification, and a
+meaningful slice of the remainder is refused by design rather than pending.
 
-Repo: `github.com/andey0Saikiran/heor-studio` · monorepo (`packages/core`,
-`packages/web`, `packages/mcp`) · AGPL-3.0 core/web, Apache-2.0 mcp.
+Since the 2026-07-29 pause:
 
-**Pre-publication purge (2026-07-29):** `docs/research/` was removed from all
-history before going public. It held an OCR transcription of a former client's
-"Market Scan Business Rules" BRD and bulk value-list transcriptions from the
-licensed IBM/Merative MarketScan Data Dictionary — neither publishable. Nothing
-in the product referenced it. The corpus is kept privately outside the repo and
-`.gitignore` now blocks its return.
+- **The per-fill feeder landed**, which unblocked treatment patterns. Adherence
+  (PDC / MPR / stockpiled PDC), persistence and discontinuation, treatment
+  switching vs add-on, and line of therapy all ship with both twins. Gold Cases
+  F and G were built for them.
+- **A byte-identity gate** (`verify/snapshot.ts`) now covers 1737 emitted files
+  across seven gold specs and three naming strategies. Spine changes have to
+  prove they moved nothing.
+- **A correction surface** in the web app: "this looks wrong", anchored to a
+  generated program, a criterion, a derived sentence, an analysis or a single
+  code. A reason is structurally required.
+- **A spec chat**: plain language revises the SPEC, never the generated code,
+  and a model can never mark its own work reviewed. 21 adversarial guards.
+- **CI is back**, with the byte-identity gate added to it.
 
-**One step outstanding before publication:** 68 commits are unpushed because the
-local `gh` token lacks the `workflow` scope and three of them touch
-`.github/workflows/ci.yml`. Fix with `gh auth refresh -h github.com -s workflow`,
-then `git push origin main`. Nothing else blocks going public — no secrets are
-tracked, licences are in place, and CI gates the full verify.
-
-Everything below is committed. The entries worth reading are the ones where the
-harness caught defects in itself.
+Three defects in the VERIFICATION itself were found and fixed in that stretch,
+which is the pattern worth noting: a fingerprint key that disappeared read as
+"not checked" instead of "wrong"; coverage and mutation testing both emitted
+from one gold spec, quietly redefining "is this verified?" as "does Gold A
+happen to use it?"; and registering an analysis kind required teaching three
+places while only two had a load-time check.
 
 ---
 
@@ -97,7 +97,12 @@ _(the figure once quoted as 207 was miscounted — a live run printed 206. Waves
 
 ---
 
-## 🔨 NEED TO BUILD
+## 🔨 NEED TO BUILD — SUPERSEDED, see docs/ROADMAP.md
+
+_Historical. Written 2026-07-26, when P3 and P4 were unbuilt. Survival, Cox,
+competing risks, Fine-Gray, the causal family, HCRU, cost, adherence and
+switching have all shipped since. Kept for the reasoning about what each one
+was blocked on, which is still accurate about the blockers._
 
 ### A. Finish the incidence module — ✅ DONE
 - Snowflake now has fingerprint coverage (Wave 2); it still is not EXECUTED (no account).
