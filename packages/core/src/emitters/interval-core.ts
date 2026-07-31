@@ -36,8 +36,13 @@
  *
  *    with T the cumulative supply. So it is a running MAX of (start minus prior
  *    cumulative supply), plus the running SUM — two window functions, no loop.
- *    Verified against the sequential definition on ragged supplies, same-day
- *    double fills and real gaps.
+ *
+ *    WHAT IS ACTUALLY EXECUTED against this: Gold Case F, which covers exact
+ *    tiling (P1), sustained overlap from early refilling (P2), a real 60-day
+ *    gap (P3), a single fill (P4) and a dropped unmeasurable fill (P5). Ragged
+ *    supply lengths and same-day double fills are NOT yet in a fixture, so the
+ *    closed form is unverified on those two shapes — an earlier version of this
+ *    comment claimed otherwise and nothing backed it.
  *
  * WHY STOCKPILING IS NOT A DETAIL. On Gold Case F, patient P2 refills every 20
  * days on a 30-day supply. Without stockpiling PDC is 13/18 = 0.722; with it,
@@ -51,11 +56,59 @@
  * measurement choices that move it).
  */
 import type { Ctx as SqlCtx } from "./sql-base";
+import type { DaysSupplyCleaning } from "../spec/types";
 
 /** The conventional PDC cut-point for "adherent". Pinned as a named constant
  *  because it is a CONVENTION, not a fact, and a study that uses a different
  *  one should have to say so rather than silently inherit this. */
 export const ADHERENT_PDC_THRESHOLD = "0.8";
+
+/* ------------------------------------------------------------------ *
+ *  DAYS-SUPPLY CLEANING — shared by both twins so they drop the same
+ *  fills. Written once here rather than twice at the call sites,
+ *  because two hand-written predicates that agree today are two
+ *  predicates that can disagree tomorrow, and the disagreement would
+ *  show up as an adherence difference nobody could source.
+ * ------------------------------------------------------------------ */
+
+/** One clause per enabled rule, as (condition-that-KEEPS-the-row, why). */
+export function cleaningRules(
+  cl: DaysSupplyCleaning,
+  col: string,
+  lang: "sql" | "sas",
+): Array<{ keep: string; drop: string; reason: string }> {
+  const isNull = lang === "sql" ? `${col} IS NULL` : `${col} = .`;
+  const notNull = lang === "sql" ? `${col} IS NOT NULL` : `${col} ne .`;
+  const out: Array<{ keep: string; drop: string; reason: string }> = [];
+  if (cl.dropMissing)
+    out.push({
+      keep: notNull,
+      drop: isNull,
+      reason: "days supply is missing - the interval has no end, so the fill cannot be measured",
+    });
+  if (cl.dropZeroNegative)
+    out.push({
+      /* A null passes this clause on purpose: whether nulls go is
+       * dropMissing's decision, and folding the two together would make
+       * the attrition counts overlap and stop summing to the total. */
+      keep: `(${isNull} OR ${col} > 0)`,
+      drop: `(${notNull} AND ${col} <= 0)`,
+      reason:
+        "days supply is zero or negative - a negative supply ends its interval before it starts and SUBTRACTS from the MPR numerator, which can push MPR below PDC and make the program's own identity row report a broken merge",
+    });
+  out.push({
+    keep: `(${isNull} OR ${col} <= ${cl.maxDaysSupplyCap})`,
+    drop: `(${notNull} AND ${col} > ${cl.maxDaysSupplyCap})`,
+    reason: `days supply exceeds the ${cl.maxDaysSupplyCap}-day cap - a supply this long on one dispensing is a keying error more often than it is real`,
+  });
+  return out;
+}
+
+/** The WHERE fragment that keeps a measurable fill. */
+export function cleaningKeepClause(cl: DaysSupplyCleaning, col: string, lang: "sql" | "sas"): string {
+  const rules = cleaningRules(cl, col, lang);
+  return rules.length === 0 ? (lang === "sql" ? "TRUE" : "1") : rules.map((r) => r.keep).join(lang === "sql" ? " AND " : " and ");
+}
 
 export interface IntervalSqlInput {
   /** CTE with one row per fill: enrolid, fill_start (DATE), days_supply (INT) */

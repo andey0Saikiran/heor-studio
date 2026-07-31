@@ -328,6 +328,12 @@ textarea.control {
   margin-bottom: var(--space-3);
 }
 
+.analysis-head-actions {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+
 .analysis-toggle {
   display: inline-flex;
   align-items: center;
@@ -784,8 +790,11 @@ textarea.control {
   color: var(--ink-faint);
 }
 
-.code-head .btn {
+.code-head-actions {
   margin-left: auto;
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
 }
 
 .code-view {
@@ -879,6 +888,138 @@ textarea.control {
   justify-content: flex-end;
   gap: var(--space-2);
   margin-top: var(--space-5);
+}
+
+.modal-wide {
+  max-width: 680px;
+}
+
+/* ---------- corrections: flag target block + inbox ---------- */
+
+.count-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.25rem;
+  padding: 0 0.35rem;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--paper);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+/* These boxes hold prose, not code, so they read in the body face. */
+.modal-correction textarea.control {
+  font-family: var(--font-body);
+  font-size: 0.92rem;
+}
+
+.flag-target {
+  background: var(--surface-deep);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  padding: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.flag-target p {
+  margin: 0;
+}
+
+.flag-target p + p {
+  margin-top: var(--space-1);
+}
+
+.flag-target-kind {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+.flag-target-label {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.flag-target-ref code,
+.corr-ref {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--accent-ink);
+  overflow-wrap: anywhere;
+}
+
+.flag-target-note {
+  font-size: 0.82rem;
+  color: var(--ink-soft);
+}
+
+.corr-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+}
+
+.corr-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.corr-item {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: var(--space-3);
+}
+
+.corr-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.corr-when {
+  margin-left: auto;
+  font-size: 0.78rem;
+  color: var(--ink-faint);
+}
+
+.corr-claim {
+  margin: var(--space-2) 0 0;
+  font-weight: 600;
+}
+
+.corr-reason {
+  margin: var(--space-1) 0 0;
+  font-size: 0.92rem;
+  color: var(--ink-soft);
+}
+
+.corr-meta {
+  margin: var(--space-2) 0 0;
+  font-size: 0.78rem;
+  color: var(--ink-faint);
+}
+
+.corr-meta code {
+  font-family: var(--font-mono);
+}
+
+.corr-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
 }
 
 .key-warning {

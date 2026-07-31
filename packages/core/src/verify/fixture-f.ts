@@ -1,24 +1,26 @@
 /**
  * Gold Case F — ADHERENCE, and the choice that moves it across the threshold.
  *
- * A separate seed, like B through E. Four patients, one measurement window, four
+ * A separate seed, like B through E. Five patients, one measurement window, five
  * refill patterns chosen so every number is an exact fraction and each patient
  * pins a different piece of the interval algebra.
  *
- * Window: 180 days, day 0 through 179. Every fill is a 30-day supply.
+ * Window: 180 days, day 0 through 179. Every measurable fill is a 30-day supply.
  *
  *   P1  fills at 0, 30, 60, 90, 120, 150   PERFECT — no overlap, no gap
  *   P2  fills at 0, 20, 40, 60, 80, 100    EARLY REFILLS — overlap, no gap
  *   P3  fills at 0, 30, 120, 150           A REAL GAP of 60 days
  *   P4  a single fill at 0                 minimal
+ *   P5  fills at 0, and at 60 with a NULL days supply   DIRTY DATA
  *
- * Hand-derived (all confirmed by execution):
+ * Hand-derived, and executed by verify/run.ts verifyGoldF:
  *
  *   patient  covered  PDC        MPR    stockpiled PDC   discontinued  persistence
  *   P1       180      1          1      1                never          180 (censored)
  *   P2       130      13/18      1      1                day 130        130
  *   P3       120      2/3        2/3    2/3              day 60          60
  *   P4        30      1/6        1/6    1/6              day 30          30
+ *   P5        30      1/6        1/6    1/6              day 30          30
  *
  * WHAT EACH PATIENT IS FOR.
  *
@@ -54,14 +56,23 @@ import { FIXTURE_DDL } from "./fixture";
 
 const NDC_X = "00000000001";
 
-/** Fill-start day offsets from index, per patient. Every fill is 30 days. */
-const F_FILLS: Record<number, number[]> = {
-  1: [0, 30, 60, 90, 120, 150],
-  2: [0, 20, 40, 60, 80, 100],
-  3: [0, 30, 120, 150],
-  4: [0],
+/** Fill-start day offsets from index, per patient, with days supply.
+ *  `null` supply is a REAL claims value, not a typo — see P5. */
+const F_FILLS: Record<number, Array<[day: number, supply: number | null]>> = {
+  1: [[0, 30], [30, 30], [60, 30], [90, 30], [120, 30], [150, 30]],
+  2: [[0, 30], [20, 30], [40, 30], [60, 30], [80, 30], [100, 30]],
+  3: [[0, 30], [30, 30], [120, 30], [150, 30]],
+  4: [[0, 30]],
+  /* P5 PINS THE CLEANING PATH, which nothing else here touches. Its second fill
+   * has a NULL days supply — the single most common dirty value in a pharmacy
+   * file. Uncleaned it does not raise an error: the interval end goes NULL, the
+   * window predicate evaluates UNKNOWN, the row leaves the calculation, and P5
+   * simply looks less adherent with nothing anywhere saying a fill vanished.
+   * Cleaned, P5 lands on P4's numbers exactly (one measurable 30-day fill), but
+   * with a fill-attrition count that is NOT zero. That pairing is the assertion:
+   * the same PDC, reported honestly in one case and silently in the other. */
+  5: [[0, 30], [60, null]],
 };
-const SUPPLY = 30;
 
 /** 2020 is a leap year — day offsets are converted here rather than written by
  *  hand, because an off-by-one in a fill date moves coverage silently. */
@@ -83,7 +94,10 @@ export function fixtureFSeedSql(): string {
   /* Every fill is the SAME drug (the index drug), so nothing here is a switch —
    * switching gets its own fixture when that module lands. */
   const fills = ids
-    .flatMap((id) => F_FILLS[id].map((d) => `(${id}, DATE '${dayToIso(d)}', '${NDC_X}', ${SUPPLY}, 30, 100)`))
+    .flatMap((id) =>
+      F_FILLS[id].map(([d, sup]) =>
+        `(${id}, DATE '${dayToIso(d)}', '${NDC_X}', ${sup === null ? "NULL" : sup}, 30, 100)`),
+    )
     .join(",\n  ");
   lines.push(`INSERT INTO ccaed_all (enrolid,svcdate,ndcnum,daysupp,qty,paytot) VALUES\n  ${fills};`);
   lines.push(
@@ -134,7 +148,7 @@ export const GOLD_F_SPEC: StudySpec = {
 };
 
 export const EXPECTED_F = {
-  cohortN: 4,
+  cohortN: 5,
   windowDays: 180,
   /** per patient: covered days, PDC, MPR, stockpiled PDC, discontinuation day */
   patients: {
@@ -142,12 +156,19 @@ export const EXPECTED_F = {
     2: { covered: 130, pdc: 0.72222, mpr: 1, pdcStock: 1, disc: 130, persistence: 130, adherent: 0 },
     3: { covered: 120, pdc: 0.66667, mpr: 0.66667, pdcStock: 0.66667, disc: 60, persistence: 60, adherent: 0 },
     4: { covered: 30, pdc: 0.16667, mpr: 0.16667, pdcStock: 0.16667, disc: 30, persistence: 30, adherent: 0 },
+    /* identical to P4 AFTER cleaning drops its null-supply fill */
+    5: { covered: 30, pdc: 0.16667, mpr: 0.16667, pdcStock: 0.16667, disc: 30, persistence: 30, adherent: 0 },
   } as Record<number, { covered: number; pdc: number; mpr: number; pdcStock: number; disc: number | null; persistence: number; adherent: number }>,
-  /** cohort-level */
-  meanPdc: 0.63889,       // (1 + 13/18 + 2/3 + 1/6) / 4
-  meanMpr: 0.70833,       // (1 + 1 + 2/3 + 1/6) / 4
+  /** cohort-level. 5 patients: 1 + 13/18 + 2/3 + 1/6 + 1/6 = 49/18 */
+  meanPdc: 0.54444,       // (49/18) / 5
+  meanMpr: 0.6,           // (1 + 1 + 2/3 + 1/6 + 1/6) / 5 = 3/5
   adherentCount: 1,       // only P1 clears 0.8 without stockpiling
   adherentCountStock: 2,  // P2 joins it under stockpiling — the headline
-  discontinuedCount: 3,   // P1 is censored, not an event
+  discontinuedCount: 4,   // P1 is censored, not an event
   censoredCount: 1,
+  /** fill attrition. 6+6+4+1+2 = 19 dispensings inserted; P5's null-supply fill
+   *  is the one drop, so the counts must read 19 / 1 / 18. */
+  fillsFound: 19,
+  fillsDroppedMissing: 1,
+  fillsMeasured: 18,
 } as const;

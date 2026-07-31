@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { StudySpec } from "@heor-studio/core";
+import type { Correction, StudySpec } from "@heor-studio/core";
 import { PSO_DEMO_SPEC } from "./fixtures/pso";
 import type { EmitOptions } from "@heor-studio/core";
 import { DEFAULT_EMIT_OPTIONS } from "@heor-studio/core";
@@ -12,6 +12,9 @@ import SettingsModal, {
   type AppSettings,
 } from "./components/SettingsModal";
 import CodelistWorkbench from "./components/CodelistWorkbench";
+import CorrectionModal from "./components/CorrectionModal";
+import CorrectionsInbox from "./components/CorrectionsInbox";
+import { loadCorrections, saveCorrections, type FlagRequest } from "./lib/corrections";
 import { extractSpec } from "@heor-studio/core";
 import "./App.css";
 
@@ -307,11 +310,18 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [emitOptions, setEmitOptions] = useState<EmitOptions>(DEFAULT_EMIT_OPTIONS);
   const [draft, setDraft] = useState<DraftPayload | null>(() => loadDraft());
+  const [corrections, setCorrections] = useState<Correction[]>(() => loadCorrections());
+  const [flagRequest, setFlagRequest] = useState<FlagRequest | null>(null);
+  const [inboxOpen, setInboxOpen] = useState(false);
   const lastBumpRef = useRef(0);
 
   useEffect(() => {
     saveSettings(settings);
   }, [settings]);
+
+  useEffect(() => {
+    saveCorrections(corrections);
+  }, [corrections]);
 
   // Auto-save the working spec as a draft.
   useEffect(() => {
@@ -348,6 +358,11 @@ export default function App() {
 
   const reachable = (n: number) => n === 1 || spec !== null;
 
+  /** Newest first; the deterministic id means re-filing the same claim replaces it. */
+  const addCorrection = (c: Correction) =>
+    setCorrections((prev) => [c, ...prev.filter((p) => p.id !== c.id)]);
+  const openCount = corrections.filter((c) => c.status === "open").length;
+
   return (
     <div className="app-shell">
       <header className="app-header">
@@ -355,6 +370,14 @@ export default function App() {
           <h1 className="wordmark">HEOR Studio</h1>
           <span className="tagline">Protocol to verified study code, for MarketScan</span>
           <div className="header-actions">
+            <button type="button" className="btn btn-sm" onClick={() => setInboxOpen(true)}>
+              Corrections
+              {openCount > 0 && (
+                <span className="count-badge" aria-label={`${openCount} open`}>
+                  {openCount}
+                </span>
+              )}
+            </button>
             <button type="button" className="btn btn-sm" onClick={() => setSettingsOpen(true)}>
               Settings
             </button>
@@ -431,14 +454,19 @@ export default function App() {
             </button>
           </section>
         )}
-        {step === 2 && spec && <SpecReview spec={spec} onChange={updateSpec} />}
-        {step === 3 && spec && <CodelistWorkbench spec={spec} onChange={updateSpec} />}
+        {step === 2 && spec && (
+          <SpecReview spec={spec} onChange={updateSpec} onFlag={setFlagRequest} />
+        )}
+        {step === 3 && spec && (
+          <CodelistWorkbench spec={spec} onChange={updateSpec} onFlag={setFlagRequest} />
+        )}
         {step === 4 && spec && (
           <CodePanel
             spec={spec}
             options={emitOptions}
             onOptionsChange={setEmitOptions}
             onNavigate={setStep}
+            onFlag={setFlagRequest}
           />
         )}
         {step === 5 && spec && (
@@ -484,6 +512,25 @@ export default function App() {
           settings={settings}
           onChange={setSettings}
           onClose={() => setSettingsOpen(false)}
+        />
+      )}
+
+      {flagRequest && (
+        <CorrectionModal
+          request={flagRequest}
+          onRecord={(c) => {
+            addCorrection(c);
+            setFlagRequest(null);
+          }}
+          onClose={() => setFlagRequest(null)}
+        />
+      )}
+
+      {inboxOpen && (
+        <CorrectionsInbox
+          corrections={corrections}
+          onDelete={(id) => setCorrections((prev) => prev.filter((c) => c.id !== id))}
+          onClose={() => setInboxOpen(false)}
         />
       )}
     </div>

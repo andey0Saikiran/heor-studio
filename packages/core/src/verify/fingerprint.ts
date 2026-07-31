@@ -427,6 +427,51 @@ function sqlFingerprint(kind: string, raw: string): Fingerprint {
       }
       break;
     }
+    case "adherence": {
+      /* Adherence is arithmetic on intervals, so every scrape here is an
+       * expression whose corruption still yields a PDC between 0 and 1. A
+       * plausible wrong number is the only failure mode this module has. */
+      /* THE SOURCE TABLE. The SQL twin reads the long fills feeder and narrows
+       * it with a predicate; the SAS twin reads a per-code-list table. The
+       * PARITY stamp cannot check that split (it is compared for strict
+       * equality), so it is checked here, from each twin's own text. This is
+       * also the scrape that would have caught the module naming a `020_rx`
+       * table that no emitter creates. */
+      put(fp, "fills_source_in_sql", grab(sql, [/JOIN (\w+_fills) f ON/i]));
+      put(fp, "fills_selected_by_code_list_in_sql", grab(sql, [/f\.code_list_id = '([^']+)'/i]));
+      /* THE OFF-BY-ONE, worth one day of PDC per fill. */
+      put(fp, "interval_end_is_supply_minus_one", /\+ days_supply - 1/i.test(sql) ? "yes" : "no");
+      /* THE MERGE. Running max of prior ends, never LAG — a nested fill would
+       * otherwise open a spurious island and inflate the gap count. */
+      put(fp, "merge_uses_running_max",
+        /MAX\(d_end\) OVER \(PARTITION BY enrolid ORDER BY d_start, d_end/i.test(sql) ? "yes" : "no");
+      put(fp, "merge_avoids_lag", /LAG\(d_end\)/i.test(sql) ? "NO_LAG_PRESENT" : "yes");
+      /* STOCKPILING in closed form: a running MAX plus a running SUM. */
+      put(fp, "stockpile_closed_form",
+        /MAX\(d_start - \(t_cum - days_supply\)\) OVER/i.test(sql) ? "yes" : "no");
+      put(fp, "stockpile_cumulative_supply",
+        /SUM\(days_supply\) OVER[^)]*ROWS UNBOUNDED PRECEDING\) AS t_cum/i.test(sql) ? "yes" : "no");
+      /* THE DENOMINATOR both measures divide by. */
+      put(fp, "pdc_denominator", grab(sql, [/covered \* 1\.0 \/ (\d+) AS pdc/i]));
+      put(fp, "mpr_denominator", grab(sql, [/dispensed \* 1\.0 \/ (\d+) AS mpr/i]));
+      /* THE MPR GUARD. Without GREATEST(...,0) a negative clipped span
+       * subtracts from days dispensed, MPR can fall below PDC, and the
+       * identity row reports a broken merge about a merge that is fine. */
+      put(fp, "mpr_numerator_guarded",
+        /SUM\(GREATEST\(LEAST\(d_end, -?\d+\) - GREATEST\(d_start, -?\d+\) \+ 1, 0\)\) AS dispensed/i.test(sql) ? "yes" : "no");
+      put(fp, "adherence_threshold", grab(sql, [/pdc >= ([\d.]+) THEN 1 ELSE 0 END\) AS n_adherent/i]));
+      put(fp, "permissible_gap", grab(sql, [/gap of at least (\d+) uncovered days/i]));
+      /* CLEANING, and that its drops are COUNTED rather than silent. */
+      put(fp, "days_supply_cap", grab(sql, [/days_supply IS NULL OR days_supply <= (\d+)\)/i]));
+      put(fp, "drops_missing_supply", /days_supply IS NOT NULL/i.test(sql) ? "yes" : "no");
+      put(fp, "fill_attrition_counted", /AS n_raw,/i.test(sql) && /AS n_kept/i.test(sql) ? "yes" : "no");
+      /* THE IDENTITY ROW and the CENSORING split, both of which can be deleted
+       * while leaving a program that still produces every number. */
+      put(fp, "identity_row_emitted", /patients_with_pdc_above_mpr/i.test(sql) ? "yes" : "no");
+      put(fp, "censoring_kept_distinct", /COUNT\(\*\) - SUM\(discontinued\) AS n_censored/i.test(sql) ? "yes" : "no");
+      put(fp, "stockpile_reclassification_reported", /reclassified_by_stockpiling/i.test(sql) ? "yes" : "no");
+      break;
+    }
     case "cox": {
       /* A Cox model is its RISK SETS and its likelihood. Every scrape below is
        * an expression whose corruption still yields a plausible hazard ratio. */
@@ -945,6 +990,39 @@ function sasFingerprint(kind: string, rawSas: string, setup: string): Fingerprin
       put(fp, "km_anchor_present",
         /proc lifetest data=work\.\w+ method=km conftype=\w+ outsurv=/i.test(sas) &&
         /anchor_verdict = 'PASS: LIFETEST = closed-form product limit'/i.test(sas) ? "yes" : "no");
+      break;
+    }
+    case "adherence": {
+      /* The SAS twin of the scrapes above. Names differ by language on purpose
+       * (svcdate/daysupp against fill_date/days_supply), which is exactly why
+       * each is read from its OWN text rather than assumed from the other. */
+      /* Matched AFTER macro resolution: sasFingerprint runs resolveSasMacros,
+       * so `tz.&tag._ev_index_drug` in the emitted file is `tz.TZ_F_ev_...`
+       * here. A regex written against the unresolved form scrapes nothing and,
+       * before the ABSENT sentinel was handled, that read as a pass. */
+      put(fp, "fills_source_in_sas", grab(sas, [/from (tz\.\S*_ev_\w+)/i]));
+      /* The SAS side needs no code-list predicate: the spine writes one event
+       * table per code list, so the table name IS the selection. Recorded so
+       * that a change to either strategy shows up here. */
+      put(fp, "fills_selected_by_per_list_table_in_sas", "yes");
+      put(fp, "interval_end_is_supply_minus_one", /\+ f\.daysupp - 1 as d_end/i.test(sas) ? "yes" : "no");
+      put(fp, "merge_uses_running_max",
+        /if _maxend = \. or d_start > _maxend then island \+ 1;/i.test(sas) ? "yes" : "no");
+      put(fp, "merge_avoids_lag", /lag\(d_end\)/i.test(sas) ? "NO_LAG_PRESENT" : "yes");
+      put(fp, "stockpile_closed_form", /u_max = max\(u_max, d_start - \(t_cum - days_supply\)\)/i.test(sas) ? "yes" : "no");
+      put(fp, "stockpile_cumulative_supply", /t_cum \+ days_supply/i.test(sas) ? "yes" : "no");
+      put(fp, "pdc_denominator", grab(sas, [/pdc\s+= covered \/ (\d+);/i]));
+      put(fp, "mpr_denominator", grab(sas, [/mpr\s+= dispensed \/ (\d+);/i]));
+      put(fp, "mpr_numerator_guarded",
+        /sum\(max\(min\(d_end, -?\d+\) - max\(d_start, -?\d+\) \+ 1, 0\)\) as dispensed/i.test(sas) ? "yes" : "no");
+      put(fp, "adherence_threshold", grab(sas, [/sum\(pdc >= ([\d.]+)\) as n_adherent/i]));
+      put(fp, "permissible_gap", grab(sas, [/gap of at least (\d+) uncovered days/i]));
+      put(fp, "days_supply_cap", grab(sas, [/daysupp = \. OR daysupp <= (\d+)\)/i]));
+      put(fp, "drops_missing_supply", /daysupp ne \./i.test(sas) ? "yes" : "no");
+      put(fp, "fill_attrition_counted", /as n_raw,/i.test(sas) && /as n_kept/i.test(sas) ? "yes" : "no");
+      put(fp, "identity_row_emitted", /patients_with_pdc_above_mpr/i.test(sas) ? "yes" : "no");
+      put(fp, "censoring_kept_distinct", /count\(\*\) - sum\(discontinued\) as n_censored/i.test(sas) ? "yes" : "no");
+      put(fp, "stockpile_reclassification_reported", /reclassified_by_stockpiling/i.test(sas) ? "yes" : "no");
       break;
     }
     case "cox": {
@@ -1497,6 +1575,21 @@ export function expectedFromStamp(kind: string, stamp: Record<string, unknown>):
       exp.horizons = (stamp.horizonDays as number[] ?? []).join(",");
       break;
     }
+    case "adherence": {
+      /* The DENOMINATOR is the one worth cross-checking hardest: an off-by-one
+       * in windowDays moves every PDC and MPR in the study by the same amount,
+       * which looks exactly like a real finding rather than like a bug. */
+      exp.pdc_denominator = String(stamp.windowDays ?? "");
+      exp.mpr_denominator = String(stamp.windowDays ?? "");
+      exp.adherence_threshold = String(stamp.adherenceThreshold ?? "");
+      exp.permissible_gap = String(stamp.permissibleGapDays ?? "");
+      exp.days_supply_cap = String(stamp.maxDaysSupplyCap ?? "");
+      exp.drops_missing_supply = stamp.dropMissingSupply === true ? "yes" : "no";
+      exp.interval_end_is_supply_minus_one = String(stamp.intervalEnd ?? "") === "start_plus_supply_minus_one" ? "yes" : "no";
+      exp.merge_uses_running_max = String(stamp.merge ?? "") === "running_max_islands" ? "yes" : "no";
+      exp.stockpile_closed_form = String(stamp.stockpiling ?? "") === "closed_form_running_max" ? "yes" : "no";
+      break;
+    }
     case "g_formula": {
       exp.treated_level = String(stamp.treatedLevel ?? "");
       exp.horizon_days = String(stamp.horizonDays ?? "");
@@ -1653,6 +1746,16 @@ const EXPECTED_CONSTANTS: Record<string, Record<"sql" | "sas", ConstantProfileSp
      * table of ratios. */
     sql: { z: 2, z2_half: 0, z2: 0, z2_quarter: 0 },
     sas: { z: 2, z2_half: 0, z2: 0, z2_quarter: 0 },
+  },
+  adherence: {
+    /* No interval anywhere. PDC, MPR and the persistence mean are proportions
+     * and averages reported WITHOUT confidence intervals, deliberately: the
+     * denominator is a fixed window chosen by the analyst rather than a sample
+     * size, so a Wilson interval around PDC would describe sampling error that
+     * the design does not have. A z appearing here would mean somebody attached
+     * an interval to a measure whose uncertainty is not sampling uncertainty. */
+    sql: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
+    sas: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
   },
   comorbidity_index: {
     /* No interval anywhere — the index reports a mean, an SD and a median, none
@@ -1847,8 +1950,19 @@ export function hasConstantProfile(kind: string): boolean {
  * its own language, by `languageLocalChecks` — the contract is enforced more
  * strictly than a cross-diff ever did, not less.
  */
-export const LANGUAGE_LOCAL_KEYS: Record<string, { language: "sql" | "sas"; must: string; means: string }> = {
+export const LANGUAGE_LOCAL_KEYS: Record<string, { language: "sql" | "sas"; must: string; means: string; kind?: string }> = {
   exact_ci_null_in_sql: { language: "sql", must: "yes", means: "exact Poisson limits are NULL in SQL, not approximated" },
+  /* THE FILLS FEEDER. The twins reach the same dispensings by different routes
+   * on purpose: SQL reads one long <prefix>_fills table and narrows it with a
+   * code_list_id predicate, SAS reads the spine's per-code-list event table, so
+   * the table name IS the selection. Comparing these across languages would
+   * report the design as drift; asserting each in its own language is what
+   * catches a twin that stopped reading the feeder at all — which is the defect
+   * that shipped here, as a SAS table name no emitter ever created. */
+  fills_source_in_sql: { kind: "adherence", language: "sql", must: "NONEMPTY", means: "the SQL twin reads the <prefix>_fills feeder" },
+  fills_selected_by_code_list_in_sql: { kind: "adherence", language: "sql", must: "NONEMPTY", means: "the SQL twin narrows the feeder to the measured drug" },
+  fills_source_in_sas: { kind: "adherence", language: "sas", must: "NONEMPTY", means: "the SAS twin reads a real per-code-list event table, not a phantom one" },
+  fills_selected_by_per_list_table_in_sas: { kind: "adherence", language: "sas", must: "yes", means: "the SAS twin selects its drug by reading that list's own table" },
   exact_ci_computed_in_sas: { language: "sas", must: "yes", means: "exact Poisson limits are genuinely computed in SAS" },
   trend_p_null_in_sql: { language: "sql", must: "yes", means: "the trend p-value is NULL in SQL, not guessed" },
   trend_p_computed_in_sas: { language: "sas", must: "yes", means: "the trend p-value is genuinely computed in SAS" },
@@ -1878,19 +1992,56 @@ export const LANGUAGE_LOCAL_KEYS: Record<string, { language: "sql" | "sas"; must
 export function languageLocalChecks(
   language: "sql" | "sas",
   fp: Fingerprint,
+  kind?: string,
 ): Array<{ key: string; ok: boolean; detail: string }> {
   const out: Array<{ key: string; ok: boolean; detail: string }> = [];
   for (const [key, rule] of Object.entries(LANGUAGE_LOCAL_KEYS)) {
     const got = fp[key];
-    if (got === undefined) continue;
+    /* A rule scoped to one module only applies to that module. Without this,
+     * "the adherence twin must resolve a source table" would fail on every Cox
+     * and incidence program in the repo. */
+    if (rule.kind && kind && rule.kind !== kind) continue;
+    if (got === undefined) {
+      /* ABSENCE IS A FAILURE for a required key, not something to skip.
+       *
+       * This was a hole. The loop used to `continue` on a missing key, so a
+       * corruption that made a key STOP BEING SCRAPED read as "not checked"
+       * rather than "wrong" — and a mutation pointing the SAS twin at a table
+       * no emitter creates went uncaught for exactly that reason. A key that
+       * disappears is the loudest possible signal, and it was the one being
+       * ignored. */
+      if (rule.kind && rule.kind === kind && rule.language === language) {
+        out.push({ key, ok: false, detail: `${key} is ABSENT from the ${language} twin — ${rule.means}` });
+      }
+      continue;
+    }
     if (rule.language !== language) {
       out.push({ key, ok: false, detail: `${key} was scraped from the ${language} twin, but only ${rule.language} can produce it` });
       continue;
     }
+    /* "NONEMPTY" asserts that a value was RESOLVED, not that it equals a
+     * literal. A source table name is site- and spec-dependent (tz_f_fills,
+     * tz.&tag._ev_index_drug), so there is no constant to pin — but "the twin
+     * resolved SOME table here" is exactly the assertion that fails when a
+     * module names a table no emitter creates, which is how the phantom
+     * `020_rx` survived. */
+    /* "ABSENT" is put()'s sentinel for a scrape that found nothing — it is a
+     * STRING, not undefined, so a naive non-empty test passes on it and the
+     * exact corruption this rule exists to catch reads as fine. That is how a
+     * mutation pointing the SAS twin at a table no emitter creates survived
+     * this check on its first run. */
+    const ok =
+      rule.must === "NONEMPTY"
+        ? got !== "ABSENT" && String(got).trim().length > 0
+        : got === rule.must;
     out.push({
       key,
-      ok: got === rule.must,
-      detail: got === rule.must ? rule.means : `${key} = "${got}", must be "${rule.must}" — ${rule.means}`,
+      ok,
+      detail: ok
+        ? rule.means
+        : rule.must === "NONEMPTY"
+          ? `${key} resolved to nothing — ${rule.means}`
+          : `${key} = "${got}", must be "${rule.must}" — ${rule.means}`,
     });
   }
   return out;

@@ -29,17 +29,25 @@
  * result keeps the two apart. Collapsing them turns "still on treatment when we
  * stopped looking" into "never stopped".
  *
- * Verified vs Gold Case F: coverage 180 / 130 / 120 / 30 days over a 180-day
- * window, giving PDC 1, 13/18, 2/3, 1/6 against MPR 1, 1, 2/3, 1/6; one patient
- * adherent at 0.8 without stockpiling and two with it; three discontinuations
- * (days 130, 60, 30) and one censored.
+ * DIRTY DAYS SUPPLY IS COUNTED, NOT SWALLOWED. An unmeasurable DAYSUPP raises
+ * no error anywhere: the interval end goes NULL, the window predicate evaluates
+ * UNKNOWN, the row leaves the calculation, and the patient simply looks less
+ * adherent. So cleaning rules are explicit, defaulted, stamped, and every drop
+ * is reported in a fill-attrition block beside the measures.
+ *
+ * Verified vs Gold Case F, executed by verify/run.ts: coverage 180 / 130 / 120 /
+ * 30 / 30 days over a 180-day window, giving PDC 1, 13/18, 2/3, 1/6, 1/6 against
+ * MPR 1, 1, 2/3, 1/6, 1/6; one patient adherent at 0.8 without stockpiling and
+ * two with it; four discontinuations (days 130, 60, 30, 30) and one censored;
+ * 19 dispensings found, 1 dropped for a missing days supply, 18 measured.
  */
 import type { AdherenceAnalysis } from "../../spec/types";
 import type { GeneratedFile } from "../types";
 import type { AnalysisModule, SqlCtx, SasCtx, SqlModuleFile } from "./types";
 import { describeWindow, oneLine, q } from "../sql-base";
 import { cmt, header, levelCheck, INCLUDE_SETUP } from "../sas-base";
-import { intervalSqlCtes, gapSqlCtes, intervalSasSteps } from "../interval-core";
+import { daysSupplyCleaningFor } from "../../spec/types";
+import { intervalSqlCtes, gapSqlCtes, intervalSasSteps, cleaningRules, cleaningKeepClause } from "../interval-core";
 import {
   parityStamp,
   adherenceLimitations,
@@ -49,6 +57,7 @@ import {
 
 const MEASURE = "adherence";
 const ORD_DESIGN = 0;
+const ORD_FEEDER = 5;
 const ORD_ADH = 10;
 const ORD_STOCK = 20;
 const ORD_PERSIST = 30;
@@ -68,6 +77,8 @@ function sqlAdherence(ctx: SqlCtx, an: AdherenceAnalysis, suffix: string): SqlMo
   const { d, wp } = ctx;
   const out = `${wp}_adh${suffix}`;
   const { w0, w1, len } = bounds(an);
+  const clean = daysSupplyCleaningFor(an);
+  const rules = cleaningRules(clean, "days_supply", "sql");
   const L: string[] = [];
 
   L.push(`-- ${parityStamp("adherence", adherenceParity(an, { windowStart: w0, windowEnd: w1, windowDays: len }))}`);
@@ -81,10 +92,27 @@ function sqlAdherence(ctx: SqlCtx, an: AdherenceAnalysis, suffix: string): SqlMo
 
   const C: string[] = [];
   C.push(`WITH cohort AS (SELECT enrolid, index_date FROM ${wp}_cohort),`);
-  C.push(`fills AS (   -- dispensings of the measured drug, per cohort member`);
+  C.push(`fills_raw AS (   -- dispensings of the measured drug, per cohort member`);
   C.push(`  SELECT c.enrolid, c.index_date, f.fill_date AS fill_start, f.days_supply`);
   C.push(`  FROM cohort c`);
   C.push(`  JOIN ${wp}_fills f ON f.enrolid = c.enrolid AND f.code_list_id = '${q(an.drugCodeListId)}'`);
+  C.push(`),`);
+  /* CLEANING, AND WHY IT IS COUNTED RATHER THAN JUST APPLIED. An unmeasurable
+   * days supply does not raise an error anywhere downstream — it produces a
+   * NULL interval end, the window predicate goes UNKNOWN, and the row silently
+   * leaves the calculation. The patient then looks less adherent and no output
+   * anywhere says a fill was dropped. So every rule below is applied AND
+   * tallied, and the tally is emitted beside the results. */
+  C.push(`fills AS (   -- measurable fills only; every drop is counted in fillattr`);
+  C.push(`  SELECT * FROM fills_raw WHERE ${cleaningKeepClause(clean, "days_supply", "sql")}`);
+  C.push(`),`);
+  C.push(`fillattr AS (   -- fill attrition by reason. Drops are never silent.`);
+  C.push(`  SELECT COUNT(*) AS n_raw,`);
+  rules.forEach((r, i) => {
+    C.push(`         SUM(CASE WHEN ${r.drop} THEN 1 ELSE 0 END) AS n_drop_${i},`);
+  });
+  C.push(`         SUM(CASE WHEN ${cleaningKeepClause(clean, "days_supply", "sql")} THEN 1 ELSE 0 END) AS n_kept`);
+  C.push(`  FROM fills_raw`);
   C.push(`),`);
   C.push(...intervalSqlCtes(ctx, { fillsCte: "fills", windowStartDay: w0, windowEndDay: w1 }));
   C.push(...gapSqlCtes({ mergedCte: "ivm", windowStartDay: w0, windowEndDay: w1, permissibleGap: an.permissibleGapDays }));
@@ -102,7 +130,14 @@ function sqlAdherence(ctx: SqlCtx, an: AdherenceAnalysis, suffix: string): SqlMo
   /* MPR's numerator is days DISPENSED inside the window, clipped so a fill near`
    * the window edge cannot contribute supply that falls outside it. Without the
    * clip MPR can exceed 1 for a reason that has nothing to do with overlap. */
-  C.push(`  LEFT JOIN (SELECT enrolid, SUM(LEAST(d_end, ${w1}) - GREATEST(d_start, ${w0}) + 1) AS dispensed`);
+  /* GREATEST(..., 0) matters here even after cleaning. The clipped span can go
+   * negative on its own — a fill entirely outside [w0,w1] that still passed the
+   * touching filter would give LEAST(d_end,w1) < GREATEST(d_start,w0) — and an
+   * unguarded sum would SUBTRACT those days from MPR. MPR could then fall below
+   * PDC, and the identity row below would report "the interval merge is broken"
+   * about a merge that is fine. Guarding here keeps that row diagnostic of what
+   * it actually names. */
+  C.push(`  LEFT JOIN (SELECT enrolid, SUM(GREATEST(LEAST(d_end, ${w1}) - GREATEST(d_start, ${w0}) + 1, 0)) AS dispensed`);
   C.push(`             FROM ivw GROUP BY enrolid) sup ON sup.enrolid = c.enrolid`);
   C.push(`  LEFT JOIN (SELECT enrolid, SUM(GREATEST(s_end - s_start + 1, 0)) AS stocked`);
   C.push(`             FROM ivs GROUP BY enrolid) stk ON stk.enrolid = c.enrolid`);
@@ -120,7 +155,9 @@ function sqlAdherence(ctx: SqlCtx, an: AdherenceAnalysis, suffix: string): SqlMo
   C.push(`  FROM pt`);
   C.push(`),`);
   C.push(`agg AS (`);
-  C.push(`  SELECT COUNT(*) AS n,`);
+  C.push(`  SELECT MAX(fa.n_raw) AS n_fills_raw, MAX(fa.n_kept) AS n_fills_kept,`);
+  rules.forEach((_r, i) => C.push(`         MAX(fa.n_drop_${i}) AS n_drop_${i},`));
+  C.push(`         COUNT(*) AS n,`);
   C.push(`         AVG(pdc) AS mean_pdc, AVG(mpr) AS mean_mpr, AVG(pdc_stock) AS mean_pdc_stock,`);
   C.push(`         SUM(CASE WHEN pdc >= ${an.adherenceThreshold} THEN 1 ELSE 0 END) AS n_adherent,`);
   C.push(`         SUM(CASE WHEN pdc_stock >= ${an.adherenceThreshold} THEN 1 ELSE 0 END) AS n_adherent_stock,`);
@@ -129,7 +166,7 @@ function sqlAdherence(ctx: SqlCtx, an: AdherenceAnalysis, suffix: string): SqlMo
   C.push(`         AVG(persistence_days) AS mean_persistence,`);
   C.push(`         SUM(CASE WHEN pdc > mpr + 1e-9 THEN 1 ELSE 0 END) AS n_pdc_gt_mpr,`);
   C.push(`         SUM(CASE WHEN ABS(pdc - mpr) < 1e-9 THEN 1 ELSE 0 END) AS n_pdc_eq_mpr`);
-  C.push(`  FROM pt2`);
+  C.push(`  FROM pt2 CROSS JOIN fillattr fa`);
   C.push(`)`);
 
   const STR = (e: string) => `CAST(${e} AS VARCHAR)`;
@@ -149,6 +186,21 @@ function sqlAdherence(ctx: SqlCtx, an: AdherenceAnalysis, suffix: string): SqlMo
   parts.push(row("design", "patients", ORD_DESIGN, `CAST(n AS NUMERIC)`, `'cohort members measured'`));
   parts.push(row("design", "window_days", ORD_DESIGN + 1, `CAST(${len} AS NUMERIC)`,
     `'denominator for PDC and MPR: days ${w0} through ${w1} inclusive'`));
+
+  /* FILL ATTRITION. Read this before the adherence rows: every dropped fill
+   * lowers the coverage of whoever it belonged to, and without these counts
+   * that loss is indistinguishable from a patient who genuinely did not
+   * refill. */
+  parts.push(row("fills", "fills_found", ORD_FEEDER, `CAST(n_fills_raw AS NUMERIC)`,
+    `'dispensings of this drug for cohort members, before any cleaning'`));
+  rules.forEach((r, i) => {
+    parts.push(row("fills", `dropped_rule_${i + 1}`, ORD_FEEDER + 1 + i, `CAST(n_drop_${i} AS NUMERIC)`,
+      `'${q(r.reason)}'`));
+  });
+  parts.push(row("fills", "fills_measured", ORD_FEEDER + 1 + rules.length, `CAST(n_fills_kept AS NUMERIC)`,
+    `CASE WHEN n_fills_kept = n_fills_raw` +
+    ` THEN 'every dispensing was measurable; no fill was dropped'` +
+    ` ELSE 'FILLS WERE DROPPED. The patients they belonged to now look less adherent, and nothing downstream distinguishes that from a genuine failure to refill. Check the rule counts above against your delivery before reporting any number here' END`));
 
   parts.push(row("adherence", "mean_pdc", ORD_ADH, d.roundN(`mean_pdc`, 5),
     `'proportion of days covered - DISTINCT days, so overlapping fills are counted once'`));
@@ -220,7 +272,14 @@ function sasAdherence(ctx: SasCtx, an: AdherenceAnalysis, num: string, suffix: s
   const { w0, w1, len } = bounds(an);
   const lbl = an.label.replace(/"/g, "'");
   const limits = adherenceLimitations(an);
-  const rxT = ctx.tbl("020_rx");
+  const clean = daysSupplyCleaningFor(an);
+  const rules = cleaningRules(clean, "daysupp", "sas");
+  /* The measured drug's OWN event table. This used to name a `020_rx` member
+   * that no emitter creates anywhere — the program would have failed on its
+   * first statement. The spine already pulls DAYSUPP for every drug code list
+   * (one table per list, so no code-list predicate is needed here, which is why
+   * the parity stamp records the selection rule rather than assuming it). */
+  const rxT = ctx.evOf(an.drugCodeListId);
 
   const lines: string[] = [
     ...header(spec, `${num}_adh${suffix}.sas`, [
@@ -252,9 +311,26 @@ function sasAdherence(ctx: SasCtx, an: AdherenceAnalysis, num: string, suffix: s
     `proc sql;`,
     `  create table work._${num}_cohort as`,
     `  select enrolid, index_date from ${cohT};`,
+    ``,
+    `/*-------------------- fill attrition ------------------------------------------`,
+    `  Cleaning is applied AND counted. An unmeasurable days supply does not raise`,
+    `  an error: it produces a missing interval end, the row fails the window`,
+    `  filter, and the patient simply looks less adherent with nothing saying a`,
+    `  fill was dropped. These counts are what make that visible.`,
+    `-----------------------------------------------------------------------------*/`,
+    `  create table work._${num}_fillattr as`,
+    `  select count(*) as n_raw,`,
+    ...rules.map((r, i) => `         sum(${r.drop}) as n_drop_${i},`),
+    `         sum(${cleaningKeepClause(clean, "daysupp", "sas")}) as n_kept`,
+    `  from ${rxT} as f`,
+    `  inner join work._${num}_cohort as a on a.enrolid = f.enrolid;`,
+    ``,
+    `  create table work._${num}_rx as`,
+    `  select * from ${rxT}`,
+    `  where ${cleaningKeepClause(clean, "daysupp", "sas")};`,
     `quit;`,
     ``,
-    ...intervalSasSteps({ num, fillsT: rxT, windowStartDay: w0, windowEndDay: w1 }),
+    ...intervalSasSteps({ num, fillsT: `work._${num}_rx`, windowStartDay: w0, windowEndDay: w1 }),
     ``,
     `/*-------------------- gaps and discontinuation -------------------------------*/`,
     `proc sort data=work._${num}_ivm; by enrolid m_start; run;`,
@@ -288,7 +364,11 @@ function sasAdherence(ctx: SasCtx, an: AdherenceAnalysis, num: string, suffix: s
     `  from work._${num}_cohort as c`,
     `  left join (select enrolid, sum(max(m_end - m_start + 1, 0)) as covered`,
     `             from work._${num}_ivm group by enrolid) as cov on cov.enrolid = c.enrolid`,
-    `  left join (select enrolid, sum(min(d_end, ${w1}) - max(d_start, ${w0}) + 1) as dispensed`,
+    /* max(..., 0) guard: mirrors the SQL twin. A clipped span can be negative on
+     * its own, and an unguarded sum would subtract those days from MPR, pushing
+     * it below PDC and making the identity row below report a broken merge
+     * about a merge that is fine. */
+    `  left join (select enrolid, sum(max(min(d_end, ${w1}) - max(d_start, ${w0}) + 1, 0)) as dispensed`,
     `             from work._${num}_ivw group by enrolid) as sup on sup.enrolid = c.enrolid`,
     `  left join (select enrolid, sum(max(s_end - s_start + 1, 0)) as stocked`,
     `             from work._${num}_ivs group by enrolid) as stk on stk.enrolid = c.enrolid`,
@@ -319,16 +399,32 @@ function sasAdherence(ctx: SasCtx, an: AdherenceAnalysis, num: string, suffix: s
     `         sum(pdc > mpr + 1e-9) as n_pdc_gt_mpr,`,
     `         sum(abs(pdc - mpr) < 1e-9) as n_pdc_eq_mpr`,
     `  from work._${num}_pt2;`,
+    ``,
+    `  /* fill attrition carried alongside, one row, so the output data step can`,
+    `     emit it beside the measures */`,
+    `  create table work._${num}_aggf as`,
+    `  select a.*, f.n_raw as n_fills_raw, f.n_kept as n_fills_kept`,
+    ...rules.map((_r, i) => `       , f.n_drop_${i} as n_drop_${i}`),
+    `  from work._${num}_agg as a, work._${num}_fillattr as f;`,
     `quit;`,
     ``,
     `data ${outT};`,
     `  length measure $20 component $12 statistic $32 method $340;`,
-    `  set work._${num}_agg;`,
+    `  set work._${num}_aggf;`,
     `  measure = "${MEASURE}";`,
     `  component='design'; statistic='patients'; ord=${ORD_DESIGN}; estimate=n;`,
     `  method='cohort members measured'; output;`,
     `  statistic='window_days'; ord=${ORD_DESIGN + 1}; estimate=${len};`,
     `  method='denominator for PDC and MPR: days ${w0} through ${w1} inclusive'; output;`,
+    `  component='fills'; statistic='fills_found'; ord=${ORD_FEEDER}; estimate=n_fills_raw;`,
+    `  method='dispensings of this drug for cohort members, before any cleaning'; output;`,
+    ...rules.flatMap((r, i) => [
+      `  statistic='dropped_rule_${i + 1}'; ord=${ORD_FEEDER + 1 + i}; estimate=n_drop_${i};`,
+      `  method='${cmt(r.reason)}'; output;`,
+    ]),
+    `  statistic='fills_measured'; ord=${ORD_FEEDER + 1 + rules.length}; estimate=n_fills_kept;`,
+    `  if n_fills_kept = n_fills_raw then method='every dispensing was measurable; no fill was dropped';`,
+    `  else method='FILLS WERE DROPPED. The patients they belonged to now look less adherent, and nothing downstream distinguishes that from a genuine failure to refill'; output;`,
     `  component='adherence'; statistic='mean_pdc'; ord=${ORD_ADH}; estimate=round(mean_pdc, 0.00001);`,
     `  method='proportion of days covered - DISTINCT days, so overlapping fills are counted once'; output;`,
     `  statistic='mean_mpr'; ord=${ORD_ADH + 1}; estimate=round(mean_mpr, 0.00001);`,

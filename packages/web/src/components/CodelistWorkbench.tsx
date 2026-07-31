@@ -14,6 +14,7 @@ import type {
   StudySpec,
 } from "@heor-studio/core";
 import { searchDrugNames, searchIcd10cm } from "@heor-studio/core";
+import type { FlagRequest } from "../lib/corrections";
 import "./workbench.css";
 
 /* ---------- constants & pure helpers ---------- */
@@ -111,9 +112,11 @@ async function runVocabSearch(
 export default function CodelistWorkbench({
   spec,
   onChange,
+  onFlag,
 }: {
   spec: StudySpec;
   onChange: (spec: StudySpec) => void;
+  onFlag: (r: FlagRequest) => void;
 }) {
   const updateList = (id: string, up: (cl: CodeList) => CodeList) => {
     onChange({
@@ -153,7 +156,13 @@ export default function CodelistWorkbench({
       </header>
 
       {spec.codeLists.map((cl) => (
-        <CodeListCard key={cl.id} list={cl} onUpdate={(up) => updateList(cl.id, up)} />
+        <CodeListCard
+          key={cl.id}
+          list={cl}
+          specVersion={spec.meta.version}
+          onUpdate={(up) => updateList(cl.id, up)}
+          onFlag={onFlag}
+        />
       ))}
 
       <NewListForm onCreate={createList} />
@@ -165,10 +174,14 @@ export default function CodelistWorkbench({
 
 function CodeListCard({
   list,
+  specVersion,
   onUpdate,
+  onFlag,
 }: {
   list: CodeList;
+  specVersion: string;
   onUpdate: (up: (cl: CodeList) => CodeList) => void;
+  onFlag: (r: FlagRequest) => void;
 }) {
   const [open, setOpen] = useState(true);
   const uid = useId();
@@ -275,6 +288,37 @@ function CodeListCard({
                           />
                         </td>
                         <td className="wb-actions-cell">
+                          <button
+                            type="button"
+                            className="wb-flag"
+                            aria-label={`Flag ${c.code} as wrong`}
+                            onClick={() =>
+                              onFlag({
+                                label: `Code ${c.code} in the list "${list.label}"`,
+                                context: [
+                                  `Code system: ${SYSTEM_LABELS[list.system]}`,
+                                  c.description
+                                    ? `Description on file: ${c.description}`
+                                    : "No description on file.",
+                                  `Where it came from: ${SOURCE_LABELS[c.source]}`,
+                                  c.verified
+                                    ? "Marked verified by an analyst."
+                                    : "Not verified yet.",
+                                ],
+                                target: {
+                                  kind: "code_list",
+                                  // CodeEntry has no id, so the list qualifies the code.
+                                  ref: `${list.id}:${c.code}`,
+                                  specVersion,
+                                  artifactPath: `codelists/${list.id}.csv`,
+                                },
+                                reasonHint:
+                                  "Does this code not belong, or is one missing? Cite the coding guideline, the era, or the published algorithm.",
+                              })
+                            }
+                          >
+                            Flag
+                          </button>
                           <button
                             type="button"
                             className="wb-remove"

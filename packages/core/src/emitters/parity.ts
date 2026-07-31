@@ -36,7 +36,7 @@ import type {
   TrendSpec,
 } from "../spec/types";
 import type { StudySpec } from "../spec/types";
-import { survivalOutcome } from "../spec/types";
+import { survivalOutcome, daysSupplyCleaningFor } from "../spec/types";
 
 /** Default mean days per year — internally consistent (rate/person-years/CI all
  *  agree). Overridable per study via spec.meta.daysPerYear (e.g. 365 for the HEOR
@@ -670,6 +670,23 @@ export function ascertainmentWindow(spec: StudySpec): AscertainmentWindow {
       else if (w.start < 0) consider(-w.start, `analysis "${a.id}" resource-use lookback ${-w.start}d`);
       if (typeof w.end === "number" && w.end > fwdDays) {
         fwdDays = w.end; reasons.push(`analysis "${a.id}" resource-use window ends day ${w.end}`);
+      }
+    }
+    /* Adherence reaches the pull in BOTH directions, and both are silent if
+     * missed. Forward: a measurement window ending past followupDays would pull
+     * no pharmacy claims for its tail, and fills that were never pulled read as
+     * non-adherence rather than as missing data. Backward: a dispensing BEFORE
+     * the window whose supply reaches into it is in scope by construction (the
+     * interval algebra keeps any fill whose end lands at or after the window
+     * start), so the pull has to reach back a full maximum days supply beyond
+     * the window start or those covered days silently disappear. */
+    if (a.kind === "adherence") {
+      const cap = daysSupplyCleaningFor(a).maxDaysSupplyCap;
+      const wStart = typeof a.window.start === "number" ? a.window.start : 0;
+      const back = Math.max(0, -wStart) + cap;
+      consider(back, `analysis "${a.id}" needs fills reaching into its window: ${cap}d max supply before day ${wStart}`);
+      if (typeof a.window.end === "number" && a.window.end > fwdDays) {
+        fwdDays = a.window.end; reasons.push(`analysis "${a.id}" adherence window ends day ${a.window.end}`);
       }
     }
     if (a.kind === "period_prevalence") {
@@ -1700,6 +1717,27 @@ export interface AdherenceParity {
   merge: "running_max_islands";
   stockpiling: "closed_form_running_max";
   sasPrimary: "none";
+  /* ---- FEEDER FACTS ------------------------------------------------------
+   * Without these the stamp CANNOT catch the divergence that matters most
+   * here. The SQL twin reads one long fills table and selects its drug with a
+   * code_list_id predicate; the SAS twin reads a per-code-list event table and
+   * so carries no predicate at all. Those are different contracts, and a stamp
+   * that recorded only the method would be IDENTICAL across them — the parity
+   * check would pass over two programs measuring different fills. Recording the
+   * resolved source and the selection rule is what makes that visible. */
+  /** How each twin narrows the feeder to the measured drug. ONE shared value,
+   *  not a per-twin one: the stamp is compared for strict equality, so a value
+   *  that legitimately differs by language would fail parity forever. Stating
+   *  the asymmetry in a constant both twins emit at least puts it in front of a
+   *  reader; the check that can actually FAIL is the emitted-text assertion in
+   *  verify/run.ts verifyGoldF, which reads the source table out of each
+   *  twin's own program. */
+  fillSelection: "sql_filters_code_list_id__sas_reads_the_per_list_table";
+  /** the grain both twins must agree on, stated so a change to either is loud */
+  fillGrain: "distinct_enrolid_date_ndc_supply";
+  dropMissingSupply: boolean;
+  dropZeroNegativeSupply: boolean;
+  maxDaysSupplyCap: number;
 }
 
 export function adherenceLimitations(an: AdherenceAnalysis): string[] {
@@ -1730,6 +1768,7 @@ export function adherenceParity(
   an: AdherenceAnalysis,
   consumed: { windowStart: number; windowEnd: number; windowDays: number },
 ): AdherenceParity {
+  const clean = daysSupplyCleaningFor(an);
   return {
     id: an.id,
     drugCodeListId: an.drugCodeListId,
@@ -1742,5 +1781,10 @@ export function adherenceParity(
     merge: "running_max_islands",
     stockpiling: "closed_form_running_max",
     sasPrimary: "none",
+    fillSelection: "sql_filters_code_list_id__sas_reads_the_per_list_table",
+    fillGrain: "distinct_enrolid_date_ndc_supply",
+    dropMissingSupply: clean.dropMissing,
+    dropZeroNegativeSupply: clean.dropZeroNegative,
+    maxDaysSupplyCap: clean.maxDaysSupplyCap,
   };
 }

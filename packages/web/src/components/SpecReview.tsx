@@ -11,6 +11,8 @@ import type {
   StudySpec,
 } from "@heor-studio/core";
 import { findCodeList, specReadiness, EMITTABLE_ANALYSIS_KINDS } from "@heor-studio/core";
+import { FlagButton } from "./CorrectionModal";
+import type { FlagRequest } from "../lib/corrections";
 
 type Test = Criterion["test"];
 type TestType = Test["type"];
@@ -412,6 +414,7 @@ function CriterionRow({
   onPatch,
   onMove,
   onDelete,
+  onFlag,
 }: {
   spec: StudySpec;
   criterion: Criterion;
@@ -420,6 +423,7 @@ function CriterionRow({
   onPatch: (patch: Partial<Criterion>) => void;
   onMove: (dir: -1 | 1) => void;
   onDelete: () => void;
+  onFlag: (r: FlagRequest) => void;
 }) {
   const t = c.test;
   const setTest = (test: Test) => onPatch({ test });
@@ -474,6 +478,21 @@ function CriterionRow({
           >
             Down
           </button>
+          <FlagButton
+            what={`criterion ${c.id}`}
+            onClick={() =>
+              onFlag({
+                label: `${c.kind === "inclusion" ? "Inclusion" : "Exclusion"} criterion, applied at position ${index + 1} of ${count}`,
+                context: [
+                  `Protocol text: ${c.sourceText}`,
+                  `Mapped as: ${describeTest(spec, t)}`,
+                ],
+                target: { kind: "spec_field", ref: c.id, specVersion: spec.meta.version },
+                reasonHint:
+                  "Which part of the rule is off (the code list, the window, the claim count, the setting), and what does the protocol say?",
+              })
+            }
+          />
           <button
             type="button"
             className="btn btn-sm btn-danger-quiet"
@@ -491,7 +510,27 @@ function CriterionRow({
 
       <p className="crit-summary">
         <span className="summary-label">Maps to</span>
-        {describeTest(spec, t)}
+        {describeTest(spec, t)}{" "}
+        <FlagButton
+          what={`this plain-English reading of criterion ${c.id}`}
+          className="btn btn-quiet btn-sm"
+          onClick={() =>
+            onFlag({
+              label: `Plain-English reading of criterion ${c.id}`,
+              context: [`Reads as: ${describeTest(spec, t)}`],
+              target: {
+                kind: "terminology",
+                ref: `${c.id}:maps_to`,
+                specVersion: spec.meta.version,
+              },
+              classification: "terminology",
+              reasonHint:
+                "How would you say it instead, and where does this wording mislead a reader of your protocol?",
+            })
+          }
+        >
+          Flag this reading
+        </FlagButton>
       </p>
 
       {unmapped && (
@@ -863,11 +902,13 @@ function AnalysisEditor({
   analysis,
   onPatch,
   onDelete,
+  onFlag,
 }: {
   spec: StudySpec;
   analysis: Analysis;
   onPatch: (patch: Partial<Analysis>) => void;
   onDelete: () => void;
+  onFlag: (r: FlagRequest) => void;
 }) {
   const a = analysis;
   const emittable = EMITTABLE_ANALYSIS_KINDS.has(a.kind);
@@ -890,9 +931,27 @@ function AnalysisEditor({
           />
           <span className="analysis-kind">{ANALYSIS_KIND_LABELS[a.kind]}</span>
         </label>
-        <button type="button" className="btn-danger-quiet btn-sm" onClick={onDelete} aria-label={`Remove ${a.label}`}>
-          Remove
-        </button>
+        <div className="analysis-head-actions">
+          <FlagButton
+            what={`the ${a.label} analysis`}
+            onClick={() =>
+              onFlag({
+                label: `${ANALYSIS_KIND_LABELS[a.kind]} analysis, labelled "${a.label}"`,
+                context: [
+                  `Kind: ${a.kind}`,
+                  a.enabled ? "Enabled, so it generates code." : "Disabled, so it generates no code.",
+                ],
+                target: { kind: "spec_field", ref: a.id, specVersion: spec.meta.version },
+                classification: "methodological_choice",
+                reasonHint:
+                  "Which methodological choice do you disagree with (denominator, washout, censoring, CI method), and what would you use?",
+              })
+            }
+          />
+          <button type="button" className="btn-danger-quiet btn-sm" onClick={onDelete} aria-label={`Remove ${a.label}`}>
+            Remove
+          </button>
+        </div>
       </div>
 
       <div className="field">
@@ -1058,9 +1117,11 @@ function AddAnalysisForm({ onAdd }: { onAdd: (kind: AnalysisKind) => void }) {
 export default function SpecReview({
   spec,
   onChange,
+  onFlag,
 }: {
   spec: StudySpec;
   onChange: (s: StudySpec) => void;
+  onFlag: (r: FlagRequest) => void;
 }) {
   const readiness = specReadiness(spec);
   const dbId = useId();
@@ -1316,6 +1377,7 @@ export default function SpecReview({
                 count={spec.criteria.length}
                 onPatch={(patch) => patchCriterion(c.id, patch)}
                 onMove={(dir) => moveCriterion(c.id, dir)}
+                onFlag={onFlag}
                 onDelete={() => {
                   if (window.confirm(`Delete criterion "${c.id}"? This cannot be undone.`))
                     deleteCriterion(c.id);
@@ -1353,6 +1415,7 @@ export default function SpecReview({
               analysis={a}
               onPatch={(patch) => patchAnalysis(a.id, patch)}
               onDelete={() => deleteAnalysis(a.id)}
+              onFlag={onFlag}
             />
           ))}
         </div>

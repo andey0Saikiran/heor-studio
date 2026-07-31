@@ -6,6 +6,8 @@ import type { TableNamingStrategy } from "@heor-studio/core";
 import { DB_PREFIX } from "@heor-studio/core";
 import { emitSas } from "@heor-studio/core";
 import { emitSql } from "@heor-studio/core";
+import { FlagButton } from "./CorrectionModal";
+import type { FlagRequest } from "../lib/corrections";
 
 type TabId = "sas" | "postgres" | "snowflake";
 
@@ -14,6 +16,18 @@ const TAB_LABELS: Record<TabId, string> = {
   postgres: "SQL · Postgres",
   snowflake: "SQL · Snowflake",
 };
+
+/** Where each emitter's files land in the export bundle (bundle.ts flattens
+ *  every program into one folder per language, so the two paths differ). */
+const BUNDLE_FOLDER: Record<TabId, string> = {
+  sas: "sas",
+  postgres: "sql_postgres",
+  snowflake: "sql_snowflake",
+};
+
+function bundlePath(tab: TabId, emitterPath: string): string {
+  return `${BUNDLE_FOLDER[tab]}/${emitterPath.split("/").pop() ?? emitterPath}`;
+}
 
 type EmitResult = { files: GeneratedFile[] } | { error: string };
 
@@ -154,11 +168,13 @@ export default function CodePanel({
   options,
   onOptionsChange,
   onNavigate,
+  onFlag,
 }: {
   spec: StudySpec;
   options: EmitOptions;
   onOptionsChange: (o: EmitOptions) => void;
   onNavigate?: (step: number) => void;
+  onFlag: (r: FlagRequest) => void;
 }) {
   const readiness = specReadiness(spec);
   const [tab, setTab] = useState<TabId>("sas");
@@ -281,9 +297,30 @@ export default function CodePanel({
               <div className="code-head">
                 <h3 style={{ margin: 0, fontSize: "1rem" }}>{selected.title}</h3>
                 <span className="file-path">{selected.path}</span>
-                <button type="button" className="btn btn-sm" onClick={() => copy(selected)}>
-                  {copiedPath === selected.path ? "Copied" : "Copy"}
-                </button>
+                <div className="code-head-actions">
+                  <button type="button" className="btn btn-sm" onClick={() => copy(selected)}>
+                    {copiedPath === selected.path ? "Copied" : "Copy"}
+                  </button>
+                  <FlagButton
+                    what={`the generated program ${selected.path}`}
+                    onClick={() =>
+                      onFlag({
+                        label: `${selected.title} (${TAB_LABELS[tab]})`,
+                        context: [
+                          `Emitted from spec version ${spec.meta.version} with study tag ${options.tag}.`,
+                        ],
+                        target: {
+                          kind: "generated_code",
+                          ref: selected.path,
+                          specVersion: spec.meta.version,
+                          artifactPath: bundlePath(tab, selected.path),
+                        },
+                        reasonHint:
+                          "Which statement is wrong, and what does the protocol or your site's SAS/SQL do instead?",
+                      })
+                    }
+                  />
+                </div>
               </div>
               <div className="code-view" role="region" aria-label={`Source of ${selected.path}`}>
                 <pre>

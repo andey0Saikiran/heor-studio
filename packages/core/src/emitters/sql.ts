@@ -26,7 +26,7 @@ import type {
   RelativeWindow,
   StudySpec,
 } from "../spec/types";
-import { findCodeList } from "../spec/types";
+import { findCodeList, fillsCodeListIds } from "../spec/types";
 import type { TableNamingStrategy } from "../data/marketscan";
 import {
   DB_PREFIX,
@@ -534,6 +534,111 @@ function build02(ctx: Ctx): string {
   out.push(`FROM ${wp}_events`);
   out.push(`GROUP BY code_list_id, event_type, setting`);
   out.push(`ORDER BY code_list_id, event_type, setting;`);
+
+  const fillsBlock = buildFills(ctx);
+  if (fillsBlock) out.push(``, fillsBlock);
+  return out.join("\n");
+}
+
+/* ------------------------------------------------------------------ */
+/* 02b - the per-fill feeder (emitted only when an analysis needs it)  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * `<prefix>_fills` — one row per DISPENSING of a measured drug, carrying days
+ * supply. Adherence, persistence and switching all read it.
+ *
+ * IT CANNOT BE A PROJECTION OF `<prefix>_events`, for two independent reasons,
+ * and both of them are silent if you get them wrong:
+ *
+ *   1. `<prefix>_events` never selects DAYSUPP at all. The drug branch keeps
+ *      only (enrolid, event_date, code) — days supply is dropped where the
+ *      pharmacy claim is read, so there is nothing downstream to recover.
+ *
+ *   2. `<prefix>_events` ends in SELECT DISTINCT over (enrolid, event_date,
+ *      event_type, setting, code_list_id, code). That is CORRECT for a
+ *      diagnosis ledger, where one clinical event recorded on many claim lines
+ *      must collapse to one. It is WRONG for fills, where the same NDC
+ *      dispensed twice is two supplies, and collapsing them halves MPR and
+ *      understates the stockpile cursor.
+ *
+ * So this reads the pharmacy claims directly, at claim grain.
+ *
+ * THE FAN-OUT THIS TABLE HAS TO DEFEND AGAINST. `<prefix>_ndc_lookup` is one
+ * row per (code_list_id, pattern, ndcnum): an NDC matching two name patterns of
+ * the SAME list appears twice in it. In `<prefix>_events` the trailing DISTINCT
+ * absorbs that; here there is no trailing DISTINCT to absorb anything, so
+ * joining it raw would turn one dispensing into two — inflating MPR and the
+ * stockpile cursor while leaving PDC untouched, which is precisely the shape of
+ * a real early-refilling finding. The join therefore goes through a
+ * DISTINCT (code_list_id, ndcnum) map.
+ */
+function buildFills(ctx: Ctx): string | null {
+  const { spec, wp } = ctx;
+  const needed = fillsCodeListIds(spec);
+  if (needed.length === 0) return null;
+
+  const out: string[] = [];
+  const aw = ascertainmentWindow(spec);
+  out.push(`-- ============================================================`);
+  out.push(`-- ${wp}_fills - one row per DISPENSING, with days supply.`);
+  out.push(`-- ============================================================`);
+  out.push(`-- Read by adherence/persistence. NOT derivable from ${wp}_events:`);
+  out.push(`-- that table drops DAYSUPP, and its trailing DISTINCT collapses two`);
+  out.push(`-- same-day dispensings of one NDC into a single row - correct for a`);
+  out.push(`-- diagnosis ledger, wrong for fills, where two supplies is two supplies.`);
+  out.push(`--`);
+  out.push(`-- GRAIN: (enrolid, fill_date, ndcnum, days_supply), deduplicated.`);
+  out.push(`-- Two claim lines identical on all four are treated as ONE dispensing`);
+  out.push(`-- recorded twice, because MarketScan exposes no claim-line key that`);
+  out.push(`-- could tell a true same-day double fill from a duplicated record.`);
+  out.push(`-- The SAS twin's pharmacy pull dedupes on the same four columns, so`);
+  out.push(`-- both languages count the same fills. If your delivery DOES carry a`);
+  out.push(`-- claim key, keeping it here is the more faithful choice - and it will`);
+  out.push(`-- raise MPR relative to PDC, which is a real finding, not a bug.`);
+  out.push(`--`);
+  out.push(`-- days_supply is emitted AS DISPENSED and UNCLEANED. Cleaning is a`);
+  out.push(`-- per-analysis choice applied downstream, where every dropped fill is`);
+  out.push(`-- counted by reason rather than vanishing.`);
+  out.push(ctx.d.createTableAs(`${wp}_fills`));
+  out.push(`WITH ndc_map AS (`);
+  out.push(`  -- DISTINCT (code_list_id, ndcnum): the lookup carries one row per`);
+  out.push(`  -- (code_list_id, pattern, ndcnum), so an NDC caught by two name`);
+  out.push(`  -- patterns of the same list is in there twice. Without this DISTINCT`);
+  out.push(`  -- one dispensing would be counted twice.`);
+  out.push(`  SELECT DISTINCT code_list_id, ndcnum`);
+  out.push(`  FROM ${wp}_ndc_lookup`);
+  out.push(`  WHERE code_list_id IN (${needed.map((id) => `'${q(id)}'`).join(", ")})`);
+  out.push(`)`);
+  out.push(`SELECT DISTINCT dr.enrolid, dr.svcdate AS fill_date, n.code_list_id,`);
+  out.push(`       dr.ndcnum, dr.daysupp AS days_supply`);
+  out.push(`FROM ${ctx.t("drug_claims")} dr`);
+  out.push(`JOIN ndc_map n ON dr.ndcnum = n.ndcnum`);
+  out.push(`WHERE dr.enrolid IS NOT NULL`);
+  /* Same ascertainment bound as the events pull, and for the same reason: a
+   * measurement window reaching past followupDays would otherwise pull no
+   * pharmacy claims for its tail, and missing fills read as non-adherence. */
+  if (aw.start === null) {
+    out.push(`  -- (a window in this spec is unbounded before index, so no lower bound)`);
+    out.push(`  AND dr.svcdate <= DATE '${aw.end}';`);
+  } else {
+    out.push(`  AND dr.svcdate >= DATE '${aw.start}'`);
+    out.push(`  AND dr.svcdate <= DATE '${aw.end}';`);
+  }
+  out.push(``);
+  out.push(`-- REVIEW: fill volume and days-supply distribution per list. A zero row`);
+  out.push(`-- means the drug list never matched a pharmacy claim. Check min_supply`);
+  out.push(`-- and max_supply before trusting any adherence number: a NULL or`);
+  out.push(`-- non-positive supply is unusable, and a supply of a year on one`);
+  out.push(`-- dispensing is a keying error more often than it is a real supply.`);
+  out.push(`SELECT code_list_id,`);
+  out.push(`       COUNT(*) AS fills, COUNT(DISTINCT enrolid) AS patients,`);
+  out.push(`       SUM(CASE WHEN days_supply IS NULL THEN 1 ELSE 0 END) AS missing_supply,`);
+  out.push(`       SUM(CASE WHEN days_supply <= 0 THEN 1 ELSE 0 END) AS nonpositive_supply,`);
+  out.push(`       MIN(days_supply) AS min_supply, MAX(days_supply) AS max_supply`);
+  out.push(`FROM ${wp}_fills`);
+  out.push(`GROUP BY code_list_id`);
+  out.push(`ORDER BY code_list_id;`);
   return out.join("\n");
 }
 

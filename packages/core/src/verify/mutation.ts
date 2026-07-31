@@ -34,6 +34,7 @@ import {
 } from "./fingerprint";
 import { sasStructureChecks } from "./sas-lint";
 import { GOLD_A_SPEC, GOLD_A_OPTS } from "./fixture";
+import { GOLD_F_SPEC, GOLD_F_OPTS } from "./fixture-f";
 import type { StudySpec } from "../spec/types";
 import type { Check } from "./run";
 
@@ -690,6 +691,99 @@ const MUTATIONS: Mutation[] = [
     kind: "fine_gray", lang: "sas",
     apply: (t) => t.replace(/if wn_total > n_cs_total \+ 1e-9 then/g, "if 1 then"),
   },
+
+  /* ---- ADHERENCE ------------------------------------------------------
+   * Every corruption below leaves a program that runs and reports a PDC
+   * between 0 and 1. That is the whole failure mode of this module: there is
+   * no exception to raise and no impossible value to notice. */
+  {
+    /* THE OFF-BY-ONE. A 30-day supply dispensed on day 0 covers days 0..29.
+     * Dropping the -1 gives every fill one extra day: on Gold F it takes P1's
+     * six tiling fills to 186 covered days over a 180-day window, so PDC goes
+     * ABOVE 1 — but only because that patient tiles exactly. For a patient with
+     * any gap it just quietly raises adherence. */
+    name: "SQL drops the interval off-by-one (supply covers one day too many)",
+    kind: "adherence", lang: "sql",
+    apply: (t) => t.replace(/\+ days_supply - 1/g, "+ days_supply"),
+  },
+  {
+    name: "SAS drops the interval off-by-one",
+    kind: "adherence", lang: "sas",
+    apply: (t) => t.replace(/\+ f\.daysupp - 1 as d_end/g, "+ f.daysupp as d_end"),
+  },
+  {
+    /* THE MERGE. Comparing against the previous row's end instead of the
+     * running maximum splits an island whenever one fill is nested inside
+     * another, which invents a gap and can turn a persistent patient into a
+     * discontinuation. */
+    name: "SQL merges islands against the PREVIOUS end instead of the running maximum",
+    kind: "adherence", lang: "sql",
+    apply: (t) => t.replace(
+      /MAX\(d_end\) OVER \(PARTITION BY enrolid ORDER BY d_start, d_end/g,
+      "LAG(d_end) OVER (PARTITION BY enrolid ORDER BY d_start, d_end"),
+  },
+  {
+    /* THE STOCKPILE CURSOR. Replacing the running max with the bare start
+     * removes the "finish the current supply first" assumption while leaving
+     * a stockpiled column that still looks computed. On Gold F this is the
+     * difference between P2 being adherent and not. */
+    name: "SQL flattens the stockpile cursor to the raw fill start",
+    kind: "adherence", lang: "sql",
+    apply: (t) => t.replace(/MAX\(d_start - \(t_cum - days_supply\)\) OVER/g, "MIN(d_start - (t_cum - days_supply)) OVER"),
+  },
+  {
+    name: "SAS flattens the stockpile cursor",
+    kind: "adherence", lang: "sas",
+    apply: (t) => t.replace(/u_max = max\(u_max, d_start - \(t_cum - days_supply\)\);/g, "u_max = d_start - (t_cum - days_supply);"),
+  },
+  {
+    /* THE MPR GUARD. Removing GREATEST(...,0) lets a negative clipped span
+     * subtract from days dispensed. MPR can then fall below PDC and the
+     * program's own identity row reports "the interval merge is broken" about
+     * a merge that is fine, sending the analyst to debug correct code. */
+    name: "SQL removes the MPR numerator guard (a negative span subtracts from days dispensed)",
+    kind: "adherence", lang: "sql",
+    apply: (t) => t.replace(
+      /SUM\(GREATEST\(LEAST\(d_end, (-?\d+)\) - GREATEST\(d_start, (-?\d+)\) \+ 1, 0\)\) AS dispensed/g,
+      "SUM(LEAST(d_end, $1) - GREATEST(d_start, $2) + 1) AS dispensed"),
+  },
+  {
+    /* CLEANING SILENCE. Keeping the drop but deleting the count restores
+     * exactly the behaviour this module was built to eliminate: fills vanish
+     * and the patient simply looks less adherent. */
+    name: "SQL stops counting dropped fills (the drop stays, the attrition tally goes)",
+    kind: "adherence", lang: "sql",
+    apply: (t) => t.replace(/AS n_raw,/g, "AS n_ignored,"),
+  },
+  {
+    /* THE DAYS-SUPPLY CAP, moved rather than removed: a cap of 3650 admits a
+     * decade of supply on one dispensing and every downstream number stays
+     * plausible. */
+    name: "SQL widens the days-supply cap tenfold",
+    kind: "adherence", lang: "sql",
+    apply: (t) => t.replace(/days_supply IS NULL OR days_supply <= 365\)/g, "days_supply IS NULL OR days_supply <= 3650)"),
+  },
+  {
+    name: "SAS widens the days-supply cap tenfold",
+    kind: "adherence", lang: "sas",
+    apply: (t) => t.replace(/daysupp = \. OR daysupp <= 365\)/g, "daysupp = . OR daysupp <= 3650)"),
+  },
+  {
+    /* CENSORING COLLAPSED INTO DISCONTINUATION — the error that turns "still
+     * on treatment when we stopped looking" into "never stopped". */
+    name: "SQL counts everyone as discontinued, erasing the censoring distinction",
+    kind: "adherence", lang: "sql",
+    apply: (t) => t.replace(/COUNT\(\*\) - SUM\(discontinued\) AS n_censored/g, "0 AS n_censored"),
+  },
+  {
+    /* THE SAS TWIN READING THE WRONG TABLE. This is the defect that actually
+     * shipped: the module named a `020_rx` member no emitter creates. The
+     * mutation reproduces it, so the harness is now the thing that would have
+     * caught it. */
+    name: "SAS reads a fills table that no emitter creates",
+    kind: "adherence", lang: "sas",
+    apply: (t) => t.replace(/tz\.&tag\._ev_\w+/g, "tz.&tag._020_rx"),
+  },
   {
     name: "SAS deletes the U(beta_hat) = 0 check on the weighted risk sets",
     kind: "fine_gray", lang: "sas",
@@ -902,15 +996,35 @@ function programsByKind(
 /** Run every mutation and report whether the harness catches it. */
 export function mutationChecks(): Check[] {
   const checks: Check[] = [];
-  const sqlFiles = emitSql(GOLD_A_SPEC, "postgres", GOLD_A_OPTS);
-  const sasFiles = emitSas(GOLD_A_SPEC, GOLD_A_OPTS);
-  const setup = sasFiles.find((f) => /setup/i.test(f.path))?.content ?? "";
-  const sqlByKind = programsByKind(sqlFiles);
-  const sasByKind = programsByKind(sasFiles);
+  /* Mutations used to be applied to GOLD_A_SPEC's output alone, which silently
+   * limited what could be mutated to what Gold A happens to emit. Adherence is
+   * the first module Gold A cannot express — it needs a fills feeder and a
+   * refill pattern of its own — so a mutation of it would have reported "no
+   * adherence program emitted" rather than testing anything. Each mutation now
+   * resolves against the FIRST gold spec that emits its kind in both languages,
+   * exactly as verify/coverage.ts does. */
+  const SOURCES = [
+    { spec: GOLD_A_SPEC, opts: GOLD_A_OPTS },
+    { spec: GOLD_F_SPEC, opts: GOLD_F_OPTS },
+  ].map(({ spec, opts }) => {
+    const sas = emitSas(spec, opts);
+    return {
+      sql: emitSql(spec, "postgres", opts),
+      sas,
+      setup: sas.find((f) => /setup/i.test(f.path))?.content ?? "",
+    };
+  });
 
   for (const m of MUTATIONS) {
-    const sqlProg = (m.pathMatch ? programsByKind(sqlFiles, m.pathMatch) : sqlByKind).get(m.kind);
-    const sasProg = (m.pathMatch ? programsByKind(sasFiles, m.pathMatch) : sasByKind).get(m.kind);
+    const src =
+      SOURCES.find(
+        (s) =>
+          (m.pathMatch ? programsByKind(s.sql, m.pathMatch) : programsByKind(s.sql)).get(m.kind) &&
+          (m.pathMatch ? programsByKind(s.sas, m.pathMatch) : programsByKind(s.sas)).get(m.kind),
+      ) ?? SOURCES[0];
+    const setup = src.setup;
+    const sqlProg = (m.pathMatch ? programsByKind(src.sql, m.pathMatch) : programsByKind(src.sql)).get(m.kind);
+    const sasProg = (m.pathMatch ? programsByKind(src.sas, m.pathMatch) : programsByKind(src.sas)).get(m.kind);
     if (!sqlProg || !sasProg) {
       checks.push({ name: `mutation: ${m.name}`, status: "fail", detail: `no ${m.kind} program emitted in both languages` });
       continue;
@@ -988,8 +1102,8 @@ export function mutationChecks(): Check[] {
      * Doing it in the generic runner means every future language-local key is
      * covered by every mutation automatically. */
     const local = [
-      ...languageLocalChecks("sql", fpSql).filter((c) => !c.ok),
-      ...languageLocalChecks("sas", fpSas).filter((c) => !c.ok),
+      ...languageLocalChecks("sql", fpSql, m.kind).filter((c) => !c.ok),
+      ...languageLocalChecks("sas", fpSas, m.kind).filter((c) => !c.ok),
     ];
 
     const reasons = [

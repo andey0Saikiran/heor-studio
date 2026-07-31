@@ -19,6 +19,7 @@ import { GOLD_B_SPEC, GOLD_B_OPTS, EXPECTED_B, fixtureBSeedSql } from "./fixture
 import { GOLD_C_SPEC, GOLD_C_OPTS, EXPECTED_C, fixtureCSeedSql } from "./fixture-c";
 import { GOLD_D_SPEC, GOLD_D_OPTS, EXPECTED_D, fixtureDSeedSql } from "./fixture-d";
 import { GOLD_E_SPEC, GOLD_E_OPTS, EXPECTED_E, fixtureESeedSql } from "./fixture-e";
+import { GOLD_F_SPEC, GOLD_F_OPTS, EXPECTED_F, fixtureFSeedSql } from "./fixture-f";
 import { EMITTABLE_ANALYSIS_KINDS } from "../spec/types";
 import type { StudySpec, EmitOptions } from "../index";
 
@@ -816,6 +817,104 @@ export async function verifyGoldE(): Promise<Check[]> {
 
   out.push(...sasSqlParityChecks(GOLD_E_SPEC, GOLD_E_OPTS));
   out.push(...sasStructureChecks(emitSas(GOLD_E_SPEC, GOLD_E_OPTS)));
+  return out;
+}
+
+/**
+ * Gold Case F — adherence, persistence, and the choice that moves a patient
+ * across the threshold.
+ *
+ * This case exists because three comments in this repo claimed adherence was
+ * "verified vs Gold Case F" while nothing imported the fixture at all. The
+ * claims are now either backed by what runs below, or they are gone.
+ */
+export async function verifyGoldF(): Promise<Check[]> {
+  const { db, ok, steps } = await seedAndRun(GOLD_F_SPEC, GOLD_F_OPTS, fixtureFSeedSql());
+  const out: Check[] = [];
+  if (!ok) {
+    return [{
+      name: "Gold Case F executes",
+      status: "fail",
+      detail: steps.filter((x) => !x.ok).map((x) => `${x.path}: ${x.error}`).join(" | "),
+    }];
+  }
+  const eq = (name: string, got: number | null | undefined, want: number) =>
+    out.push({ name, status: got === want ? "pass" : "fail", detail: `expected ${want}, got ${got}` });
+  const approx = (name: string, got: number, want: number, tol: number) =>
+    out.push({ name, status: Math.abs(got - want) <= tol ? "pass" : "fail", detail: `expected ${want}±${tol}, got ${got}` });
+
+  eq("F: cohort N = 5", await scalar<number>(db, "SELECT count(*)::int FROM tz_f_cohort"), EXPECTED_F.cohortN);
+
+  /* THE FEEDER ITSELF. If <prefix>_fills were missing, wrongly grained, or
+   * fanned out by the NDC lookup, every number below would still LOOK
+   * plausible — so the feeder is asserted directly, before anything reads it. */
+  eq("F: the fills feeder exists and holds one row per dispensing (19)",
+    await scalar<number>(db, "SELECT count(*)::int FROM tz_f_fills"), EXPECTED_F.fillsFound);
+  eq("F: the feeder did NOT fan out — 19 rows over 19 distinct (patient, date) pairs",
+    await scalar<number>(db, "SELECT count(*)::int FROM (SELECT DISTINCT enrolid, fill_date FROM tz_f_fills) u"),
+    EXPECTED_F.fillsFound);
+  eq("F: the feeder carries days supply, and exactly one is NULL",
+    await scalar<number>(db, "SELECT count(*)::int FROM tz_f_fills WHERE days_supply IS NULL"), 1);
+
+  const r = async (statistic: string) =>
+    (
+      await rows<{ estimate: number | null; method: string }>(
+        db,
+        `SELECT estimate::float8, method FROM tz_f_adh WHERE statistic = '${statistic}'`,
+      )
+    )[0];
+
+  /* FILL ATTRITION — the drop is counted, not silent. */
+  eq("F: 19 dispensings found before cleaning", Number((await r("fills_found"))?.estimate), EXPECTED_F.fillsFound);
+  eq("F: 1 dropped for a missing days supply", Number((await r("dropped_rule_1"))?.estimate), EXPECTED_F.fillsDroppedMissing);
+  eq("F: 18 measurable fills remain", Number((await r("fills_measured"))?.estimate), EXPECTED_F.fillsMeasured);
+  const measured = await r("fills_measured");
+  out.push({
+    name: "F: and the program SAYS fills were dropped rather than reporting the loss silently",
+    status: /FILLS WERE DROPPED/.test(measured?.method ?? "") ? "pass" : "fail",
+    detail: (measured?.method ?? "no row").slice(0, 90),
+  });
+
+  eq("F: window denominator = 180 days", Number((await r("window_days"))?.estimate), EXPECTED_F.windowDays);
+  approx("F: mean PDC = 49/90 = 0.54444", Number((await r("mean_pdc"))?.estimate), EXPECTED_F.meanPdc, 0.00001);
+  approx("F: mean MPR = 3/5 = 0.6", Number((await r("mean_mpr"))?.estimate), EXPECTED_F.meanMpr, 0.00001);
+
+  /* THE HEADLINE. Same fills, one unstated assumption, and P2 crosses 0.8. */
+  eq("F: 1 patient adherent at 0.8 WITHOUT stockpiling", Number((await r("n_adherent"))?.estimate), EXPECTED_F.adherentCount);
+  eq("F: 2 patients adherent WITH stockpiling", Number((await r("n_adherent_stockpiled"))?.estimate), EXPECTED_F.adherentCountStock);
+  const recl = await r("reclassified_by_stockpiling");
+  eq("F: exactly 1 patient is reclassified by the stockpiling assumption alone", Number(recl?.estimate), 1);
+  out.push({
+    name: "F: and the program NAMES that as an assumption deciding the answer, not a finding",
+    status: /DEPENDS ENTIRELY ON THIS ASSUMPTION/.test(recl?.method ?? "") ? "pass" : "fail",
+    detail: (recl?.method ?? "no row").slice(0, 90),
+  });
+
+  /* PERSISTENCE vs CENSORING kept apart. */
+  eq("F: 4 discontinuations", Number((await r("n_discontinued"))?.estimate), EXPECTED_F.discontinuedCount);
+  eq("F: 1 CENSORED — P1 was still covered when the window closed", Number((await r("n_censored"))?.estimate), EXPECTED_F.censoredCount);
+
+  /* THE IDENTITY. PDC <= MPR is a theorem about the merge. */
+  const ident = await r("patients_with_pdc_above_mpr");
+  eq("F: no patient has PDC above MPR", Number(ident?.estimate), 0);
+  out.push({
+    name: "F: the identity row reports HOLDS, so the merge is sound",
+    status: /^HOLDS/.test(ident?.method ?? "") ? "pass" : "fail",
+    detail: (ident?.method ?? "no row").slice(0, 80),
+  });
+  /* FOUR, not three — and the fourth is P1, which is the whole point of P1.
+   * Its six 30-day fills at days 0, 30, 60 ... TILE the window exactly:
+   * 0..29, 30..59, and so on. Tiling is not overlapping, so P1 sits in the
+   * PDC = MPR group alongside the sparse patients. That makes this count a
+   * check on the off-by-one: if a fill's end were start + supply rather than
+   * start + supply - 1, P1's fills WOULD overlap by a day each, P1 would drop
+   * out of this group, and the count would read 3. My first hand-derivation
+   * said 3 for exactly that reason, and executing it is what caught me. */
+  eq("F: 4 patients whose fills never overlap — P1 TILES the window, which is not overlap",
+    Number((await r("patients_with_pdc_equal_mpr"))?.estimate), 4);
+
+  out.push(...sasSqlParityChecks(GOLD_F_SPEC, GOLD_F_OPTS));
+  out.push(...sasStructureChecks(emitSas(GOLD_F_SPEC, GOLD_F_OPTS)));
   return out;
 }
 

@@ -4,7 +4,7 @@ This file exists so nobody has to read the source to find out what is missing.
 It is honest rather than flattering: the project is paused at a useful point,
 not finished.
 
-**22 of the 69 analyses in the original build plan are implemented.** That 69 was
+**23 of the 69 analyses in the original build plan are implemented.** That 69 was
 a planning number, not a specification, and the remainder is not uniform — a
 meaningful slice of it is *refused by design* rather than pending.
 
@@ -23,10 +23,11 @@ against a synthetic MarketScan fixture, and mutation coverage.
 | Regression | one GLM emitter × 5 families (logistic, Poisson, negative binomial, gamma-log, OLS) |
 | Survival | Kaplan-Meier + log-rank, Cox, competing-risks CIF, Fine-Gray |
 | Causal | propensity scores (IPTW), IPTW outcome model, g-formula + AIPW |
+| Treatment patterns | adherence (PDC / MPR / stockpiled PDC), persistence and discontinuation |
 
 Supporting: small-cell suppression (derivation-aware), results contract,
-provenance, MCP server, five gold fixtures (A–E) each built to exercise something
-the others structurally cannot.
+provenance, MCP server, six gold fixtures (A-F) each built to exercise something
+the others structurally cannot, and a byte-identity snapshot gate on spine changes.
 
 ---
 
@@ -34,43 +35,50 @@ the others structurally cannot.
 
 Ordered by how likely a real study is to need them.
 
-### 1. Treatment patterns and adherence — the largest gap
+### 1. Treatment patterns: adherence LANDED, switching still open
 
-PDC/MPR, persistence, discontinuation, treatment switching, line-of-therapy.
-Routine in HEOR work.
+**Adherence and persistence now ship**, both twins, executed against Gold Case F.
+PDC, MPR, stockpiled PDC, persistence and discontinuation, with the measures
+deliberately reported in pairs whose difference is the finding.
 
-**PARTLY BUILT, blocked on ONE spine addition.** Landed and reviewable:
+The blocker that held this back was a missing per-fill feeder. It is built:
+`<prefix>_fills`, one row per dispensing with days supply, emitted inside
+`02_events.sql` and **only when an enabled analysis needs it**, so every spec
+that does not ask for fills emits byte-identical code to before it existed
+(`verify/snapshot.ts` gates exactly that, over 1398 files).
 
-- `emitters/interval-core.ts` — the interval algebra: merge into islands (via the
-  running maximum of prior ends, not LAG — the same trap the enrollment
-  stitching defect fell into), clip to window, first-gap detection, and
-  **stockpiling in closed form**. Stockpiling's definition is sequential
-  (`cursor_k = max(s_k, cursor_{k-1}) + supply_k`) but unrolls to a running MAX
-  plus a running SUM, so it is two window functions rather than a loop —
-  verified against the sequential definition on ragged supplies, same-day double
-  fills and real gaps.
-- `emitters/modules/adherence.ts` — PDC, MPR, stockpiled PDC, persistence and
-  discontinuation, both twins.
-- `verify/fixture-f.ts` — Gold Case F, hand-derived: coverage 180/130/120/30 over
-  a 180-day window; PDC 1, 13/18, 2/3, 1/6 against MPR 1, 1, 2/3, 1/6.
+Three things worth knowing about how it was built:
 
-**THE BLOCKER.** The module needs a per-fill feeder carrying `days_supply`, and
-the cohort spine does not produce one: `tz_study_events` keeps drug claims but
-drops `daysupp`, and `tz_study_index` keeps only the *first* dispensing. Adding a
-`<prefix>_fills` table to the spine (all dispensings of a drug code list, with
-days supply) unblocks adherence, persistence, switching AND line-of-therapy at
-once.
+- It cannot be a projection of `<prefix>_events`. That table never selects
+  DAYSUPP, and its trailing `SELECT DISTINCT` collapses two same-day dispensings
+  of one NDC into one row. Correct for a diagnosis ledger, wrong for fills.
+- The NDC lookup is one row per `(code_list_id, pattern, ndcnum)`, so an NDC
+  caught by two name patterns of the same list appears twice. In the events
+  table the trailing DISTINCT absorbed it; a fills table has none, so the join
+  goes through a deduplicated `(code_list_id, ndcnum)` map. Left alone it would
+  have inflated MPR and the stockpile cursor while leaving PDC flat, which is
+  the exact shape of a genuine early-refilling finding.
+- The SAS twin was reading a `020_rx` table **no emitter creates anywhere** and
+  would have failed on its first statement. The spine already pulls DAYSUPP per
+  drug code list, so the fix was to resolve the right table, and a mutation test
+  now reproduces the phantom so the harness is what would catch it next time.
 
-That change touches `emitters/sql.ts` and `emitters/sas.ts`, which feed all 22
-shipped modules, so it wants a session with room to verify rather than the tail
-of one. The module is therefore **not registered** — registering it before the
-feeder exists would let readiness approve an analysis the emitters cannot
-produce, which is precisely the silent-drop failure this project spent Wave 0
-eliminating.
+Dirty DAYSUPP is handled explicitly rather than by accident. Missing, zero,
+negative and implausibly large values each get a stated rule, and every drop is
+COUNTED in a fill-attrition block. Uncleaned, a NULL supply produces a NULL
+interval end, fails the window predicate and vanishes; a negative supply
+subtracts from the MPR numerator and can push MPR below PDC, at which point the
+program's own identity row reports "the interval merge is broken" about a merge
+that is fine, sending the analyst to debug correct code.
 
-Line-of-therapy carries a caveat worth stating up front: it is **definitional**,
-so execution can only ever prove that the twins implement the same rule — never
-that the rule matches a given protocol.
+**Still open here:** treatment switching and line-of-therapy. Both ride the same
+feeder, and both need a second drug code list plus a fixture of their own (Gold
+Case F is single-drug by construction). Line-of-therapy carries a caveat worth
+stating up front: it is **definitional**, so execution can only ever prove that
+the twins implement the same rule, never that the rule matches a given protocol.
+
+Also not yet covered by any fixture: ragged supply lengths and same-day double
+fills. The stockpiling closed form is unverified on those two shapes.
 
 ### 2. The rest of the causal family
 

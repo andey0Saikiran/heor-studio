@@ -549,6 +549,70 @@ export interface AdherenceAnalysis extends AnalysisCommon {
   permissibleGapDays: number;
   /** PDC cut-point for "adherent". 0.8 is conventional, not a fact. */
   adherenceThreshold: number;
+  /** how implausible DAYSUPP values are handled. Omitted = DEFAULT_DAYS_SUPPLY_CLEANING. */
+  daysSupplyCleaning?: DaysSupplyCleaning;
+}
+
+/**
+ * DAYSUPP cleaning — the rules that decide which dispensings are measurable.
+ *
+ * DAYSUPP is a pharmacy billing field, not an observation of consumption, and
+ * it arrives dirty: missing, zero, negative, and occasionally a year of supply
+ * on a single fill. Every one of those has to be given a rule, because the
+ * alternative is not "no rule" — it is an ARITHMETIC ACCIDENT:
+ *
+ *   - a NULL days supply makes the interval's end NULL, so the row fails the
+ *     window predicate and vanishes. The patient looks less adherent, and
+ *     nothing anywhere says a fill was dropped.
+ *   - a NEGATIVE days supply gives an interval that ends before it starts. The
+ *     covered-days and stockpiled-days sums are clamped at zero, but the MPR
+ *     numerator is a plain sum, so a negative supply SUBTRACTS from days
+ *     dispensed and can pull MPR below PDC. The program's own identity row then
+ *     reports "BROKEN: the interval merge is wrong" — blaming the merge for
+ *     what is really a data problem, which is the worst kind of wrong answer:
+ *     it sends the analyst to debug correct code.
+ *
+ * So the rules are explicit, defaulted, stamped into the emitted code, and every
+ * drop is COUNTED in a fill-attrition table beside the results.
+ */
+export interface DaysSupplyCleaning {
+  /** drop fills whose DAYSUPP is NULL. */
+  dropMissing: boolean;
+  /** drop fills whose DAYSUPP is <= 0. */
+  dropZeroNegative: boolean;
+  /** drop fills whose DAYSUPP exceeds this. A year on one dispensing is a
+   *  keying error far more often than a real supply. */
+  maxDaysSupplyCap: number;
+}
+
+export const DEFAULT_DAYS_SUPPLY_CLEANING: DaysSupplyCleaning = {
+  dropMissing: true,
+  dropZeroNegative: true,
+  maxDaysSupplyCap: 365,
+};
+
+export function daysSupplyCleaningFor(an: AdherenceAnalysis): DaysSupplyCleaning {
+  return { ...DEFAULT_DAYS_SUPPLY_CLEANING, ...(an.daysSupplyCleaning ?? {}) };
+}
+
+/**
+ * The drug code lists that need the per-fill feeder (`<prefix>_fills`), in
+ * stable order.
+ *
+ * The feeder is emitted ONLY when this is non-empty. That is what makes adding
+ * it to the cohort spine safe: a spec that asks for no fills-consuming analysis
+ * emits byte-identical SQL to before the feeder existed, so all 19 previously
+ * shipped kinds are provably untouched (verify/snapshot.ts checks exactly this).
+ *
+ * Adherence is the first consumer. Switching and line-of-therapy join it here.
+ */
+export function fillsCodeListIds(spec: StudySpec): string[] {
+  const ids = new Set<string>();
+  for (const a of spec.analyses) {
+    if (!a.enabled) continue;
+    if (a.kind === "adherence") ids.add(a.drugCodeListId);
+  }
+  return [...ids].sort();
 }
 
 /**
@@ -893,10 +957,7 @@ export const EMITTABLE_ANALYSIS_KINDS: ReadonlySet<AnalysisKind> = new Set<Analy
   "propensity_score",
   "iptw_outcome",
   "g_formula",
-  /* "adherence" is BUILT but not yet emittable: it needs a drug-fills feeder in
-   * the cohort spine (fills with days_supply), which does not exist yet. Adding
-   * it here before that feeder lands would let readiness approve an analysis the
-   * emitters cannot produce. See docs/ROADMAP.md. */
+  "adherence",
 ]);
 
 export type DescriptiveAnalysis =

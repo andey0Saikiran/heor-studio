@@ -29,7 +29,13 @@ import { ANALYSIS_MODULES, STAMP_KIND_BY_ANALYSIS } from "../emitters/modules/re
 import { SUPPRESSION_SHAPES } from "../emitters/suppression";
 import { fingerprint, expectedFromStamp, hasConstantProfile, STAMP_SHARED_KEYS } from "./fingerprint";
 import { GOLD_A_SPEC, GOLD_A_OPTS } from "./fixture";
-import type { Analysis } from "../spec/types";
+import { GOLD_B_SPEC, GOLD_B_OPTS } from "./fixture-b";
+import { GOLD_C_SPEC, GOLD_C_OPTS } from "./fixture-c";
+import { GOLD_D_SPEC, GOLD_D_OPTS } from "./fixture-d";
+import { GOLD_E_SPEC, GOLD_E_OPTS } from "./fixture-e";
+import { GOLD_F_SPEC, GOLD_F_OPTS } from "./fixture-f";
+import type { Analysis, StudySpec } from "../spec/types";
+import type { EmitOptions } from "../emitters/types";
 import {
   STANDARD_POPULATIONS,
   STANDARD_POPULATIONS_PENDING,
@@ -49,8 +55,31 @@ export function fingerprintCoverageChecks(): Check[] {
   const checks: Check[] = [];
   const kinds = Object.keys(ANALYSIS_MODULES) as Array<Analysis["kind"]>;
 
-  const sqlFiles = emitSql(GOLD_A_SPEC, "postgres", GOLD_A_OPTS);
-  const sasFiles = emitSas(GOLD_A_SPEC, GOLD_A_OPTS);
+  /* EVERY gold spec, not just A.
+   *
+   * This used to emit from GOLD_A_SPEC alone, which quietly made "is this
+   * module's fingerprint measurable?" mean "does Gold A happen to use it?".
+   * Those are different questions, and the gap between them grew with every
+   * gold case added: a module exercised thoroughly by its OWN fixture would
+   * still be reported as uncovered, and the only way to clear the guard was to
+   * bolt an unrelated analysis onto Gold A. Adherence is the first module whose
+   * fixture cannot be folded into Gold A at all — it needs a fills feeder and a
+   * refill pattern of its own — so the guard is fixed rather than worked
+   * around. A kind is covered if ANY gold spec emits it in BOTH languages. */
+  const GOLD_SPECS: Array<{ name: string; spec: StudySpec; opts: EmitOptions }> = [
+    { name: "A", spec: GOLD_A_SPEC, opts: GOLD_A_OPTS },
+    { name: "B", spec: GOLD_B_SPEC, opts: GOLD_B_OPTS },
+    { name: "C", spec: GOLD_C_SPEC, opts: GOLD_C_OPTS },
+    { name: "D", spec: GOLD_D_SPEC, opts: GOLD_D_OPTS },
+    { name: "E", spec: GOLD_E_SPEC, opts: GOLD_E_OPTS },
+    { name: "F", spec: GOLD_F_SPEC, opts: GOLD_F_OPTS },
+  ];
+  const emitted = GOLD_SPECS.map((g) => ({
+    name: g.name,
+    sql: emitSql(g.spec, "postgres", g.opts),
+    sas: emitSas(g.spec, g.opts),
+  }));
+  const sasFiles = emitted[0].sas;
   const setup = sasFiles.find((f) => /setup/i.test(f.path))?.content ?? "";
 
   /** first emitted program of a stamp kind, per language */
@@ -85,18 +114,31 @@ export function fingerprintCoverageChecks(): Check[] {
         : `no EXPECTED_CONSTANTS["${stampKind}"] — a mistyped z or z^2 would ship silently`,
     });
 
-    const sq = firstOf(sqlFiles, stampKind);
-    const sa = firstOf(sasFiles, stampKind);
+    /* The first gold spec that emits this kind in BOTH languages. Searching
+     * rather than assuming Gold A is the whole fix — see GOLD_SPECS above. */
+    let sq: ReturnType<typeof firstOf>;
+    let sa: ReturnType<typeof firstOf>;
+    let source = "";
+    for (const g of emitted) {
+      const a = firstOf(g.sql, stampKind);
+      const b = firstOf(g.sas, stampKind);
+      if (a && b) { sq = a; sa = b; source = g.name; break; }
+    }
     if (!sq || !sa) {
-      // The gold spec does not exercise this kind, so its fingerprints cannot be
-      // measured here. Say so rather than passing by omission.
+      // No gold spec exercises this kind, so its fingerprints cannot be
+      // measured at all. Say so rather than passing by omission.
       checks.push({
-        name: `coverage ${label}: exercised by the gold spec`,
+        name: `coverage ${label}: exercised by a gold spec`,
         status: "fail",
-        detail: `no ${stampKind} program emitted in ${!sq ? "SQL" : "SAS"} from GOLD_A_SPEC — add an analysis of this kind to the fixture so its coverage is measurable`,
+        detail: `no ${stampKind} program emitted in BOTH languages by any of ${emitted.map((g) => g.name).join("/")} — add an analysis of this kind to a fixture so its coverage is measurable`,
       });
       continue;
     }
+    checks.push({
+      name: `coverage ${label}: exercised by a gold spec`,
+      status: "pass",
+      detail: `emitted in both languages by Gold Case ${source}`,
+    });
 
     // 1 + 2. real fingerprints in BOTH languages
     for (const [lang, prog] of [["sql", sq], ["sas", sa]] as const) {
