@@ -5,82 +5,119 @@
    instrument, not an application: dense, legible, unhurried, no ornament that
    is not carrying information. See PRODUCT.md.
 
-   COLOUR MEANS SOMETHING OR IT IS ABSENT. Accent marks the primary action and
-   the current selection. Warn marks something the analyst must resolve. Danger
-   marks a refusal. Nothing is coloured for decoration. */
+   ---------------------------------------------------------------------------
+   WHY THE PALETTE CHANGED, AND WHAT IT IS GROUNDED IN
+
+   The previous palette was a warm-tinted near-white (#FAFBF9) with a teal-green
+   accent and a serif display face. Two problems with that, and neither is
+   taste:
+
+   FIRST-ORDER REFLEX. Ask what palette a "clinical analytics tool" gets and the
+   answer is teal-green on near-white. If the category alone predicts the
+   colours, they were not chosen, they were defaulted into. The warm near-white
+   plus high-contrast serif combination is specifically one of the saturated
+   AI-design defaults.
+
+   SECOND-ORDER REFLEX. The obvious escape, "healthcare tool that is not teal,
+   so make it a dark terminal", is also a named default. Avoiding one cliche by
+   landing on the next one is not a choice either.
+
+   SO IT IS GROUNDED IN THE SUBJECT INSTEAD. This product does one thing that
+   nothing else here does: it checks a figure against hand-derived truth and
+   marks it. The artifact for that is the AUDITED LEDGER. A ruled neutral
+   ground, figures in a fixed pitch, and the checker's marks made in a second
+   ink. So:
+
+     - the ground is a genuinely NEUTRAL cool grey, chroma pulled toward the
+       ink rather than toward warmth. Not cream, not paper, not sand. Those
+       warm near-whites are the tell.
+     - the accent is INK BLUE, the colour of a signature and a countersign, not
+       the colour of a category. It marks the primary action and the current
+       selection, nothing else.
+     - amber and red stay for caution and refusal because breaking those two
+       conventions costs the user real comprehension for no gain.
+
+   Every text token clears WCAG AA 4.5:1 against the WORST surface it can land
+   on (--surface-deep), not merely against the page background. Ratios are
+   recorded beside each value so a future edit has to knowingly break one.
+   --------------------------------------------------------------------------- */
 
 :root {
-  /* ---- palette ----
-     Every text token below clears WCAG AA 4.5:1 against the WORST surface it
-     can land on (--surface-deep), not just against --paper. --ink-faint was
-     #7C8B85 and measured 3.03:1 there, which is the single most common
-     accessibility failure in this kind of interface: muted grey body text on a
-     tinted near-white, chosen because it looks elegant. It is used for hints,
-     file paths and field labels, all of which are real text somebody has to
-     read. --accent and --warn failed the same surface at 4.33 and 4.26. */
-  --paper: #FAFBF9;
-  --surface: #F1F5F3;
-  --surface-deep: #E7EEEA;
-  --ink: #16211D;          /* 14.03:1 on surface-deep */
-  --ink-soft: #4A5A54;     /*  6.18:1 */
-  --ink-faint: #616D68;    /*  4.57:1 — was #7C8B85 at 3.03:1 */
-  --accent: #0E7868;       /*  4.56:1 — was #0E7C6B at 4.33:1 */
-  --accent-ink: #0A5D51;   /*  6.60:1 */
-  --accent-wash: #E3F0EC;
-  --warn: #A94E08;         /*  4.71:1 — was #B45309 at 4.26:1 */
-  --warn-wash: #F7EAD9;
-  --danger: #B3403A;       /*  4.80:1 */
-  --danger-wash: #F6E4E2;
-  --ok: #17734A;           /*  4.97:1 */
-  --ok-wash: #E1EFE7;
-  --line: #DCE4E0;
-  --code-bg: #10201C;
-  --code-ink: #D9E6E1;
+  /* ---- ground: neutral cool, chroma toward the ink ---- */
+  --paper: #F7F8F9;
+  --surface: #EDF0F2;
+  --surface-deep: #E2E7EA;
+
+  /* ---- ink ---- */
+  --ink: #141A1F;          /* 14.08:1 on surface-deep */
+  --ink-soft: #48545E;     /*  6.23:1 */
+  --ink-faint: #5D6974;    /*  4.51:1 */
+
+  /* ---- the checker's mark ---- */
+  --accent: #1F4E79;       /*  6.95:1 */
+  --accent-ink: #16395A;   /*  9.54:1 */
+  --accent-wash: #DFE8F1;
+
+  /* ---- verdicts. Colour never carries meaning alone: a refusal is red AND
+          says REFUSED, a caution is amber AND names what to resolve. ---- */
+  --warn: #8A5200;         /*  5.13:1 */
+  --warn-wash: #F6EBDA;
+  --danger: #A32F2A;       /*  5.62:1 */
+  --danger-wash: #F7E4E3;
+  --ok: #1F6B4A;           /*  5.17:1 */
+  --ok-wash: #DFEDE6;
+
+  --line: #D6DCE1;
+  --code-bg: #12181D;
+  --code-ink: #D6DEE5;
 
   /* ---- type ----
      ONE family carries the interface. The product register is explicit that
-     display fonts do not belong in UI labels, buttons or data, and the serif
-     was previously setting card titles, modal titles and pane titles in eight
-     places, which is most of what made the surface feel unsettled: two
-     typefaces competing for the same job at nearly the same size.
-     --font-display survives for the wordmark alone. */
+     display faces do not belong in UI labels, buttons or data. --font-display
+     survives for the wordmark alone.
+
+     THE MONO IS NOT JUST FOR CODE. Identifiers, day offsets, counts, file
+     paths and every generated line are set in it, because in this product they
+     are specimens rather than prose, and a fixed pitch is what lets an analyst
+     compare two of them by eye. That is the one deliberate risk in this
+     direction: most product UIs reach for mono only inside a code block. */
   --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   --font-display: "Iowan Old Style", Palatino, "Palatino Linotype", Georgia, serif;
   --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
 
   /* Fixed rem scale at ~1.15, not fluid: product UI is viewed at a consistent
      DPI, and a heading that shrinks inside a panel looks worse rather than
-     responsive. Tight ratio because this interface has many type elements and
-     exaggerated contrast between them reads as noise. 0.75rem is the FLOOR and
-     is for labels and badges only, never running text. */
-  --text-xs: 0.75rem;      /* 12px — uppercase labels, badges */
-  --text-sm: 0.8125rem;    /* 13px — dense secondary, mono paths */
-  --text-base: 0.9375rem;  /* 15px — UI body */
-  --text-md: 1rem;         /* 16px — prose, chat */
-  --text-lg: 1.125rem;     /* 18px — card titles */
-  --text-xl: 1.3125rem;    /* 21px — section heads */
-  --text-2xl: 1.625rem;    /* 26px — the wordmark */
+     responsive. 0.75rem is the FLOOR, for labels and badges only. */
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-base: 0.9375rem;
+  --text-md: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.3125rem;
+  --text-2xl: 1.625rem;
 
   --leading-tight: 1.25;
   --leading-normal: 1.5;
   --leading-prose: 1.6;
 
-  /* ---- shape + rhythm ---- */
-  --radius: 6px;
-  --radius-lg: 10px;
+  /* ---- shape + rhythm ----
+     Small radii. A clinical instrument has machined edges, not rounded ones,
+     and heavy rounding is the single loudest signal of the consumer-app
+     register this project is explicitly not in. */
+  --radius: 4px;
+  --radius-lg: 6px;
   --space-1: .25rem; --space-2: .5rem; --space-3: .75rem;
   --space-4: 1rem; --space-5: 1.5rem; --space-6: 2rem; --space-8: 3rem;
-  --shadow: 0 1px 2px rgba(10, 30, 25, .06), 0 4px 16px rgba(10, 30, 25, .05);
+  /* Nearly flat. Depth here comes from the second neutral layer, not from
+     drop shadows floating cards over a page. */
+  --shadow: 0 1px 2px rgba(16, 24, 32, .05), 0 1px 3px rgba(16, 24, 32, .04);
 
-  /* ---- motion ----
-     150-250ms: the user is mid-task and should not wait for choreography.
-     Ease-out only; no bounce, no elastic. */
+  /* ---- motion: 120-180ms, ease-out only ---- */
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
   --dur-fast: 120ms;
   --dur: 180ms;
 
-  /* ---- z-index, semantic ----
-     Named layers so nobody has to invent 999 again. */
+  /* ---- z-index, semantic ---- */
   --z-sticky: 100;
   --z-dropdown: 200;
   --z-backdrop: 300;
@@ -90,31 +127,36 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --paper: #0D1512;
-    --surface: #131E1A;
-    --surface-deep: #182620;
-    --ink: #E6EDE9;
-    --ink-soft: #9DAFA7;
-    --ink-faint: #82918B;   /* 4.77:1 on surface-deep — was #6C7D76 at 3.61:1 */
-    --accent: #3ECBB1;
-    --accent-ink: #5BD8C2;
-    --accent-wash: #12302A;
-    --warn: #E0A458;
-    --warn-wash: #2E2214;
-    --danger: #E07B72;
-    --danger-wash: #331A18;
-    --ok: #5BC98F;
-    --ok-wash: #12281C;
-    --line: #24312C;
-    --code-bg: #0A100E;
-    --code-ink: #C9DAD4;
-    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 4px 16px rgba(0, 0, 0, .3);
+    /* Graphite rather than black. Pure black plus one bright accent is the
+       other saturated default, and it makes long reading harder. */
+    --paper: #101418;
+    --surface: #161C22;
+    --surface-deep: #1D242B;
+
+    --ink: #E7ECF0;        /* 13.18:1 on surface-deep */
+    --ink-soft: #A2AFBA;   /*  7.00:1 */
+    --ink-faint: #8695A2;  /*  5.10:1 */
+
+    --accent: #7FB2E5;     /*  7.02:1 */
+    --accent-ink: #9CC6F0; /*  8.77:1 */
+    --accent-wash: #17293A;
+
+    --warn: #D9A050;       /*  6.79:1 */
+    --warn-wash: #2A2114;
+    --danger: #E88079;     /*  5.82:1 */
+    --danger-wash: #311B1A;
+    --ok: #5FC08C;         /*  7.02:1 */
+    --ok-wash: #14271D;
+
+    --line: #2A333B;
+    --code-bg: #0B0F13;
+    --code-ink: #C8D3DC;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .5), 0 1px 3px rgba(0, 0, 0, .4);
   }
 }
 
-/* Not optional. Every transition in this interface conveys state, so the
-   reduced-motion alternative is an instant state change rather than no state
-   change. */
+/* Not optional. Every transition here conveys state, so the reduced-motion
+   alternative is an instant state change rather than no state change. */
 @media (prefers-reduced-motion: reduce) {
   :root { --dur-fast: 1ms; --dur: 1ms; }
   *, *::before, *::after {
