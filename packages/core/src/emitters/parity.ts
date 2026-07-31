@@ -31,6 +31,7 @@ import type {
   PropensityScoreAnalysis,
   IptwOutcomeAnalysis,
   GFormulaAnalysis,
+  AdherenceAnalysis,
   SurvivalAnalysis,
   TrendSpec,
 } from "../spec/types";
@@ -1676,6 +1677,70 @@ export function gFormulaParity(
     scoreModel: "saturated_cell_fraction",
     population: "cells_with_both_arms",
     variance: "influence_function_with_covariance",
+    sasPrimary: "none",
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ *  Adherence and persistence
+ * ------------------------------------------------------------------ */
+
+export interface AdherenceParity {
+  id: string;
+  drugCodeListId: string;
+  windowStart: number;
+  windowEnd: number;
+  /** the DENOMINATOR. Both twins must divide by the same number of days, and an
+   *  off-by-one here moves every PDC and MPR in the study by the same amount —
+   *  which is exactly the kind of error that looks like a real finding. */
+  windowDays: number;
+  permissibleGapDays: number;
+  adherenceThreshold: number;
+  intervalEnd: "start_plus_supply_minus_one";
+  merge: "running_max_islands";
+  stockpiling: "closed_form_running_max";
+  sasPrimary: "none";
+}
+
+export function adherenceLimitations(an: AdherenceAnalysis): string[] {
+  const out: string[] = [];
+  out.push(`PDC and MPR are computed over a FIXED window for everyone. A patient who disenrolls partway through still gets the full window as a denominator, which understates their adherence. Restrict the cohort to members enrolled throughout, or read these beside the persistence rows`);
+  out.push(`DAYS SUPPLY IS TAKEN AS DISPENSED. It is a pharmacy field, not an observation of consumption, and it is missing or implausible often enough in claims that a study should describe how it was cleaned. This program does not clean it`);
+  out.push(`NO dose changes and NO partial adherence: a fill covers its days-supply completely or not at all`);
+  out.push(`the STOCKPILING variant assumes a patient finishes the current supply before starting a new one. That is an assumption about behaviour, and the module reports how many patients it reclassifies rather than adopting it silently`);
+  out.push(`persistence here is a fixed-window mean, and censored patients contribute the FULL window. With censoring present that is biased downward as an estimate of true persistence - the survival module on the same discontinuation event is the unbiased treatment`);
+  out.push(`NO grace-period variant of persistence, and no restart/re-initiation after a gap: the FIRST qualifying gap ends the persistence episode`);
+  if (an.permissibleGapDays < 15)
+    out.push(`a permissible gap of ${an.permissibleGapDays} days is short relative to typical 30-day dispensings, so ordinary refill timing will register as discontinuation`);
+  return out;
+}
+
+export const ADHERENCE_METHOD_NOTES = [
+  `PDC counts DISTINCT DAYS COVERED; MPR counts DAYS DISPENSED. PDC <= MPR always, with equality exactly when no two fills overlap, so the difference between them measures early refilling directly`,
+  `that relation is emitted as a CHECKED ROW. It is an identity about the interval merge, not a property of the population - a violation means the merge is broken, not that the patients are unusual`,
+  `a fill's supply ends at start + days_supply - 1: a 30-day supply dispensed on day 0 covers days 0 through 29. The off-by-one is worth one day of PDC per fill and compounds across a year`,
+  `overlapping fills are merged into islands by comparing each fill's start against the RUNNING MAXIMUM of all prior ends, never against the previous row's end - a fill nested inside an earlier one would otherwise open a spurious new island`,
+  `STOCKPILING (assuming an early refill is started only when the current supply runs out) is computed alongside the plain measure. Its definition is sequential, but it reduces to a running max plus a running sum, so both twins compute it in closed form`,
+  `stockpiling can move a patient across the adherence threshold on identical fills. The module reports how many patients it reclassifies, because that count is the honest measure of how much the conclusion depends on an assumption rather than on data`,
+  `DISCONTINUATION IS AN EVENT; reaching the end of the window still covered is CENSORING. The two are reported separately, because merging them turns "still on treatment when we stopped looking" into "never stopped"`,
+  `SAS-PRIMARY: nothing`,
+];
+
+export function adherenceParity(
+  an: AdherenceAnalysis,
+  consumed: { windowStart: number; windowEnd: number; windowDays: number },
+): AdherenceParity {
+  return {
+    id: an.id,
+    drugCodeListId: an.drugCodeListId,
+    windowStart: consumed.windowStart,
+    windowEnd: consumed.windowEnd,
+    windowDays: consumed.windowDays,
+    permissibleGapDays: an.permissibleGapDays,
+    adherenceThreshold: an.adherenceThreshold,
+    intervalEnd: "start_plus_supply_minus_one",
+    merge: "running_max_islands",
+    stockpiling: "closed_form_running_max",
     sasPrimary: "none",
   };
 }

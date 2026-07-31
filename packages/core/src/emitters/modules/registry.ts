@@ -31,6 +31,7 @@ import { propensityScoreModule } from "./propensity_score";
 import { iptwOutcomeModule } from "./iptw_outcome";
 import { gFormulaModule } from "./g_formula";
 
+
 export const ANALYSIS_MODULES: Partial<Record<Analysis["kind"], AnalysisModule<never>>> = {
   incidence_rate: incidenceModule as AnalysisModule<never>,
   point_prevalence: pointPrevalenceModule as AnalysisModule<never>,

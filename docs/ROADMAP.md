@@ -37,9 +37,36 @@ Ordered by how likely a real study is to need them.
 ### 1. Treatment patterns and adherence — the largest gap
 
 PDC/MPR, persistence, discontinuation, treatment switching, line-of-therapy.
-Routine in HEOR work and entirely absent. Needs an interval-algebra kit (merge /
-clip / gap on drug-supply intervals), which nothing else in the project has
-required so far.
+Routine in HEOR work.
+
+**PARTLY BUILT, blocked on ONE spine addition.** Landed and reviewable:
+
+- `emitters/interval-core.ts` — the interval algebra: merge into islands (via the
+  running maximum of prior ends, not LAG — the same trap the enrollment
+  stitching defect fell into), clip to window, first-gap detection, and
+  **stockpiling in closed form**. Stockpiling's definition is sequential
+  (`cursor_k = max(s_k, cursor_{k-1}) + supply_k`) but unrolls to a running MAX
+  plus a running SUM, so it is two window functions rather than a loop —
+  verified against the sequential definition on ragged supplies, same-day double
+  fills and real gaps.
+- `emitters/modules/adherence.ts` — PDC, MPR, stockpiled PDC, persistence and
+  discontinuation, both twins.
+- `verify/fixture-f.ts` — Gold Case F, hand-derived: coverage 180/130/120/30 over
+  a 180-day window; PDC 1, 13/18, 2/3, 1/6 against MPR 1, 1, 2/3, 1/6.
+
+**THE BLOCKER.** The module needs a per-fill feeder carrying `days_supply`, and
+the cohort spine does not produce one: `tz_study_events` keeps drug claims but
+drops `daysupp`, and `tz_study_index` keeps only the *first* dispensing. Adding a
+`<prefix>_fills` table to the spine (all dispensings of a drug code list, with
+days supply) unblocks adherence, persistence, switching AND line-of-therapy at
+once.
+
+That change touches `emitters/sql.ts` and `emitters/sas.ts`, which feed all 22
+shipped modules, so it wants a session with room to verify rather than the tail
+of one. The module is therefore **not registered** — registering it before the
+feeder exists would let readiness approve an analysis the emitters cannot
+produce, which is precisely the silent-drop failure this project spent Wave 0
+eliminating.
 
 Line-of-therapy carries a caveat worth stating up front: it is **definitional**,
 so execution can only ever prove that the twins implement the same rule — never

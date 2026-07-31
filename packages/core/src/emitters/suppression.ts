@@ -231,6 +231,17 @@ export const SUPPRESSION_SHAPES: Record<string, SuppressionShape> = {
     keepCols: ["ord", "method"],
     tieBreakCol: "time_days",
   },
+  adherence: {
+    /* Patient counts are the disclosive quantity — n_adherent and
+     * n_discontinued are counts of people. The means are computed from them, so
+     * everything masks together. */
+    labelCols: ["measure", "component", "statistic"],
+    groupCols: ["measure", "component"],
+    countCol: "estimate",
+    maskCols: ["estimate"],
+    keepCols: ["ord", "method"],
+    tieBreakCol: "statistic",
+  },
   g_formula: {
     labelCols: ["measure", "component", "statistic"],
     groupCols: ["measure", "component"],

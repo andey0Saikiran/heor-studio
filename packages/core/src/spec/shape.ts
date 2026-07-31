@@ -31,7 +31,7 @@ const DEMO_AXES = new Set(["age_band", "sex", "region", "plan_type", "year"]);
 const ANALYSIS_KINDS = new Set([
   "attrition", "table1", "point_prevalence", "period_prevalence", "cumulative_incidence",
   "incidence_rate", "standardization", "calendar_trend", "resource_use",
-  "comorbidity_index", "regression", "survival", "cox", "competing_risks", "fine_gray", "propensity_score", "iptw_outcome", "g_formula", "statistical_engine", "future_stub",
+  "comorbidity_index", "regression", "survival", "cox", "competing_risks", "fine_gray", "propensity_score", "iptw_outcome", "g_formula", "adherence", "statistical_engine", "future_stub",
 ]);
 const SURVIVAL_CI = new Set(["log_log", "linear"]);
 const SURVIVAL_ENDPOINTS = new Set(["claims_event", "death"]);
@@ -420,6 +420,13 @@ function checkAnalysis(p: Problems, v: unknown, path: string): void {
       checkWindow(p, v.washout, `${path}.washout`);
       if (!Array.isArray(v.covariateIds)) p.push(`${path}.covariateIds`, `expected an array of baseline ids, got ${typeOf(v.covariateIds)}`);
       else v.covariateIds.forEach((x, j) => need(p, `${path}.covariateIds[${j}]`, isStr(x), `expected a baseline id string, got ${typeOf(x)}`));
+      break;
+    }
+    case "adherence": {
+      needStr(p, v, "drugCodeListId", path, { nonEmpty: true });
+      checkWindow(p, v.window, `${path}.window`);
+      needNum(p, v, "permissibleGapDays", path);
+      needNum(p, v, "adherenceThreshold", path);
       break;
     }
     case "standardization":

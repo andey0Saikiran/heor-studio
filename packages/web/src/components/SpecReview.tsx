@@ -796,6 +796,7 @@ const ANALYSIS_KIND_LABELS: Record<AnalysisKind, string> = {
   propensity_score: "Propensity-score adjustment (IPTW)",
   iptw_outcome: "IPTW outcome model (weighted effect estimate)",
   g_formula: "Standardization / g-formula (doubly robust)",
+  adherence: "Adherence and persistence (PDC / MPR)",
   statistical_engine: "Statistical comparison",
   future_stub: "Planned (not generated yet)",
 };

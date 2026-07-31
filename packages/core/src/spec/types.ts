@@ -522,6 +522,36 @@ export interface GFormulaAnalysis extends AnalysisCommon {
 }
 
 /**
+ * Adherence and persistence to a dispensed drug.
+ *
+ * Everything is arithmetic on drug-supply intervals (emitters/interval-core.ts),
+ * so nothing is deferred to SAS. The measures deliberately come in pairs whose
+ * DIFFERENCE is the finding:
+ *
+ *   - PDC counts distinct days covered; MPR counts days dispensed. PDC <= MPR
+ *     always, with equality exactly when no fill overlaps another.
+ *   - PDC with and without STOCKPILING (the assumption that an early refill is
+ *     started only after the current supply runs out) can land on opposite sides
+ *     of the conventional 0.8 threshold on the same fills.
+ *   - Persistence separates "stopped" from "kept taking it irregularly", which
+ *     the adherence measures cannot.
+ *
+ * Ref: Andrade et al. Pharmacoepidemiol Drug Saf 2006;15:565; Canfield et al.
+ * J Manag Care Spec Pharm 2019;25:1073.
+ */
+export interface AdherenceAnalysis extends AnalysisCommon {
+  kind: "adherence";
+  /** the drug whose fills are measured */
+  drugCodeListId: string;
+  /** measurement window relative to index, INCLUSIVE both ends */
+  window: RelativeWindow;
+  /** a gap of at least this many uncovered days counts as discontinuation */
+  permissibleGapDays: number;
+  /** PDC cut-point for "adherent". 0.8 is conventional, not a fact. */
+  adherenceThreshold: number;
+}
+
+/**
  * Fine-Gray subdistribution hazard model.
  *
  * The one thing that differs from Cox is the RISK SET: a subject who fails from
@@ -830,6 +860,7 @@ export type Analysis =
   | PropensityScoreAnalysis
   | IptwOutcomeAnalysis
   | GFormulaAnalysis
+  | AdherenceAnalysis
   | StatisticalEngineAnalysis
   | FutureAnalysisStub;
 
@@ -862,6 +893,10 @@ export const EMITTABLE_ANALYSIS_KINDS: ReadonlySet<AnalysisKind> = new Set<Analy
   "propensity_score",
   "iptw_outcome",
   "g_formula",
+  /* "adherence" is BUILT but not yet emittable: it needs a drug-fills feeder in
+   * the cohort spine (fills with days_supply), which does not exist yet. Adding
+   * it here before that feeder lands would let readiness approve an analysis the
+   * emitters cannot produce. See docs/ROADMAP.md. */
 ]);
 
 export type DescriptiveAnalysis =
@@ -1508,6 +1543,18 @@ export function validateAnalyses(spec: StudySpec): string[] {
               `${w}: covariate "${id}" is kind "${b.kind}", which is not categorical. The g-formula here standardizes over CELLS, and a continuous covariate has no cells — it would need a fitted outcome model, which is a different estimator than the one this module implements and checks.`,
             );
         }
+        break;
+      }
+      case "adherence": {
+        requireCodeList(a.drugCodeListId, `${w} drug`);
+        if (typeof a.window.start !== "number" || typeof a.window.end !== "number")
+          problems.push(`${w}: the measurement window must have numeric day bounds — "anytime" has no length to divide by.`);
+        else if (a.window.end < a.window.start)
+          problems.push(`${w}: window end (${a.window.end}) is before its start (${a.window.start}).`);
+        if (a.permissibleGapDays <= 0)
+          problems.push(`${w}: permissibleGapDays must be positive — a gap of zero days would discontinue every patient at their first uncovered day.`);
+        if (a.adherenceThreshold <= 0 || a.adherenceThreshold > 1)
+          problems.push(`${w}: adherenceThreshold must be in (0, 1]; got ${a.adherenceThreshold}.`);
         break;
       }
       case "statistical_engine": {
