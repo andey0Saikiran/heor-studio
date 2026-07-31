@@ -1,38 +1,91 @@
 /* HEOR Studio brand tokens — SINGLE source of design truth.
-   Do not re-declare palette values in components; consume the variables. */
+   Do not re-declare palette values in components; consume the variables.
+
+   REGISTER: product. Design serves the task. The reference is a clinical
+   instrument, not an application: dense, legible, unhurried, no ornament that
+   is not carrying information. See PRODUCT.md.
+
+   COLOUR MEANS SOMETHING OR IT IS ABSENT. Accent marks the primary action and
+   the current selection. Warn marks something the analyst must resolve. Danger
+   marks a refusal. Nothing is coloured for decoration. */
 
 :root {
-  /* palette */
+  /* ---- palette ----
+     Every text token below clears WCAG AA 4.5:1 against the WORST surface it
+     can land on (--surface-deep), not just against --paper. --ink-faint was
+     #7C8B85 and measured 3.03:1 there, which is the single most common
+     accessibility failure in this kind of interface: muted grey body text on a
+     tinted near-white, chosen because it looks elegant. It is used for hints,
+     file paths and field labels, all of which are real text somebody has to
+     read. --accent and --warn failed the same surface at 4.33 and 4.26. */
   --paper: #FAFBF9;
   --surface: #F1F5F3;
   --surface-deep: #E7EEEA;
-  --ink: #16211D;
-  --ink-soft: #4A5A54;
-  --ink-faint: #7C8B85;
-  --accent: #0E7C6B;
-  --accent-ink: #0A5D51;
+  --ink: #16211D;          /* 14.03:1 on surface-deep */
+  --ink-soft: #4A5A54;     /*  6.18:1 */
+  --ink-faint: #616D68;    /*  4.57:1 — was #7C8B85 at 3.03:1 */
+  --accent: #0E7868;       /*  4.56:1 — was #0E7C6B at 4.33:1 */
+  --accent-ink: #0A5D51;   /*  6.60:1 */
   --accent-wash: #E3F0EC;
-  --warn: #B45309;
+  --warn: #A94E08;         /*  4.71:1 — was #B45309 at 4.26:1 */
   --warn-wash: #F7EAD9;
-  --danger: #B3403A;
+  --danger: #B3403A;       /*  4.80:1 */
   --danger-wash: #F6E4E2;
-  --ok: #17734A;
+  --ok: #17734A;           /*  4.97:1 */
   --ok-wash: #E1EFE7;
   --line: #DCE4E0;
   --code-bg: #10201C;
   --code-ink: #D9E6E1;
 
-  /* type */
+  /* ---- type ----
+     ONE family carries the interface. The product register is explicit that
+     display fonts do not belong in UI labels, buttons or data, and the serif
+     was previously setting card titles, modal titles and pane titles in eight
+     places, which is most of what made the surface feel unsettled: two
+     typefaces competing for the same job at nearly the same size.
+     --font-display survives for the wordmark alone. */
   --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   --font-display: "Iowan Old Style", Palatino, "Palatino Linotype", Georgia, serif;
   --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
 
-  /* shape + rhythm */
-  --radius: 8px;
-  --radius-lg: 12px;
+  /* Fixed rem scale at ~1.15, not fluid: product UI is viewed at a consistent
+     DPI, and a heading that shrinks inside a panel looks worse rather than
+     responsive. Tight ratio because this interface has many type elements and
+     exaggerated contrast between them reads as noise. 0.75rem is the FLOOR and
+     is for labels and badges only, never running text. */
+  --text-xs: 0.75rem;      /* 12px — uppercase labels, badges */
+  --text-sm: 0.8125rem;    /* 13px — dense secondary, mono paths */
+  --text-base: 0.9375rem;  /* 15px — UI body */
+  --text-md: 1rem;         /* 16px — prose, chat */
+  --text-lg: 1.125rem;     /* 18px — card titles */
+  --text-xl: 1.3125rem;    /* 21px — section heads */
+  --text-2xl: 1.625rem;    /* 26px — the wordmark */
+
+  --leading-tight: 1.25;
+  --leading-normal: 1.5;
+  --leading-prose: 1.6;
+
+  /* ---- shape + rhythm ---- */
+  --radius: 6px;
+  --radius-lg: 10px;
   --space-1: .25rem; --space-2: .5rem; --space-3: .75rem;
   --space-4: 1rem; --space-5: 1.5rem; --space-6: 2rem; --space-8: 3rem;
   --shadow: 0 1px 2px rgba(10, 30, 25, .06), 0 4px 16px rgba(10, 30, 25, .05);
+
+  /* ---- motion ----
+     150-250ms: the user is mid-task and should not wait for choreography.
+     Ease-out only; no bounce, no elastic. */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-fast: 120ms;
+  --dur: 180ms;
+
+  /* ---- z-index, semantic ----
+     Named layers so nobody has to invent 999 again. */
+  --z-sticky: 100;
+  --z-dropdown: 200;
+  --z-backdrop: 300;
+  --z-modal: 400;
+  --z-toast: 500;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -42,7 +95,7 @@
     --surface-deep: #182620;
     --ink: #E6EDE9;
     --ink-soft: #9DAFA7;
-    --ink-faint: #6C7D76;
+    --ink-faint: #82918B;   /* 4.77:1 on surface-deep — was #6C7D76 at 3.61:1 */
     --accent: #3ECBB1;
     --accent-ink: #5BD8C2;
     --accent-wash: #12302A;
@@ -56,5 +109,18 @@
     --code-bg: #0A100E;
     --code-ink: #C9DAD4;
     --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 4px 16px rgba(0, 0, 0, .3);
+  }
+}
+
+/* Not optional. Every transition in this interface conveys state, so the
+   reduced-motion alternative is an instant state change rather than no state
+   change. */
+@media (prefers-reduced-motion: reduce) {
+  :root { --dur-fast: 1ms; --dur: 1ms; }
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
   }
 }

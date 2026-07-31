@@ -1,3 +1,8 @@
+/* The .wb-btn rules that used to live here were removed: buttons are now
+   defined once in App.css, which aliases .wb-btn and .wb-btn--ghost onto the
+   canonical control. Three button systems on one screen was the largest
+   single source of visual noise in this app. Do not re-add a local one. */
+
 /* Codelist workbench — component-scoped styles.
    Consumes brand.css tokens ONLY; no palette values are declared here.
    (The "violet-ish" imported badge is derived from tokens via color-mix:
@@ -29,7 +34,7 @@
 
 .wb-title {
   margin: 0;
-  font-family: var(--font-display);
+  font-family: var(--font-body);
   font-size: 1.3rem;
   font-weight: 600;
 }
@@ -428,39 +433,6 @@
 
 /* ---------- buttons ---------- */
 
-.wb-btn {
-  align-self: flex-start;
-  font: inherit;
-  font-size: 0.85rem;
-  font-weight: 600;
-  color: var(--accent-ink);
-  background: var(--accent-wash);
-  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
-  border-radius: var(--radius);
-  padding: var(--space-1) var(--space-3);
-  cursor: pointer;
-}
-
-.wb-btn:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--accent) 16%, var(--accent-wash));
-}
-
-.wb-btn:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-.wb-btn--ghost {
-  color: var(--ink-soft);
-  background: transparent;
-  border-color: var(--line);
-  font-weight: 500;
-}
-
-.wb-btn--ghost:hover:not(:disabled) {
-  background: var(--surface-deep);
-}
-
 /* ---------- import panel ---------- */
 
 .wb-import {
@@ -492,7 +464,7 @@
 
 .wb-newlist-title {
   margin: 0 0 var(--space-3);
-  font-family: var(--font-display);
+  font-family: var(--font-body);
   font-size: 1rem;
   font-weight: 600;
 }

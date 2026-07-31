@@ -40,7 +40,7 @@
 .cs-msg { display: flex; flex-direction: column; gap: var(--space-2); max-width: 52rem; }
 .cs-msg-user { align-self: flex-end; align-items: flex-end; }
 .cs-who {
-  font-size: 0.75rem;
+  font-size: var(--text-xs);
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--ink-faint);
@@ -92,11 +92,11 @@
 .cs-review-body { padding: var(--space-4); display: flex; flex-direction: column; gap: var(--space-3); }
 .cs-review-row { display: flex; flex-direction: column; gap: var(--space-1); }
 .cs-review-label {
-  font-size: 0.6875rem; letter-spacing: 0.06em; text-transform: uppercase;
+  font-size: var(--text-xs); letter-spacing: 0.06em; text-transform: uppercase;
   color: var(--ink-faint); font-weight: 600;
 }
 .cs-review-said { font-family: var(--font-body); font-style: italic; }
-.cs-review-derived { font-family: var(--font-mono); font-size: 0.8125rem; line-height: 1.5; }
+.cs-review-derived { font-family: var(--font-mono); font-size: var(--text-sm); line-height: var(--leading-normal); }
 .cs-concern {
   padding: var(--space-2) var(--space-3);
   border-radius: var(--radius);
@@ -176,7 +176,7 @@
   border-bottom: 1px solid var(--line);
   background: var(--surface-deep);
 }
-.cs-pane-title { font-family: var(--font-display); font-size: 1.0625rem; margin: 0; flex: 1 1 auto; }
+.cs-pane-title { font-size: var(--text-lg); font-weight: 600; margin: 0; flex: 1 1 auto; }
 .cs-pane-body { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: minmax(0, 15rem) minmax(0, 1fr); }
 @media (max-width: 48rem) { .cs-pane-body { grid-template-columns: minmax(0, 1fr); } }
 .cs-files {
@@ -188,7 +188,8 @@
   width: 100%; text-align: left; display: block;
   padding: var(--space-2) var(--space-3);
   border: 0; background: transparent; border-radius: var(--radius);
-  cursor: pointer; font: inherit; color: var(--ink);
+  cursor: pointer; font: inherit; font-size: var(--text-base); color: var(--ink);
+  transition: background var(--dur-fast) var(--ease-out);
 }
 .cs-file:hover { background: var(--surface-deep); }
 .cs-file.cs-on { background: var(--accent-wash); color: var(--accent-ink); }
@@ -206,13 +207,16 @@
   overflow: auto;
   max-height: calc(100vh - 24rem);
   background: var(--code-bg); color: var(--code-ink);
-  font-family: var(--font-mono); font-size: 0.75rem; line-height: 1.6;
+  font-family: var(--font-mono); font-size: var(--text-sm); line-height: var(--leading-prose);
 }
 .cs-tabs { display: flex; gap: var(--space-1); padding: var(--space-2) var(--space-4) 0; border-bottom: 1px solid var(--line); }
 .cs-tab {
   padding: var(--space-2) var(--space-3);
   border: 0; background: transparent; cursor: pointer; font: inherit;
+  font-size: var(--text-base);
   color: var(--ink-soft); border-bottom: 2px solid transparent;
+  transition: color var(--dur-fast) var(--ease-out),
+              border-color var(--dur-fast) var(--ease-out);
 }
 .cs-tab.cs-on { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
 

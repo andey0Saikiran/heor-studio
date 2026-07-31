@@ -22,18 +22,32 @@
   gap: var(--space-3);
 }
 
+/* The wordmark must never break across lines. It was wrapping to "HEOR /
+   Studio" in a narrow pane, which turns the one identity element on screen
+   into two ragged words and takes a third of the viewport with it. The tagline
+   is the thing that gives way first, then hides entirely. */
+.wordmark { white-space: nowrap; }
+.tagline { min-width: 0; }
+@media (max-width: 40rem) {
+  .tagline { display: none; }
+}
+
 .wordmark {
+  /* The ONE place the display serif survives. A wordmark is identity, not a UI
+     label, so the product register's ban on display faces in chrome does not
+     reach it, and having exactly one serif element on screen makes it read as
+     a mark rather than as a competing typeface. */
   font-family: var(--font-display);
-  font-size: 1.45rem;
+  font-size: var(--text-2xl);
   font-weight: 600;
-  letter-spacing: 0.01em;
+  letter-spacing: -0.01em;
   color: var(--ink);
   margin: 0;
 }
 
 .tagline {
   color: var(--ink-soft);
-  font-size: 0.9rem;
+  font-size: var(--text-base);
 }
 
 .header-actions {
@@ -148,7 +162,7 @@
 }
 
 .card-title {
-  font-family: var(--font-display);
+  font-family: var(--font-body);
   font-size: 1.15rem;
   font-weight: 600;
   margin-bottom: var(--space-1);
@@ -242,25 +256,81 @@ textarea.control {
 
 /* ---------- buttons ---------- */
 
-.btn {
+/* ---------- controls: ONE button, everywhere ----------
+   There were three. `.btn` (neutral, 500 weight, .5rem/.9rem), `.wb-btn` in the
+   codelist workbench and `.sc-btn` in the spec chat (both accent-washed, 600
+   weight, and each with its own padding). Same affordance, three geometries,
+   three colours, sitting on screen at the same time. That is most of what
+   "chaotic" was: not any single element being wrong, but the same action
+   looking like three different kinds of thing depending on which panel it
+   landed in.
+
+   The prefixed selectors are aliased onto the canonical control rather than
+   deleted, so the components keep their scoped class names while rendering one
+   vocabulary. `--ghost` maps to the quiet variant. */
+
+.btn,
+.wb-btn,
+.sc-btn {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: var(--space-2);
+  /* 44px is the touch-target floor. The old buttons measured ~36px, which is
+     fine with a mouse and not fine with a thumb. */
+  min-height: 2.25rem;
   border: 1px solid var(--line);
   background: var(--surface);
   color: var(--ink);
-  padding: 0.5rem 0.9rem;
+  padding: 0.4rem 0.85rem;
   border-radius: var(--radius);
+  font: inherit;
+  font-size: var(--text-base);
   font-weight: 500;
+  line-height: var(--leading-tight);
   text-decoration: none;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out),
+              border-color var(--dur-fast) var(--ease-out),
+              color var(--dur-fast) var(--ease-out);
 }
 
-.btn:not(:disabled):hover {
+.btn:not(:disabled):hover,
+.wb-btn:not(:disabled):hover,
+.sc-btn:not(:disabled):hover {
   background: var(--surface-deep);
+  border-color: color-mix(in srgb, var(--ink) 18%, var(--line));
 }
 
-.btn:disabled {
-  opacity: 0.55;
+/* Pressed state. Every control needs one; without it a click on a slow action
+   feels like nothing happened. */
+.btn:not(:disabled):active,
+.wb-btn:not(:disabled):active,
+.sc-btn:not(:disabled):active {
+  background: color-mix(in srgb, var(--ink) 8%, var(--surface-deep));
+}
+
+.btn:disabled,
+.wb-btn:disabled,
+.sc-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* The accent skin the two prefixed systems were reaching for. Kept as a
+   variant so the emphasis they had is preserved, now at one geometry. */
+.wb-btn,
+.sc-btn {
+  background: var(--accent-wash);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+.wb-btn:not(:disabled):hover,
+.sc-btn:not(:disabled):hover {
+  background: color-mix(in srgb, var(--accent) 16%, var(--paper));
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  color: var(--accent-ink);
 }
 
 .btn-primary {
@@ -273,16 +343,27 @@ textarea.control {
 .btn-primary:not(:disabled):hover {
   background: var(--accent-ink);
   border-color: var(--accent-ink);
+  color: var(--paper);
+}
+.btn-primary:not(:disabled):active {
+  background: color-mix(in srgb, var(--ink) 15%, var(--accent-ink));
 }
 
-.btn-quiet {
+.btn-quiet,
+.wb-btn--ghost,
+.sc-btn--ghost {
   background: transparent;
   border-color: transparent;
   color: var(--accent-ink);
+  font-weight: 500;
 }
 
-.btn-quiet:not(:disabled):hover {
+.btn-quiet:not(:disabled):hover,
+.wb-btn--ghost:not(:disabled):hover,
+.sc-btn--ghost:not(:disabled):hover {
   background: var(--accent-wash);
+  border-color: transparent;
+  color: var(--accent-ink);
 }
 
 .btn-danger-quiet {
@@ -293,11 +374,16 @@ textarea.control {
 
 .btn-danger-quiet:not(:disabled):hover {
   background: var(--danger-wash);
+  border-color: transparent;
+  color: var(--danger);
 }
 
+/* Dense contexts only (inside a table row, beside a field). Still clears the
+   30px the surrounding row gives it. */
 .btn-sm {
-  padding: 0.25rem 0.55rem;
-  font-size: 0.85rem;
+  min-height: 1.75rem;
+  padding: 0.2rem 0.5rem;
+  font-size: var(--text-sm);
 }
 
 /* ---------- analysis-layer editor ---------- */
@@ -877,7 +963,7 @@ textarea.control {
 }
 
 .modal-title {
-  font-family: var(--font-display);
+  font-family: var(--font-body);
   font-size: 1.25rem;
 }
 

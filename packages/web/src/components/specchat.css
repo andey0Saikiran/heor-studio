@@ -1,3 +1,6 @@
+/* The .sc-btn rules that used to live here were removed: buttons are defined
+   once in App.css, which aliases .sc-btn and .sc-btn--ghost onto it. */
+
 /* Spec chat — component-scoped styles.
    Consumes brand.css tokens ONLY; no palette values are declared here.
    Sits among the App.css `.card` sections on the review step, so the shell
@@ -53,7 +56,7 @@
 
 .sc-title {
   margin: 0;
-  font-family: var(--font-display);
+  font-family: var(--font-body);
   font-size: 1.15rem;
   font-weight: 600;
 }
@@ -234,7 +237,7 @@
 
 .sc-proposal-title {
   margin: 0;
-  font-family: var(--font-display);
+  font-family: var(--font-body);
   font-size: 1.05rem;
   font-weight: 600;
 }
@@ -423,34 +426,3 @@
 
 /* ---------- buttons ---------- */
 
-.sc-btn {
-  font: inherit;
-  font-size: 0.85rem;
-  font-weight: 600;
-  color: var(--accent-ink);
-  background: var(--accent-wash);
-  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
-  border-radius: var(--radius);
-  padding: var(--space-2) var(--space-4);
-  cursor: pointer;
-}
-
-.sc-btn:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--accent) 16%, var(--accent-wash));
-}
-
-.sc-btn:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-.sc-btn--ghost {
-  color: var(--ink-soft);
-  background: transparent;
-  border-color: var(--line);
-  font-weight: 500;
-}
-
-.sc-btn--ghost:hover:not(:disabled) {
-  background: var(--surface-deep);
-}
