@@ -1,0 +1,223 @@
+/* Chat shell. Scoped, all classes prefixed cs-.
+ * Consumes brand.css tokens only; no palette values are declared here. */
+
+.cs-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-4);
+  min-height: calc(100vh - 8rem);
+}
+.cs-shell.cs-split {
+  /* Conversation stays comfortably readable; the artifact pane takes the rest.
+     Chat is capped rather than halved because long code lines need the room
+     more than prose does. */
+  grid-template-columns: minmax(0, 22rem) minmax(0, 1fr);
+}
+@media (max-width: 60rem) {
+  .cs-shell.cs-split { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* ---------- conversation ---------- */
+
+.cs-chat {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+.cs-log {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  max-height: calc(100vh - 16rem);
+}
+.cs-msg { display: flex; flex-direction: column; gap: var(--space-2); max-width: 52rem; }
+.cs-msg-user { align-self: flex-end; align-items: flex-end; }
+.cs-who {
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.cs-bubble {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-lg);
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.cs-msg-user .cs-bubble {
+  background: var(--accent-wash);
+  color: var(--accent-ink);
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+}
+.cs-msg-assistant .cs-bubble {
+  background: var(--surface-deep);
+  border: 1px solid var(--line);
+}
+
+/* ---------- landing ---------- */
+
+.cs-landing { display: flex; flex-direction: column; gap: var(--space-4); padding: var(--space-2) 0; }
+.cs-drop {
+  display: flex; flex-direction: column; align-items: center; gap: var(--space-2);
+  padding: var(--space-6) var(--space-4);
+  border: 1px dashed color-mix(in srgb, var(--ink) 22%, transparent);
+  border-radius: var(--radius-lg);
+  background: var(--surface-deep);
+  cursor: pointer;
+  text-align: center;
+}
+.cs-drop:hover, .cs-drop.cs-drag { border-color: var(--accent); background: var(--accent-wash); }
+.cs-drop-primary { font-weight: 600; }
+.cs-drop-sub { font-size: 0.875rem; color: var(--ink-soft); }
+.cs-or { display: flex; align-items: center; gap: var(--space-3); color: var(--ink-faint); font-size: 0.8125rem; }
+.cs-or::before, .cs-or::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+
+/* ---------- review card ---------- */
+
+.cs-review {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--paper);
+  overflow: hidden;
+}
+.cs-review-body { padding: var(--space-4); display: flex; flex-direction: column; gap: var(--space-3); }
+.cs-review-row { display: flex; flex-direction: column; gap: var(--space-1); }
+.cs-review-label {
+  font-size: 0.6875rem; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--ink-faint); font-weight: 600;
+}
+.cs-review-said { font-family: var(--font-body); font-style: italic; }
+.cs-review-derived { font-family: var(--font-mono); font-size: 0.8125rem; line-height: 1.5; }
+.cs-concern {
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius);
+  background: var(--warn-wash);
+  border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent);
+  font-size: 0.875rem;
+}
+.cs-review-foot {
+  display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center;
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--line);
+  background: var(--surface-deep);
+}
+.cs-answered {
+  font-size: 0.875rem; color: var(--ink-soft);
+  display: inline-flex; align-items: center; gap: var(--space-2);
+}
+
+/* ---------- proposal / diff ---------- */
+
+.cs-proposal { border: 1px solid var(--line); border-radius: var(--radius); background: var(--paper); overflow: hidden; }
+.cs-proposal-body { padding: var(--space-4); display: flex; flex-direction: column; gap: var(--space-3); }
+.cs-change {
+  display: flex; flex-direction: column; gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius);
+  background: var(--surface-deep);
+  font-size: 0.875rem;
+}
+.cs-change.cs-costly {
+  background: var(--warn-wash);
+  border: 1px solid color-mix(in srgb, var(--warn) 28%, transparent);
+}
+.cs-change-path { font-family: var(--font-mono); font-size: 0.75rem; color: var(--ink-faint); }
+.cs-cost {
+  padding: var(--space-3) var(--space-4);
+  background: var(--warn-wash);
+  border-top: 1px solid color-mix(in srgb, var(--warn) 28%, transparent);
+  font-size: 0.875rem;
+}
+
+/* ---------- composer ---------- */
+
+.cs-composer {
+  border-top: 1px solid var(--line);
+  background: var(--surface-deep);
+  padding: var(--space-3) var(--space-4);
+  display: flex; flex-direction: column; gap: var(--space-2);
+}
+.cs-input-row { display: flex; gap: var(--space-2); align-items: flex-end; }
+.cs-input {
+  flex: 1 1 auto;
+  min-height: 2.75rem; max-height: 12rem;
+  resize: vertical;
+  padding: var(--space-2) var(--space-3);
+  font: inherit;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.cs-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.cs-hint { font-size: 0.8125rem; color: var(--ink-faint); }
+
+/* ---------- artifact pane ---------- */
+
+.cs-pane {
+  display: flex; flex-direction: column; min-height: 0;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+.cs-pane-head {
+  display: flex; align-items: center; gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-deep);
+}
+.cs-pane-title { font-family: var(--font-display); font-size: 1.0625rem; margin: 0; flex: 1 1 auto; }
+.cs-pane-body { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: minmax(0, 15rem) minmax(0, 1fr); }
+@media (max-width: 48rem) { .cs-pane-body { grid-template-columns: minmax(0, 1fr); } }
+.cs-files {
+  overflow-y: auto; border-right: 1px solid var(--line);
+  max-height: calc(100vh - 20rem);
+  list-style: none; margin: 0; padding: var(--space-2);
+}
+.cs-file {
+  width: 100%; text-align: left; display: block;
+  padding: var(--space-2) var(--space-3);
+  border: 0; background: transparent; border-radius: var(--radius);
+  cursor: pointer; font: inherit; color: var(--ink);
+}
+.cs-file:hover { background: var(--surface-deep); }
+.cs-file.cs-on { background: var(--accent-wash); color: var(--accent-ink); }
+.cs-file-path { display: block; font-family: var(--font-mono); font-size: 0.6875rem; color: var(--ink-faint); }
+.cs-file.cs-on .cs-file-path { color: inherit; opacity: 0.75; }
+.cs-code-wrap { display: flex; flex-direction: column; min-width: 0; }
+.cs-code-head {
+  display: flex; align-items: center; gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--line);
+}
+.cs-code-name { font-family: var(--font-mono); font-size: 0.8125rem; color: var(--ink-soft); flex: 1 1 auto; }
+.cs-code {
+  margin: 0; padding: var(--space-4);
+  overflow: auto;
+  max-height: calc(100vh - 24rem);
+  background: var(--code-bg); color: var(--code-ink);
+  font-family: var(--font-mono); font-size: 0.75rem; line-height: 1.6;
+}
+.cs-tabs { display: flex; gap: var(--space-1); padding: var(--space-2) var(--space-4) 0; border-bottom: 1px solid var(--line); }
+.cs-tab {
+  padding: var(--space-2) var(--space-3);
+  border: 0; background: transparent; cursor: pointer; font: inherit;
+  color: var(--ink-soft); border-bottom: 2px solid transparent;
+}
+.cs-tab.cs-on { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+
+/* ---------- progress ---------- */
+
+.cs-progress { display: flex; align-items: center; gap: var(--space-3); font-size: 0.875rem; color: var(--ink-soft); }
+.cs-bar { flex: 1 1 auto; height: 6px; border-radius: 999px; background: var(--surface-deep); overflow: hidden; min-width: 4rem; }
+.cs-bar-fill { height: 100%; background: var(--accent); border-radius: 999px; transition: width 200ms ease; }

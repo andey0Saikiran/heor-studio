@@ -14,6 +14,7 @@ import SettingsModal, {
 import CodelistWorkbench from "./components/CodelistWorkbench";
 import CorrectionModal from "./components/CorrectionModal";
 import CorrectionsInbox from "./components/CorrectionsInbox";
+import ChatShell from "./components/ChatShell";
 import { loadCorrections, saveCorrections, type FlagRequest } from "./lib/corrections";
 import { extractSpec } from "@heor-studio/core";
 import "./App.css";
@@ -306,6 +307,11 @@ function ProtocolStep({
 export default function App() {
   const [spec, setSpec] = useState<StudySpec | null>(null);
   const [step, setStep] = useState(1);
+  /* CHAT IS THE DEFAULT SURFACE. The wizard is not deleted: the codelist
+   * workbench with its live vocabulary search and the per-analysis parameter
+   * editors are genuinely better as forms, so they stay one click away rather
+   * than being reimplemented worse inside a conversation. */
+  const [mode, setMode] = useState<"chat" | "panels">("chat");
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [emitOptions, setEmitOptions] = useState<EmitOptions>(DEFAULT_EMIT_OPTIONS);
@@ -417,6 +423,20 @@ export default function App() {
           </div>
         )}
 
+        {mode === "chat" ? (
+          <ChatShell
+            spec={spec}
+            onChange={updateSpec}
+            onAdopt={adoptSpec}
+            settings={settings}
+            onOpenSettings={() => setSettingsOpen(true)}
+            options={emitOptions}
+            onLoadDemo={() => adoptSpec(structuredClone(PSO_DEMO_SPEC))}
+            onStartBlank={() => adoptSpec(blankSpec())}
+            onOpenPanels={() => { setMode("panels"); setStep(2); }}
+          />
+        ) : (
+        <>
         <nav aria-label="Wizard steps">
           <ol className="stepper">
             {STEPS.map((s) => (
@@ -496,7 +516,12 @@ export default function App() {
           >
             Continue
           </button>
+          <button type="button" className="btn btn-quiet" onClick={() => setMode("chat")}>
+            Back to the conversation
+          </button>
         </div>
+        </>
+        )}
       </main>
 
       <footer className="app-footer">
