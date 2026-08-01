@@ -351,10 +351,28 @@ export interface SuppressionTarget {
   shapeKey: string;
   /** human label for the generated comment */
   label: string;
+  /** columns this ANALYSIS emitted beyond the static shape (AnalysisModule
+   *  .suppressionExtras). Empty for every module without option-dependent
+   *  columns, which is what keeps the emitted pass byte-identical for them. */
+  extraMaskCols?: string[];
+  extraKeepCols?: string[];
 }
 
 export function shapeFor(shapeKey: string): SuppressionShape | undefined {
   return SUPPRESSION_SHAPES[shapeKey];
+}
+
+/** The shape a target actually gets: the static one, plus the analysis's own
+ *  option-dependent columns. */
+function shapeOf(t: SuppressionTarget): SuppressionShape | undefined {
+  const s = SUPPRESSION_SHAPES[t.shapeKey];
+  if (!s) return undefined;
+  if (!t.extraMaskCols?.length && !t.extraKeepCols?.length) return s;
+  return {
+    ...s,
+    maskCols: [...s.maskCols, ...(t.extraMaskCols ?? [])],
+    keepCols: [...s.keepCols, ...(t.extraKeepCols ?? [])],
+  };
 }
 
 /* -------------------------------------------------------------- *
@@ -363,7 +381,7 @@ export function shapeFor(shapeKey: string): SuppressionShape | undefined {
 
 /** Suppression pass for one table (Postgres/Snowflake — plain window functions). */
 export function suppressionSqlFor(t: SuppressionTarget, p: SuppressionPolicy): string[] {
-  const s = SUPPRESSION_SHAPES[t.shapeKey];
+  const s = shapeOf(t);
   if (!s) return [`-- (no suppression shape registered for ${t.shapeKey}; table left unreleased)`];
   const grp = s.groupCols.join(", ");
   const out: string[] = [];
@@ -426,7 +444,7 @@ export function suppressionSqlFor(t: SuppressionTarget, p: SuppressionPolicy): s
 /** SAS twin. PROC SQL has no window functions, so group totals come from a
  *  self-join and the smallest survivor from a sort + BY-group FIRST. */
 export function suppressionSasFor(t: SuppressionTarget, p: SuppressionPolicy, work: string): string[] {
-  const s = SUPPRESSION_SHAPES[t.shapeKey];
+  const s = shapeOf(t);
   if (!s) return [`/* (no suppression shape registered for ${t.shapeKey}) */`];
   const grpOn = s.groupCols.map((c) => `f.${c} = g.${c}`).join(" and ");
   const grpSel = s.groupCols.join(", ");
@@ -510,7 +528,7 @@ export function resultsContractSql(targets: SuppressionTarget[], p: SuppressionP
   out.push(`CREATE TABLE ${RESULTS_TABLE_PLACEHOLDER} AS`);
   const blocks: string[] = [];
   for (const t of targets) {
-    const s = SUPPRESSION_SHAPES[t.shapeKey];
+    const s = shapeOf(t);
     if (!s) continue;
     // the last two label columns are the row identity in every shape; a
     // time-indexed table adds a third (see rowDetailCol)

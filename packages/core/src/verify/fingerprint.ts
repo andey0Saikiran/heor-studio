@@ -190,6 +190,54 @@ function sasWindowOffset(expr: string | undefined): string {
 }
 
 /* ------------------------------------------------------------------ *
+ *  Resource-use economics layer — shared normalizers
+ *
+ *  Attribution, the PPPM denominator, the CPI restatement and the quantile
+ *  definition each change a number without changing the SHAPE of the output, so
+ *  every one of them is scraped out of each language's own text and compared.
+ *  The helpers live here rather than inline because the two languages emit the
+ *  same facts in the same shape for once, and one implementation is one place
+ *  for the pattern to be wrong in.
+ * ------------------------------------------------------------------ */
+
+/** Distinct claim columns a pattern names, sorted — e.g. "dx1,pdx".
+ *  Sorted lexicographically to match the parity stamp's own flatten(). */
+function claimColumns(text: string, re: RegExp): string {
+  const seen = new Set<string>();
+  for (const m of text.matchAll(re)) seen.add(m[1].toLowerCase());
+  return [...seen].sort().join(",");
+}
+
+/** Codes inside the FIRST matching IN-list, unquoted and sorted. */
+function inListCodes(text: string, re: RegExp): string {
+  const m = re.exec(text);
+  if (!m) return "";
+  return m[1]
+    .split(",")
+    .map((s) => s.replace(/['\s]/g, ""))
+    .filter((s) => s.length > 0)
+    .sort()
+    .join(",");
+}
+
+/** "2019:1.10250000,2020:1.05000000,..." — every restatement factor the program
+ *  embeds, deduped (the CASE is repeated once per claim family) and ordered by
+ *  year. A factor silently becoming 1.0 changes this string. */
+function inflationFactors(text: string): string {
+  const seen = new Map<string, string>();
+  for (const m of text.matchAll(/\bwhen (\d{4}) then ([\d.]+)/gi)) seen.set(m[1], m[2]);
+  return [...seen.entries()].sort((a, b) => Number(a[0]) - Number(b[0])).map(([y, f]) => `${y}:${f}`).join(",");
+}
+
+/** The ELSE arms of every disease-related CASE, deduped. Correct code has one
+ *  value, "0"; a mutation that attributes everything shows up as "1". */
+function drDefaults(text: string): string {
+  const seen = new Set<string>();
+  for (const m of text.matchAll(/\belse\s+(\d+)\s+end as dr\b/gis)) seen.add(m[1]);
+  return [...seen].sort().join(",");
+}
+
+/* ------------------------------------------------------------------ *
  *  SQL extraction — patterns match the Postgres/Snowflake emission.
  * ------------------------------------------------------------------ */
 
@@ -811,15 +859,85 @@ function sqlFingerprint(kind: string, raw: string): Fingerprint {
       put(fp, "encounter_collapse_key", /GROUP BY enrolid, setting, enc_id/i.test(sql) ? "yes" : "no");
       // ED carve-out places, in order
       put(fp, "ed_places", (sql.match(/CAST\(o\.stdplac AS VARCHAR\) IN \(([^)]*)\)/i)?.[1] ?? "").replace(/['\s]/g, ""));
-      // Quantile estimator: ONLY the median may be taken (see the module header)
-      /* The DISTINCT set of probabilities taken, sorted. Deduped because the
-       * module takes the median of two variables and SAS names the estimator
-       * once; adding a quartile still shows up as "0.25,0.5" != "0.5". */
+      /* QUANTILES. The DISTINCT set of probabilities taken, sorted, and the
+       * estimator that takes them. Deduped because the module takes each
+       * quantile of two variables and SAS names the estimator once per PROC;
+       * a quartile appearing where none was declared still shows up as
+       * "0.25,0.5" != "0.5", and a twin quietly switching estimator shows up
+       * in quantile_estimator even when the probabilities agree. */
       put(fp, "quantile_probabilities",
-        [...new Set((sql.match(/PERCENTILE_CONT\(([\d.]+)\)/gi) ?? []).map((m) => (/([\d.]+)/.exec(m) ?? [])[1]))].sort().join(","));
+        [...new Set((sql.match(/PERCENTILE_(?:CONT|DISC)\(([\d.]+)\)/gi) ?? []).map((m) => (/([\d.]+)/.exec(m) ?? [])[1]))].sort().join(","));
+      put(fp, "quantile_estimator",
+        [...new Set((sql.match(/PERCENTILE_(CONT|DISC)\(/gi) ?? []).map((m) => `percentile_${/(CONT|DISC)/i.exec(m)![1].toLowerCase()}`))].sort().join(","));
+      put(fp, "quantile_definition_label", grab(sql, [/'(interpolated|nearest_rank)' AS quantile_definition/i]));
       put(fp, "denominator_is_whole_cohort", /CROSS JOIN settings_list/i.test(sql) ? "yes" : "no");
       put(fp, "cost_field", grab(sql, [/'(paytot|netpay)' AS cost_field/i]));
       put(fp, "days_per_year", grab(sql, [/encounters \* ([\d.]+) \/ NULLIF\(\s*s\.observed_days/i]));
+
+      /* ---- DISEASE-RELATED ATTRIBUTION ----------------------------------
+       * Anchored on the emitted OUTPUT column rather than on the word "dr":
+       * `dr` appears inside dr_paid_elig too, and a pattern loose enough to
+       * match both would report the same value whichever one broke. */
+      put(fp, "attribution_kind", /AS dr_paid_total\b/i.test(sql) ? "disease_related" : "all_cause");
+      put(fp, "attribution_dx_position", grab(sql, [/'(primary_only|any_position)' AS dx_position/i]));
+      // The slots actually scanned — this is what dxPosition MEANS in the code.
+      put(fp, "attribution_dx_columns", claimColumns(sql, /\b\w+\.(pdx|dx\d+) IN \(/gi));
+      put(fp, "attribution_proc_columns", claimColumns(sql, /\b\w+\.(pproc|proc\d+) IN \(/gi));
+      put(fp, "attribution_dx_codes", inListCodes(sql, /\b\w+\.(?:pdx|dx\d+) IN \(([^)]*)\)/i));
+      put(fp, "attribution_proc_codes", inListCodes(sql, /\b\w+\.(?:pproc|proc\d+) IN \(([^)]*)\)/i));
+      put(fp, "attribution_drug_source",
+        /dn\.code_list_id = '/.test(sql)
+          ? `lookup:${grab(sql, [/dn\.ndcnum = r\.ndcnum AND dn\.code_list_id = '([^']+)'/i]) ?? "?"}`
+          : /CAST\(r\.ndcnum AS VARCHAR\) IN \(/i.test(sql)
+            ? `literal:${inListCodes(sql, /CAST\(r\.ndcnum AS VARCHAR\) IN \(([^)]*)\)/i)}`
+            : "none");
+      // ANY qualifying line makes the encounter disease-related.
+      put(fp, "attribution_encounter_is_any_line", /MAX\(dr\) AS dr\b/i.test(sql) ? "yes" : "no");
+      // The ELSE arm. A silent fallback to all-cause is exactly "ELSE 1".
+      put(fp, "attribution_dr_default", drDefaults(sql));
+      /* THE FALLBACK THIS MODULE IS MOST LIKELY TO SUFFER: the disease-related
+       * total quietly summing every payment. Without this the dr_ column would
+       * equal the all-cause one and every other check would stay green. */
+      put(fp, "dr_cost_is_filtered", /SUM\(CASE WHEN dr = 1 THEN paid ELSE 0 END\) AS dr_paid(?![_\w])/i.test(sql) ? "yes" : "no");
+      put(fp, "dr_reported_beside_all_cause",
+        /AS paid_total\b/i.test(sql) && /AS dr_paid_total\b/i.test(sql) ? "yes" : /AS dr_paid_total\b/i.test(sql) ? "no" : "n/a");
+
+      /* ---- THE DENOMINATOR ----------------------------------------------- */
+      put(fp, "normalization_basis", /AS eligible_days\b/i.test(sql) ? "observed_member_months" : "fixed_window");
+      {
+        /* One match, two facts: the divisor literal AND the column divided by.
+         * Anchored on the INNER expression, not on ROUND(...): Postgres wraps it
+         * in a NUMERIC cast and Snowflake does not, and a pattern anchored on
+         * the wrapper reported ABSENT for a perfectly correct Snowflake program.
+         * `s.paid_elig` cannot match inside `s.dr_paid_elig` — the character
+         * before the name is an underscore there, not a dot. */
+        const m = /s\.paid_elig \* ([\d.]+) \/ NULLIF\(s\.(\w+), 0\)/i.exec(sql);
+        put(fp, "member_time_days_per_unit", m?.[1]);
+        put(fp, "pppm_denominator_source", m?.[2]);
+      }
+      put(fp, "member_time_numerator_filtered",
+        /SUM\(CASE WHEN elig = 1 THEN paid ELSE 0 END\) AS paid_elig\b/i.test(sql) ? "yes" : "no");
+      put(fp, "capitated_plan_types",
+        (/CAST\(e\.plantyp AS VARCHAR\) NOT IN \(([^)]*)\)/i.exec(sql)?.[1] ?? "").replace(/['\s]/g, ""));
+      /* The merge rule. Bridging a lapse the way the enrollment STITCHER does
+       * would silently restore the very days the denominator must not count. */
+      put(fp, "member_time_merges_adjacent_only",
+        /WHEN dtstart > /i.test(sql) && /MAX\(dtend\) OVER \(PARTITION BY enrolid/i.test(sql) ? "yes" : "no");
+      put(fp, "member_time_source",
+        /AS eligible_days\b/i.test(sql)
+          ? /mm_seg0 AS \([\s\S]*?\n\),/.exec(sql)?.[0]?.includes("_enroll_episodes")
+            ? "enroll_episodes"
+            : "enroll_segments"
+          : "n/a");
+
+      /* ---- CPI RESTATEMENT ----------------------------------------------- */
+      put(fp, "cost_basis_kind", /AS cost_basis\b/i.test(sql) ? "restated" : "nominal");
+      put(fp, "inflation_factors", inflationFactors(sql));
+      put(fp, "inflation_target_year", grab(sql, [/'(\d{4}) dollars, restated by [^']*' AS cost_basis/i]));
+      put(fp, "inflation_series", grab(sql, [/'\d{4} dollars, restated by ([^']*)' AS cost_basis/i]));
+      /* A service year with no index must restate to NULL and be COUNTED, never
+       * be treated as 1.0 and enter unadjusted beside adjusted dollars. */
+      put(fp, "inflation_missing_year_is_null", /ELSE NULL END AS paid\b/i.test(sql) ? "yes" : "no");
       break;
     }
     case "calendar_trend": {
@@ -1299,14 +1417,71 @@ function sasFingerprint(kind: string, rawSas: string, setup: string): Fingerprin
       put(fp, "amb_key_is_service_date", /put\(o\.svcdate, yymmdd10\.\) as enc_id/i.test(sas) ? "yes" : "no");
       put(fp, "encounter_collapse_key", /group by enrolid, setting, enc_id/i.test(sas) ? "yes" : "no");
       put(fp, "ed_places", (sas.match(/vvalue\(o\.stdplac\)\) in \(([^)]*)\)/i)?.[1] ?? "").replace(/['\s]/g, ""));
-      /* SAS names the estimator instead of a probability. PCTLDEF=5 is the only
-       * definition that reproduces PERCENTILE_CONT(0.5), so it is pinned here
-       * as "0.5" — the SAME token the SQL twin yields — and a site default
-       * left implicit would read as MISSING. */
-      put(fp, "quantile_probabilities", /pctldef=5/i.test(sas) && /median\s*=/i.test(sas) ? "0.5" : "");
+      /* SAS names the ESTIMATOR where SQL names a probability, so both are
+       * translated to the SQL twin's tokens here. PCTLDEF=5 is the interpolated
+       * definition (PERCENTILE_CONT) and PCTLDEF=3 the nearest-rank one
+       * (PERCENTILE_DISC); a site default left implicit reads as MISSING rather
+       * than as either. The probability list follows the OUTPUT keywords, so a
+       * twin that computes quartiles the SQL twin does not is a mismatch. */
+      {
+        const def = grab(sas, [/pctldef=(\d)/i]);
+        const hasMedian = /median\s*=/i.test(sas);
+        const hasQ = /\bq1\s*=/i.test(sas) && /\bq3\s*=/i.test(sas);
+        put(fp, "quantile_probabilities", hasMedian ? (hasQ ? "0.25,0.5,0.75" : "0.5") : "");
+        put(fp, "quantile_estimator",
+          def === "5" ? "percentile_cont" : def === "3" ? "percentile_disc" : def ? `pctldef_${def}` : "ABSENT");
+      }
+      put(fp, "quantile_definition_label", grab(sas, [/quantile_definition = "(interpolated|nearest_rank)"/i]));
       put(fp, "denominator_is_whole_cohort", /cross join work\._\w+_settings/i.test(sas) ? "yes" : "no");
       put(fp, "cost_field", grab(sas, [/cost_field = "(paytot|netpay)"/i]));
       put(fp, "days_per_year", grab(sas, [/encounters \* ([\d.]+) \/ observed_days/i]));
+
+      /* ---- DISEASE-RELATED ATTRIBUTION — same facts, this twin's own text -- */
+      put(fp, "attribution_kind", /as dr_paid_total\b/i.test(sas) ? "disease_related" : "all_cause");
+      put(fp, "attribution_dx_position", grab(sas, [/dx_position\s*=\s*"(primary_only|any_position)"/i]));
+      put(fp, "attribution_dx_columns", claimColumns(sas, /\b\w+\.(pdx|dx\d+) in \(/gi));
+      put(fp, "attribution_proc_columns", claimColumns(sas, /\b\w+\.(pproc|proc\d+) in \(/gi));
+      put(fp, "attribution_dx_codes", inListCodes(sas, /\b\w+\.(?:pdx|dx\d+) in \(([^)]*)\)/i));
+      put(fp, "attribution_proc_codes", inListCodes(sas, /\b\w+\.(?:pproc|proc\d+) in \(([^)]*)\)/i));
+      put(fp, "attribution_drug_source",
+        /_ndc_\w+ as dn/i.test(sas)
+          ? `lookup:${grab(sas, [/_ndc_(\w+) as dn/i]) ?? "?"}`
+          : /strip\(r\.ndcnum\) in \(/i.test(sas)
+            ? `literal:${inListCodes(sas, /strip\(r\.ndcnum\) in \(([^)]*)\)/i)}`
+            : "none");
+      put(fp, "attribution_encounter_is_any_line", /max\(dr\) as dr\b/i.test(sas) ? "yes" : "no");
+      put(fp, "attribution_dr_default", drDefaults(sas));
+      put(fp, "dr_cost_is_filtered",
+        /sum\(case when dr = 1 then paid else 0 end\) as dr_paid(?![_\w])/i.test(sas) ? "yes" : "no");
+      put(fp, "dr_reported_beside_all_cause",
+        /\bpaid_total\b/i.test(sas) && /as dr_paid_total\b/i.test(sas) ? "yes" : /as dr_paid_total\b/i.test(sas) ? "no" : "n/a");
+
+      /* ---- THE DENOMINATOR ----------------------------------------------- */
+      put(fp, "normalization_basis", /as eligible_days\b/i.test(sas) ? "observed_member_months" : "fixed_window");
+      {
+        const m = /paid_per_member_(?:month|year) = round\(paid_elig \* ([\d.]+) \/ (\w+)/i.exec(sas);
+        put(fp, "member_time_days_per_unit", m?.[1]);
+        put(fp, "pppm_denominator_source", m?.[2]);
+      }
+      put(fp, "member_time_numerator_filtered",
+        /sum\(case when elig = 1 then paid else 0 end\) as paid_elig\b/i.test(sas) ? "yes" : "no");
+      put(fp, "capitated_plan_types",
+        (/vvalue\(b\.plantyp\)\) not in \(([^)]*)\)/i.exec(sas)?.[1] ?? "").replace(/['\s]/g, ""));
+      put(fp, "member_time_merges_adjacent_only",
+        /dtstart <= run_end \+ 1 then run_end = max\(run_end, dtend\)/i.test(sas) ? "yes" : "no");
+      put(fp, "member_time_source",
+        /as eligible_days\b/i.test(sas)
+          ? /_mseg0 as([\s\S]*?)quit;/i.exec(sas)?.[1]?.includes("_050_epi")
+            ? "enroll_episodes"
+            : "enroll_segments"
+          : "n/a");
+
+      /* ---- CPI RESTATEMENT ----------------------------------------------- */
+      put(fp, "cost_basis_kind", /cost_basis = "/i.test(sas) ? "restated" : "nominal");
+      put(fp, "inflation_factors", inflationFactors(sas));
+      put(fp, "inflation_target_year", grab(sas, [/cost_basis = "(\d{4}) dollars, restated by [^"]*"/i]));
+      put(fp, "inflation_series", grab(sas, [/cost_basis = "\d{4} dollars, restated by ([^"]*)"/i]));
+      put(fp, "inflation_missing_year_is_null", /else \. end\) as paid\b/i.test(sas) ? "yes" : "no");
       break;
     }
     case "calendar_trend": {
@@ -1708,9 +1883,74 @@ export function expectedFromStamp(kind: string, stamp: Record<string, unknown>):
         exp.ip_orphan_fallback_on_admdate = "yes";
         exp.ip_dated_at_admission = "yes";
       }
-      if (stamp.medianEstimator === "percentile_cont_equivalent") exp.quantile_probabilities = "0.5";
       exp.encounter_collapse_key = "yes";
       exp.denominator_is_whole_cohort = "yes";
+
+      /* THE ECONOMICS LAYER.
+       *
+       * Every option below is stamped ONLY when declared, so the ABSENCE of a
+       * key is itself a claim: "this program is all-cause / fixed-window /
+       * nominal". Those claims are asserted here too, which is what stops the
+       * new machinery from appearing in a program that never asked for it. */
+      const att = stamp.attribution as
+        | { dxPosition?: unknown; dxColumns?: unknown; procColumns?: unknown; procedureCodeListId?: unknown; drugSource?: unknown }
+        | undefined;
+      exp.attribution_kind = att ? "disease_related" : "all_cause";
+      if (att) {
+        if (typeof att.dxPosition === "string") exp.attribution_dx_position = att.dxPosition;
+        // the stamp names the slots; the code must scan exactly those
+        if (Array.isArray(att.dxColumns)) exp.attribution_dx_columns = (att.dxColumns as string[]).join(",");
+        if (Array.isArray(att.procColumns)) exp.attribution_proc_columns = (att.procColumns as string[]).join(",");
+        exp.attribution_encounter_is_any_line = "yes";
+        exp.attribution_dr_default = "0";
+        exp.dr_cost_is_filtered = "yes";
+        exp.dr_reported_beside_all_cause = "yes";
+        if (typeof att.drugSource === "string") exp.attribution_drug_source = att.drugSource;
+      }
+
+      const norm = stamp.normalization as
+        | { per?: unknown; excludeCapitated?: unknown; capitatedPlanTypes?: unknown; daysPerUnit?: unknown }
+        | undefined;
+      exp.normalization_basis = norm ? "observed_member_months" : "fixed_window";
+      if (norm) {
+        if (typeof norm.daysPerUnit === "string") exp.member_time_days_per_unit = norm.daysPerUnit;
+        /* The denominator the stamp CLAIMS. Reverting to the stitched-episode
+         * observed days is the exact defect this catches, and it leaves a
+         * perfectly plausible PPPM behind. */
+        exp.pppm_denominator_source = "eligible_days";
+        exp.member_time_numerator_filtered = "yes";
+        exp.member_time_merges_adjacent_only = "yes";
+        exp.member_time_source = "enroll_segments";
+        if (norm.excludeCapitated === true && Array.isArray(norm.capitatedPlanTypes))
+          exp.capitated_plan_types = (norm.capitatedPlanTypes as string[]).join(",");
+        if (norm.excludeCapitated === false) exp.capitated_plan_types = "";
+      }
+
+      const inf = stamp.inflation as { targetYear?: unknown; seriesLabel?: unknown; factors?: unknown } | undefined;
+      exp.cost_basis_kind = inf ? "restated" : "nominal";
+      if (inf) {
+        if (typeof inf.factors === "string") exp.inflation_factors = inf.factors;
+        const ty = num(inf.targetYear);
+        if (ty) exp.inflation_target_year = ty;
+        if (typeof inf.seriesLabel === "string") exp.inflation_series = inf.seriesLabel;
+        exp.inflation_missing_year_is_null = "yes";
+      } else {
+        // nothing to restate: no factor may appear anywhere in the program
+        exp.inflation_factors = "";
+      }
+
+      /* QUANTILES. medianEstimator alone covers the no-quantile case (the
+       * median has always been PERCENTILE_CONT-equivalent); quantileDefinition
+       * appears only when quartiles are actually emitted. */
+      const qdef = stamp.quantileDefinition;
+      if (typeof qdef === "string") {
+        exp.quantile_definition_label = qdef;
+        exp.quantile_probabilities = "0.25,0.5,0.75";
+        exp.quantile_estimator = qdef === "nearest_rank" ? "percentile_disc" : "percentile_cont";
+      } else if (stamp.medianEstimator === "percentile_cont_equivalent") {
+        exp.quantile_probabilities = "0.5";
+        exp.quantile_estimator = "percentile_cont";
+      }
       break;
     }
     case "calendar_trend": {

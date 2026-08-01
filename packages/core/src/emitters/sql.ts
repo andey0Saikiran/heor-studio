@@ -1550,7 +1550,14 @@ export const emitSql: SqlEmitter = (spec, dialect, opts) => {
     // the module returns a bare title; the emitter owns the file number so the
     // displayed title always matches the actual NN_slug filename
     files.push(mk(num, f.slug, `${num} ${f.title}`, f.subtitle, [], f.extra, f.body));
-    suppressTargets.push({ table: `${ctx.wp}_${f.slug}`, shapeKey: mod.stampKind, label: `${an.label} (${an.kind})` });
+    const extras = mod.suppressionExtras?.(an as never);
+    suppressTargets.push({
+      table: `${ctx.wp}_${f.slug}`,
+      shapeKey: mod.stampKind,
+      label: `${an.label} (${an.kind})`,
+      ...(extras?.maskCols.length ? { extraMaskCols: extras.maskCols } : {}),
+      ...(extras?.keepCols.length ? { extraKeepCols: extras.keepCols } : {}),
+    });
   });
 
   /* Small-cell suppression — the last step, because it reads every result table

@@ -52,4 +52,16 @@ export interface AnalysisModule<A extends Analysis = Analysis> {
   sql(ctx: SqlCtx, an: A, suffix: string): SqlModuleFile;
   /** SAS twin. `num` is the program number ("080", "090", ...). */
   sas(ctx: SasCtx, an: A, num: string, suffix: string): GeneratedFile;
+  /**
+   * Result columns this ANALYSIS adds beyond its stamp kind's static
+   * suppression shape.
+   *
+   * Suppression shapes are per stamp KIND, so they cannot know which optional
+   * columns a particular analysis emitted. That gap is not a harmless omission:
+   * the SAS pass masks by name over a `set` of the whole result data set, so an
+   * unlisted disclosive column travels into the released data set intact. A
+   * module with option-dependent columns declares them here; everything else
+   * omits the hook and the pass is byte-identical.
+   */
+  suppressionExtras?(an: A): { maskCols: string[]; keepCols: string[] };
 }

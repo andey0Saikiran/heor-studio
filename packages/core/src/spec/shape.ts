@@ -266,6 +266,64 @@ function checkAnalysis(p: Problems, v: unknown, path: string): void {
         if (!Array.isArray(v.edPlaceOfService)) p.push(`${path}.edPlaceOfService`, "expected an array of place-of-service codes");
         else v.edPlaceOfService.forEach((x, j) => need(p, `${path}.edPlaceOfService[${j}]`, isStr(x) && SAFE_CODE.test(x), `expected a printable code string, got ${typeOf(x)}`));
       }
+      /* THE ECONOMICS LAYER. Optional, and therefore easy to leave unchecked —
+       * which is exactly how untrusted JSON reaches an emitter that assumes a
+       * union type it never verified. Each value below lands in generated code:
+       * dxPosition and per as literals, seriesLabel inside a "--" comment where
+       * a newline would escape into live SQL, the index years as numeric
+       * literals in a CASE. Readiness checks what is COHERENT (a missing index
+       * year, an empty series label); this checks what is even the right SHAPE. */
+      if (v.attribution !== undefined) {
+        const ap = `${path}.attribution`;
+        if (!isObj(v.attribution)) p.push(ap, `expected an attribution object, got ${typeOf(v.attribution)}`);
+        else {
+          const a = v.attribution;
+          needEnum(p, a, "kind", ap, new Set(["all_cause", "disease_related"]));
+          if (a.kind === "disease_related") {
+            needEnum(p, a, "dxPosition", ap, new Set(["primary_only", "any_position"]));
+            needStr(p, a, "codeListId", ap, { nonEmpty: true });
+            need(p, `${ap}.codeListId`, isStr(a.codeListId) && SLUG.test(a.codeListId), "expected a slug id");
+            for (const k of ["procedureCodeListId", "drugCodeListId"] as const) {
+              if (a[k] === undefined) continue;
+              need(p, `${ap}.${k}`, isStr(a[k]) && SLUG.test(a[k] as string), `expected a slug id, got ${typeOf(a[k])}`);
+            }
+          }
+        }
+      }
+      if (v.normalization !== undefined) {
+        const np = `${path}.normalization`;
+        if (!isObj(v.normalization)) p.push(np, `expected a normalization object, got ${typeOf(v.normalization)}`);
+        else {
+          const nz = v.normalization;
+          needEnum(p, nz, "kind", np, new Set(["fixed_window", "observed_member_months"]));
+          if (nz.kind === "observed_member_months") {
+            needEnum(p, nz, "per", np, new Set(["month", "year"]));
+            if (nz.excludeCapitated !== undefined) needBool(p, nz, "excludeCapitated", np);
+          }
+        }
+      }
+      if (v.inflation !== undefined) {
+        const ip = `${path}.inflation`;
+        if (!isObj(v.inflation)) p.push(ip, `expected an inflation object, got ${typeOf(v.inflation)}`);
+        else {
+          const inf = v.inflation;
+          needNum(p, inf, "targetYear", ip, { min: 1900, max: 2200 });
+          needSafeText(p, inf, "seriesLabel", ip, { nonEmpty: true, maxLen: 200 });
+          if (!isObj(inf.indexByYear)) p.push(`${ip}.indexByYear`, `expected an object keyed by calendar year, got ${typeOf(inf.indexByYear)}`);
+          else {
+            const years = Object.keys(inf.indexByYear);
+            if (years.length === 0) p.push(`${ip}.indexByYear`, "is empty — there is nothing to restate with");
+            if (years.length > 200) p.push(`${ip}.indexByYear`, "has more than 200 years");
+            for (const y of years) {
+              need(p, `${ip}.indexByYear.${y}`, /^\d{4}$/.test(y), "expected a four-digit calendar year as the key");
+              need(p, `${ip}.indexByYear.${y}`, isNum((inf.indexByYear as Record<string, unknown>)[y]), "expected a finite index value");
+            }
+          }
+        }
+      }
+      if (v.reportQuantiles !== undefined) needBool(p, v, "reportQuantiles", path);
+      if (v.quantileDefinition !== undefined)
+        needEnum(p, v, "quantileDefinition", path, new Set(["interpolated", "nearest_rank"]));
       break;
     }
     case "comorbidity_index": {

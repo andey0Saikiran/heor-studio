@@ -38,6 +38,7 @@ import type {
 } from "../spec/types";
 import type { StudySpec } from "../spec/types";
 import { survivalOutcome, daysSupplyCleaningFor } from "../spec/types";
+import type { LedgerAttribution, LedgerInflation, MemberMonthOptions } from "./ledger";
 
 /** Default mean days per year — internally consistent (rate/person-years/CI all
  *  agree). Overridable per study via spec.meta.daysPerYear (e.g. 365 for the HEOR
@@ -50,6 +51,18 @@ export const DEFAULT_DAYS_PER_YEAR = 365.25;
 export function renderDaysPerYear(spec: StudySpec): string {
   const y = spec.meta.daysPerYear ?? DEFAULT_DAYS_PER_YEAR;
   return Number.isInteger(y) ? y.toFixed(1) : String(y);
+}
+
+/** Days per member-MONTH, as a decimal literal, derived from the study's own
+ *  year length rather than from a second constant.
+ *
+ *  One study cannot have two year lengths. If a member-month were 365/12 while
+ *  person-years ran on 365.25, a per-member-year figure and twelve times the
+ *  PPPM would disagree in the fourth digit for no reason a reader could name.
+ *  The default 365.25 gives 30.4375 exactly. */
+export function renderDaysPerMonth(spec: StudySpec): string {
+  const m = (spec.meta.daysPerYear ?? DEFAULT_DAYS_PER_YEAR) / 12;
+  return Number.isInteger(m) ? m.toFixed(1) : String(m);
 }
 
 /** The parameter set an incidence-rate twin must consume identically. */
@@ -938,8 +951,53 @@ export interface ResourceUseParity {
   /** encounter grain, per family */
   encounterGrain: { inpatient: string; ambulatory: string; pharmacy: string };
   daysPerYear: string;
-  /** the quantile estimator actually used (see RESOURCE_USE_METHOD_NOTES) */
-  medianEstimator: "percentile_cont_equivalent";
+  /** the quantile estimator actually used (see resourceUseMethodNotes) */
+  medianEstimator: "percentile_cont_equivalent" | "percentile_disc_equivalent";
+  /* ---- The optional economics layer.
+   *
+   * Every key below is present ONLY when the spec declares the option, and that
+   * is deliberate rather than lazy. These fields are optional, so a spec that
+   * declares none of them must emit byte-identical code to the version before
+   * they existed — a stamp that grew four keys would move the emitted text of
+   * every resource-use program ever generated. What must be stamped is every
+   * choice that CHANGES A NUMBER, and an option nobody declared changes none.
+   */
+  /** all-cause vs disease-related, with the slots and codes actually scanned */
+  attribution?: {
+    kind: "disease_related";
+    dxPosition: "primary_only" | "any_position";
+    codeListId: string;
+    /** the dx columns each family is scanned on, flattened and sorted */
+    dxColumns: string[];
+    procColumns: string[];
+    procedureCodeListId: string | null;
+    drugCodeListId: string | null;
+    /** how the drug arm is RENDERED, which is not implied by the id alone: a
+     *  NAME list resolves through the NDC lookup the spine builds, a literal
+     *  NDC list is matched inline because no lookup table exists for one. The
+     *  fingerprint reads this out of the emitted join, so stamping the declared
+     *  id here instead would fail a perfectly correct literal-NDC study. */
+    drugSource: string;
+  };
+  /** the per-patient denominator actually in force */
+  normalization?: {
+    kind: "observed_member_months";
+    per: "month" | "year";
+    excludeCapitated: boolean;
+    capitatedPlanTypes: string[];
+    /** rendered days-per-unit literal both twins divide by */
+    daysPerUnit: string;
+  };
+  /** the dollar year every payment was restated to, and by what */
+  inflation?: {
+    targetYear: number;
+    seriesLabel: string;
+    /** "2019:1.10250000,2020:1.05000000,..." — the literals in the code */
+    factors: string;
+  };
+  /** which quantile definition BOTH twins compute (only when quantiles are
+   *  reported; the median alone is stamped by medianEstimator above) */
+  quantileDefinition?: "interpolated" | "nearest_rank";
 }
 
 /** Spec options the resource-use twins do NOT implement yet. */
@@ -949,9 +1007,65 @@ export function resourceUseLimitations(an: ResourceUseAnalysis): string[] {
     out.push(`costField "netpay" is emitted as requested, but NETPAY nets out coordination-of-benefits and is NOT comparable across plan types - PAYTOT is the usual choice for a total-cost-of-care figure`);
   if (!an.settings.includes("ed") && an.settings.includes("outpatient"))
     out.push(`ED visits are NOT separated - without "ed" in settings[] every emergency visit is counted as an ordinary outpatient visit, which understates acute utilization`);
-  out.push(`no inflation adjustment is applied - payments are in NOMINAL dollars of their service year, so a multi-year window mixes them. CostMeasurement.inflationAdjustment is not consumed yet`);
+  if (!an.inflation)
+    out.push(`no inflation adjustment is applied - payments are in NOMINAL dollars of their service year, so a multi-year window mixes them. CostMeasurement.inflationAdjustment is not consumed yet`);
+  /* A disease-related total that silently omits every drug is the single most
+   * expensive mistake this module can make in a specialty-drug study, and it
+   * looks exactly like a low number rather than like a missing one. */
+  if (an.attribution?.kind === "disease_related" && !an.attribution.drugCodeListId && an.settings.includes("pharmacy"))
+    out.push(`attribution names NO drug list, but pharmacy IS one of the settings - a pharmacy claim carries no diagnosis, so EVERY drug dollar falls outside the disease-related column. On a specialty-drug study that is the largest component of the answer, and it will read as a low number rather than as a missing one. Set attribution.drugCodeListId`);
   out.push(`the ledger counts ENCOUNTERS, not claim lines or units of service; procedure-level and length-of-stay measures are not emitted`);
   return out;
+}
+
+/** Index of the quantile note inside RESOURCE_USE_METHOD_NOTES. */
+const IDX_QUANTILE_NOTE = 5;
+/** Index of the nominal-dollars note inside RESOURCE_USE_METHOD_NOTES. */
+const IDX_NOMINAL_NOTE = 6;
+
+/**
+ * Method notes for one resource-use analysis.
+ *
+ * The BASE list is emitted for every program (below). Declaring one of the
+ * economics options REPLACES the note that would otherwise be false — a program
+ * that computes quartiles must not still say no quartile is emitted, and one
+ * restated to 2021 dollars must not still say its costs are nominal — and
+ * appends the notes that option earns. A spec declaring none of them gets the
+ * base list unchanged, which is what keeps its emitted bytes unchanged.
+ */
+export function resourceUseMethodNotes(an: ResourceUseAnalysis): string[] {
+  const notes = [...RESOURCE_USE_METHOD_NOTES];
+  const qdef = an.quantileDefinition ?? "interpolated";
+
+  if (an.reportQuantiles) {
+    notes[IDX_QUANTILE_NOTE] =
+      qdef === "nearest_rank"
+        ? `QUANTILES use the DECLARED nearest-rank definition, written out in both languages: SQL PERCENTILE_DISC and SAS PCTLDEF=3. These two are the SAME estimator at every probability - both return the smallest observed value whose cumulative share reaches p - so the twins agree exactly on the median, Q1 and Q3, and every reported figure is a dollar amount somebody was actually billed`
+        : `QUANTILES use the DECLARED interpolated definition, written out in both languages: SQL PERCENTILE_CONT and SAS PCTLDEF=5. THEY ARE NOT THE SAME ESTIMATOR AWAY FROM THE MEDIAN. At p = 0.5 they agree for every n; at Q1 and Q3 they agree only when n*p is NOT a whole number, and where it is, PCTLDEF=5 averages the two neighbouring order statistics while PERCENTILE_CONT interpolates at 1+(n-1)p. The gap is bounded by the distance between those neighbours and is usually small, but it is real - quantileDefinition "nearest_rank" is the pairing that agrees exactly at every probability`;
+  }
+  if (an.inflation) {
+    notes[IDX_NOMINAL_NOTE] =
+      `costs are RESTATED to ${an.inflation.targetYear} dollars using ${an.inflation.seriesLabel}, claim by claim, on the claim's OWN service year. The index is the analyst's, not this tool's: CPI series are revised, so two runs a year apart can produce different totals from identical claims, which is why the series label travels with the number. Costs remain UN-DISCOUNTED - restatement and discounting are different corrections and only one of them is applied here`;
+  }
+  if (an.attribution?.kind === "disease_related") {
+    notes.push(
+      `BOTH columns are reported: all-cause and disease-related, side by side, because their DIFFERENCE is the finding and neither alone supports it`,
+      `a claim is disease-related when the condition appears in ${an.attribution.dxPosition === "primary_only" ? "the PRIMARY/principal diagnosis slot only (PDX on the inpatient families, DX1 on outpatient, which has no principal-diagnosis column)" : "ANY diagnosis slot"}${an.attribution.procedureCodeListId ? ", or a condition-specific procedure appears in any position" : ""}${an.attribution.drugCodeListId ? ", or the fill is a condition-specific drug" : ""}. Procedures and drugs attribute a claim ON THEIR OWN - an infusion administration line routinely carries no diagnosis at all`,
+      `an ENCOUNTER is disease-related when ANY of its lines is: a stay whose principal diagnosis is the condition is a disease-related stay even though most of its lines carry something else`,
+      `primary-position-only is conservative and any-position is generous, and published comparisons show they rank the same conditions differently. Neither is a default here - the rule is declared, and it is stamped so the reader can see which one produced the number`,
+    );
+  }
+  if (an.normalization?.kind === "observed_member_months") {
+    const cap = an.normalization.excludeCapitated !== false;
+    notes.push(
+      `the per-patient denominator is ELIGIBLE MEMBER-${an.normalization.per === "year" ? "YEARS" : "MONTHS"}, not the declared window length. PPPM exists to standardize UNEQUAL follow-up; dividing by the window is only correct when every member is observed for all of it, and a "PPPM" computed that way is understated for exactly the members who left early`,
+      `member-time is built from the enrollment SEGMENTS, not the stitched episodes: stitching bridges a lapse up to the study's gap allowance, and a bridged gap is a month nobody was covered in`,
+      cap
+        ? `CAPITATED MONTHS ARE EXCLUDED from the denominator AND their claims from the numerator. Under a capitated plan the provider is paid a per-member fee, so a claim's paid amount does not measure the care given and is frequently zero for care that certainly happened. Excluding the months while keeping their claims would divide real dollars by fewer months and overstate the rate; excluding neither would divide by months in which cost was structurally invisible and understate it`
+        : `capitated months are KEPT (excludeCapitated: false). Under a capitated plan a claim's paid amount does not measure the care given and is frequently zero, so those months dilute the rate downward - the figure is a lower bound on cost per member-month, not an estimate of it`,
+    );
+  }
+  return notes;
 }
 
 /** Method notes ALWAYS emitted (describe what IS computed). */
@@ -968,8 +1082,26 @@ export const RESOURCE_USE_METHOD_NOTES = [
 /** The parity record for a resource-use twin, from consumed values. */
 export function resourceUseParity(
   an: ResourceUseAnalysis,
-  consumed: { settings: string[]; edPlaces: string[]; windowDays: number | null; daysPerYear: string },
+  consumed: {
+    settings: string[];
+    edPlaces: string[];
+    windowDays: number | null;
+    daysPerYear: string;
+    /** resolved by emitters/ledger.ts, so both twins stamp what they RENDERED */
+    attribution?: LedgerAttribution | null;
+    inflation?: LedgerInflation | null;
+    memberMonths?: MemberMonthOptions | null;
+    /** rendered days-per-month (or per-year) literal both twins divide by */
+    daysPerUnit?: string;
+  },
 ): ResourceUseParity {
+  const att = consumed.attribution ?? null;
+  const inf = consumed.inflation ?? null;
+  const mm = consumed.memberMonths ?? null;
+  const qdef = an.quantileDefinition ?? "interpolated";
+  const norm = an.normalization;
+  const flatten = (m: Record<string, string[]>): string[] =>
+    [...new Set(Object.values(m).flat())].sort();
   return {
     id: an.id,
     window: { start: an.ascertainmentWindow.start, end: an.ascertainmentWindow.end, includesIndex: an.ascertainmentWindow.includesIndex },
@@ -985,7 +1117,47 @@ export function resourceUseParity(
       pharmacy: "one_per_member_date_ndc",
     },
     daysPerYear: consumed.daysPerYear,
-    medianEstimator: "percentile_cont_equivalent",
+    medianEstimator:
+      an.reportQuantiles && qdef === "nearest_rank" ? "percentile_disc_equivalent" : "percentile_cont_equivalent",
+    ...(att && an.attribution?.kind === "disease_related"
+      ? {
+          attribution: {
+            kind: "disease_related" as const,
+            dxPosition: att.dxPosition,
+            codeListId: an.attribution.codeListId,
+            dxColumns: flatten(att.dxColumns),
+            procColumns: flatten(att.procColumns),
+            procedureCodeListId: an.attribution.procedureCodeListId ?? null,
+            drugCodeListId: an.attribution.drugCodeListId ?? null,
+            drugSource: att.drugCodeListId
+              ? `lookup:${att.drugCodeListId}`
+              : att.drugNdcCodes
+                ? `literal:${[...att.drugNdcCodes].sort().join(",")}`
+                : "none",
+          },
+        }
+      : {}),
+    ...(mm && norm?.kind === "observed_member_months"
+      ? {
+          normalization: {
+            kind: "observed_member_months" as const,
+            per: norm.per,
+            excludeCapitated: mm.excludeCapitated,
+            capitatedPlanTypes: mm.capitatedPlanTypes,
+            daysPerUnit: consumed.daysPerUnit ?? "",
+          },
+        }
+      : {}),
+    ...(inf
+      ? {
+          inflation: {
+            targetYear: inf.targetYear,
+            seriesLabel: inf.seriesLabel,
+            factors: inf.factors.map(([y, f]) => `${y}:${f}`).join(","),
+          },
+        }
+      : {}),
+    ...(an.reportQuantiles ? { quantileDefinition: qdef } : {}),
   };
 }
 

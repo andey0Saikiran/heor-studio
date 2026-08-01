@@ -320,6 +320,132 @@ export interface ResourceUseAnalysis extends AnalysisCommon {
   /** place-of-service codes classified as an emergency department
    *  (default ["23"], the standard ED POS) */
   edPlaceOfService?: string[];
+  /** all-cause vs disease-related. Omitted = all-cause only. */
+  attribution?: CostAttribution;
+  /** how the per-patient denominator is formed. Omitted = DEFAULT_NORMALIZATION. */
+  normalization?: CostNormalization;
+  /** restate costs in a common dollar year. Omitted = nominal, and the program
+   *  says so rather than leaving the reader to assume. */
+  inflation?: CostInflation;
+  /** emit the cost distribution, not just the mean. Omitted = false. */
+  reportQuantiles?: boolean;
+  /** which quantile definition both twins compute. Omitted = "interpolated". */
+  quantileDefinition?: QuantileDefinition;
+}
+
+/**
+ * QUARTILES, and why this stopped being a refusal.
+ *
+ * Cost is right-skewed enough that a mean alone is close to uninformative, and
+ * a median with an IQR appears in nearly every published cost table. This tool
+ * refused quantiles on the grounds that SAS `PROC UNIVARIATE` PCTLDEF and SQL
+ * `PERCENTILE_CONT` are different estimators and no SAS runs in CI to arbitrate
+ * between them.
+ *
+ * That reasoning was sound about the risk and wrong about the remedy. The twins
+ * disagreeing is a real hazard, but the fix is to REMOVE THE CHOICE rather than
+ * remove the statistic: name one definition, emit it explicitly in both
+ * languages, and stamp which one is in force. Refusing a statistic that appears
+ * in most cost papers because one SAS default disagrees reads as brittleness
+ * rather than rigour, and it pushed analysts back to hand-written SAS for the
+ * single most common row in their own table.
+ *
+ *   - "interpolated" pairs SQL PERCENTILE_CONT with SAS PCTLDEF=5. THESE ARE
+ *     NOT THE SAME ESTIMATOR, and an earlier version of this comment said they
+ *     were. PERCENTILE_CONT interpolates at 1+(n-1)p (Hyndman-Fan type 7);
+ *     PCTLDEF=5 averages the two neighbouring order statistics when n*p is a
+ *     whole number and takes the ceiling otherwise (type 2). They agree at
+ *     p = 0.5 for EVERY n, which is why a median is safe to pair. At Q1 and Q3
+ *     they agree only when n*p is not a whole number. The gap is bounded by the
+ *     distance between two adjacent order statistics and is usually small, but
+ *     it is real, and the emitted programs say so rather than implying an
+ *     equivalence that does not hold.
+ *   - "nearest_rank" pairs PERCENTILE_DISC with PCTLDEF=3, and those DO agree
+ *     exactly at every probability. It always returns an observed value, which
+ *     some journals prefer for cost because it is a dollar amount somebody was
+ *     actually billed. Choose it when exact twin agreement on quartiles matters
+ *     more than interpolation.
+ *
+ * Both twins compute the DECLARED one. The parity fingerprint scrapes it from
+ * each language's own emitted text, so a twin quietly using its default is a
+ * failing check rather than a silent disagreement.
+ */
+export type QuantileDefinition = "interpolated" | "nearest_rank";
+
+/**
+ * ALL-CAUSE VERSUS DISEASE-RELATED, the most contested single choice in claims
+ * cost work.
+ *
+ * Nearly every payer-facing cost paper reports both columns, and the
+ * attribution rule decides which conditions rank as expensive. There is no
+ * neutral default: primary-position-only is conservative and misses claims
+ * where the condition is a genuine driver in a secondary slot; any-position is
+ * generous and picks up claims the condition merely accompanies. Published
+ * comparisons show the two produce materially different rankings on the same
+ * data.
+ *
+ * So the analyst DECLARES it and the program stamps it, rather than a default
+ * quietly deciding the finding.
+ */
+export type CostAttribution =
+  | { kind: "all_cause" }
+  | {
+      kind: "disease_related";
+      /** which diagnosis slots count as attributing the claim to the condition */
+      dxPosition: "primary_only" | "any_position";
+      /** the condition's diagnosis code list */
+      codeListId: string;
+      /** optional condition-specific procedures and drugs, which attribute a
+       *  claim even when no qualifying diagnosis appears on it (an infusion
+       *  administration line often carries no diagnosis at all) */
+      procedureCodeListId?: string;
+      drugCodeListId?: string;
+    };
+
+/**
+ * THE DENOMINATOR, and why the obvious one is wrong.
+ *
+ * PPPM exists precisely to standardize UNEQUAL follow-up. Dividing by the
+ * declared window length is only correct when every subject is observed for the
+ * whole window, and in the studies this tool is built for they are not: an
+ * oncology line-of-therapy analysis censors at next-line initiation,
+ * disenrollment or data end, so unequal follow-up is guaranteed by the design.
+ * A "PPPM" computed on a fixed window is a per-window average wearing a PPPM
+ * label, and it is understated for exactly the patients who left early.
+ *
+ * `observed_member_months` builds the denominator from eligible member-months
+ * in the enrollment detail, which is what the label has always meant.
+ */
+export type CostNormalization =
+  | { kind: "fixed_window" }
+  | {
+      kind: "observed_member_months";
+      /** report per month or per year */
+      per: "month" | "year";
+      /** drop months under capitated coverage, where a paid amount does not
+       *  represent the cost of care. Default true. */
+      excludeCapitated?: boolean;
+    };
+
+export const DEFAULT_NORMALIZATION: CostNormalization = { kind: "fixed_window" };
+
+/**
+ * Dollars from different years are different units.
+ *
+ * A study spanning 2016 to 2023 that adds them untouched is summing quantities
+ * measured on a moving scale. The convention is the CPI medical-care component,
+ * restated to a declared dollar year, and the index vintage matters enough that
+ * it is stamped: CPI series are revised, so two runs a year apart can produce
+ * different numbers from identical claims.
+ */
+export interface CostInflation {
+  /** the dollar year everything is restated to */
+  targetYear: number;
+  /** index values by calendar year. Supplied by the analyst rather than
+   *  embedded, because a hard-coded CPI table silently ages. */
+  indexByYear: Record<number, number>;
+  /** which series, for the stamp and the methods section */
+  seriesLabel: string;
 }
 
 /* ----- Survival / time-to-event ----- */
@@ -1388,6 +1514,49 @@ export function validateAnalyses(spec: StudySpec): string[] {
           problems.push(
             `${w}: an unbounded resource-use window cannot be costed — the per-patient denominator is the observed days INSIDE the window, and "anytime" has no length. Give the window explicit day bounds.`
           );
+
+        /* DISEASE-RELATED ATTRIBUTION. Every code list it names has to exist,
+         * because an attribution rule pointing at a missing list would quietly
+         * attribute NOTHING and report a disease-related cost of zero, which
+         * looks like a finding rather than a broken reference. */
+        if (a.attribution?.kind === "disease_related") {
+          const at = a.attribution;
+          requireCodeList(at.codeListId, `${w} attribution`);
+          if (at.procedureCodeListId) requireCodeList(at.procedureCodeListId, `${w} attribution procedures`);
+          if (at.drugCodeListId) requireCodeList(at.drugCodeListId, `${w} attribution drugs`);
+        }
+
+        /* PPPM OVER MEMBER-MONTHS needs enrollment to be observable across the
+         * window. With no follow-up requirement the denominator is whatever
+         * coverage happens to exist, which is the very unequal-follow-up
+         * problem PPPM is supposed to solve. */
+        if (a.normalization?.kind === "observed_member_months" && spec.enrollment.followupDays <= 0) {
+          problems.push(
+            `${w}: normalization is per observed member-month, but enrollment.followupDays is ${spec.enrollment.followupDays}, so no follow-up is required at all. The denominator would be whatever coverage each member happens to have, which is the unequal-follow-up problem PPPM exists to correct rather than a fix for it.`,
+          );
+        }
+
+        /* CPI ADJUSTMENT. A missing index year is the dangerous case: the
+         * claim silently falls out of the sum, or worse gets treated as 1.0 and
+         * enters unadjusted alongside adjusted dollars. */
+        if (a.inflation) {
+          const inf = a.inflation;
+          if (!(inf.targetYear > 1900)) problems.push(`${w}: inflation.targetYear ${inf.targetYear} is not a calendar year.`);
+          if (inf.indexByYear[inf.targetYear] === undefined)
+            problems.push(`${w}: inflation.indexByYear has no entry for the target year ${inf.targetYear}, so there is nothing to restate TO.`);
+          const sy = Number(spec.meta.studyPeriod.start.slice(0, 4));
+          const ey = Number(spec.meta.studyPeriod.end.slice(0, 4));
+          const missing: number[] = [];
+          for (let y = sy; y <= ey; y++) if (inf.indexByYear[y] === undefined) missing.push(y);
+          if (missing.length > 0)
+            problems.push(
+              `${w}: inflation.indexByYear is missing ${missing.join(", ")}, which the study period covers. A claim in a year with no index cannot be restated, and mixing restated and nominal dollars in one total is worse than leaving them all nominal.`,
+            );
+          for (const [y, v] of Object.entries(inf.indexByYear))
+            if (!(v > 0)) problems.push(`${w}: inflation index for ${y} is ${v} — an index must be > 0.`);
+          if (!inf.seriesLabel.trim())
+            problems.push(`${w}: inflation.seriesLabel is empty. CPI series are revised, so the vintage is part of the result and gets stamped.`);
+        }
         break;
       }
       case "comorbidity_index": {

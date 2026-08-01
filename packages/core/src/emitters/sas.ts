@@ -1679,10 +1679,13 @@ export const emitSas: SasEmitter = (spec: StudySpec, opts: EmitOptions): Generat
     const suffix = multi ? `_${sasName(an.id).toLowerCase()}` : "";
     files.push(mod.sas(ctx, an as never, num, suffix));
     lastIdx = i;
+    const extras = mod.suppressionExtras?.(an as never);
     suppressTargets.push({
       table: ctx.tbl(`${num}_${mod.resultSlug}${suffix}`),
       shapeKey: mod.stampKind,
       label: `${an.label} (${an.kind})`,
+      ...(extras?.maskCols.length ? { extraMaskCols: extras.maskCols } : {}),
+      ...(extras?.keepCols.length ? { extraKeepCols: extras.keepCols } : {}),
     });
   });
 

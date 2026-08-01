@@ -28,6 +28,7 @@ import { GOLD_D_SPEC, GOLD_D_OPTS } from "./fixture-d";
 import { GOLD_E_SPEC, GOLD_E_OPTS } from "./fixture-e";
 import { GOLD_F_SPEC, GOLD_F_OPTS } from "./fixture-f";
 import { GOLD_G_SPEC, GOLD_G_OPTS } from "./fixture-g";
+import { GOLD_H_SPEC, GOLD_H_OPTS } from "./fixture-h";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BASELINE = join(HERE, "snapshot.baseline.json");
@@ -40,6 +41,7 @@ const CASES: Array<{ name: string; spec: StudySpec; opts: EmitOptions }> = [
   { name: "E", spec: GOLD_E_SPEC, opts: GOLD_E_OPTS },
   { name: "F", spec: GOLD_F_SPEC, opts: GOLD_F_OPTS },
   { name: "G", spec: GOLD_G_SPEC, opts: GOLD_G_OPTS },
+  { name: "H", spec: GOLD_H_SPEC, opts: GOLD_H_OPTS },
 ];
 
 const sha = (s: string) => createHash("sha256").update(s, "utf8").digest("hex").slice(0, 16);

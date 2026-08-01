@@ -48,7 +48,14 @@ CREATE TABLE ccaei_all (
   enrolid BIGINT, admdate DATE, disdate DATE, dxver VARCHAR, pdx VARCHAR,
   dx1 VARCHAR, dx2 VARCHAR, dx3 VARCHAR, dx4 VARCHAR, dx5 VARCHAR, dx6 VARCHAR,
   dx7 VARCHAR, dx8 VARCHAR, dx9 VARCHAR, dx10 VARCHAR, dx11 VARCHAR, dx12 VARCHAR,
-  dx13 VARCHAR, dx14 VARCHAR, dx15 VARCHAR, pproc VARCHAR, proc1 VARCHAR,
+  dx13 VARCHAR, dx14 VARCHAR, dx15 VARCHAR, pproc VARCHAR,
+  /* PROC1..PROC15, the full set data/marketscan.ts declares for this family.
+     Anything scanning procedure position (a code-list pull, or disease-related
+     attribution) emits a reference to every one of them, so a fixture carrying
+     only PROC1 would fail at execution rather than at review. */
+  proc1 VARCHAR, proc2 VARCHAR, proc3 VARCHAR, proc4 VARCHAR, proc5 VARCHAR,
+  proc6 VARCHAR, proc7 VARCHAR, proc8 VARCHAR, proc9 VARCHAR, proc10 VARCHAR,
+  proc11 VARCHAR, proc12 VARCHAR, proc13 VARCHAR, proc14 VARCHAR, proc15 VARCHAR,
   caseid BIGINT, los INT, paytot NUMERIC, netpay NUMERIC
 );
 DROP TABLE IF EXISTS ccaed_all;

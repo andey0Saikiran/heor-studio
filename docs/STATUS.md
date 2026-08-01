@@ -202,11 +202,17 @@ Both are in the fixture, the second labelled as the failure to detect. The
 mirror-image error — dropping service lines that have no admission record —
 loses whole stays; P05 is that case and is kept.
 
-**Median yes, quartiles no, and the reason is a proof:** SQL's
-`PERCENTILE_CONT(0.5)` and SAS's `PCTLDEF=5` agree exactly for every n (n even →
-both average the two central order statistics; n odd → both take the central
-one). Away from p=0.5 they genuinely differ, so no quartile is emitted by either
-twin, and `PCTLDEF=5` is written out rather than left to a site default.
+**Quantiles: one declared definition, written out in both languages.** This was
+refused ("median yes, quartiles no") because SQL's `PERCENTILE_CONT` and SAS's
+`PCTLDEF=5` are different estimators away from p=0.5. The hazard was real; the
+remedy was to remove the CHOICE rather than the statistic. `quantileDefinition`
+names one — `PERCENTILE_CONT`/`PCTLDEF=5` for `interpolated`,
+`PERCENTILE_DISC`/`PCTLDEF=3` for `nearest_rank` — both twins emit it
+explicitly, and the parity fingerprint scrapes it from each language's own text.
+The residual is stated rather than hidden: the interpolated pairing agrees
+exactly at the median for every n and away from it only where n×p is not a whole
+number; the nearest-rank pairing is the same estimator at every probability.
+Gold Case H pins both, on a distribution where they disagree by $525.
 
 Every executed number matched a hand derivation done *before* the module ran: 19
 encounters over 10 members, $18,600 total, mean $1,860 vs median $350.

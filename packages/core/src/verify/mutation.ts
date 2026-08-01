@@ -36,6 +36,7 @@ import { sasStructureChecks } from "./sas-lint";
 import { GOLD_A_SPEC, GOLD_A_OPTS } from "./fixture";
 import { GOLD_F_SPEC, GOLD_F_OPTS } from "./fixture-f";
 import { GOLD_G_SPEC, GOLD_G_OPTS } from "./fixture-g";
+import { GOLD_H_SPEC, GOLD_H_OPTS } from "./fixture-h";
 import type { StudySpec } from "../spec/types";
 import type { Check } from "./run";
 
@@ -54,6 +55,16 @@ interface Mutation {
    *  whose path matches. Without this every mutation lands on the first one and
    *  a pattern meant for the second reads as vacuous. */
   pathMatch?: RegExp;
+  /**
+   * Pin the gold spec whose emission to corrupt.
+   *
+   * The runner otherwise takes the FIRST source that emits the kind, which for
+   * resource_use is Gold A — a program with none of the optional economics
+   * declared. A mutation of the CPI factor would then find nothing to replace
+   * and read as vacuous rather than as a test. Naming the fixture says which
+   * emission the corruption is about.
+   */
+  source?: "A" | "F" | "G" | "H";
   /**
    * Set when the mutation is DELIBERATELY not idempotent, with the reason.
    *
@@ -337,19 +348,126 @@ const MUTATIONS: Mutation[] = [
     apply: (t) => t.replace(/put\(r\.svcdate, yymmdd10\.\) \|\| ':' \|\| strip\(r\.ndcnum\)/, "put(r.svcdate, yymmdd10.)"),
   },
   {
-    /* A quartile looks harmless and is not: PERCENTILE_CONT and PCTLDEF=5 agree
-     * ONLY at p = 0.5. Adding one produces a number the SAS twin cannot
-     * reproduce, and nothing else in the suite would notice. */
-    name: "SQL adds a quartile beside the median (an estimator SAS cannot reproduce)",
-    kind: "resource_use", lang: "sql",
+    /* A quantile the spec never asked for. On a program with reportQuantiles
+     * OFF, the median is the only figure either twin may take, so a quartile
+     * appearing beside it is a number the analyst did not declare and the SAS
+     * twin does not compute. */
+    name: "SQL adds an undeclared quartile beside the median",
+    kind: "resource_use", lang: "sql", source: "A",
     apply: (t) => t.replace(/PERCENTILE_CONT\(0\.5\) WITHIN GROUP \(ORDER BY CAST\(paid AS DOUBLE PRECISION\)\) AS paid_median/,
       "PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY CAST(paid AS DOUBLE PRECISION)) AS paid_median"),
   },
   {
     // Leaving PCTLDEF implicit makes the median depend on a site option.
     name: "SAS leaves PCTLDEF to the site default (median silently becomes site-dependent)",
-    kind: "resource_use", lang: "sas",
+    kind: "resource_use", lang: "sas", source: "A",
     apply: (t) => t.replace(/ pctldef=5/, ""),
+  },
+
+  /* ---- THE ECONOMICS LAYER (Gold Case H) -----------------------------------
+   * Every corruption below leaves a program that runs and prints a complete,
+   * plausible cost table. None of them can be found by looking at the output:
+   * a disease-related total that quietly equals the all-cause one, a PPPM over
+   * the wrong denominator, a CPI factor of 1.0 and a flipped quantile
+   * definition all produce dollar figures of the right magnitude and the wrong
+   * meaning. They are pinned to Gold H because Gold A declares none of these
+   * options, and a mutation with nothing to match is not a test. */
+  {
+    /* ATTRIBUTION FALLING BACK TO ALL-CAUSE. Drop the dr filter from the
+     * disease-related sum and the two columns become the same number — which
+     * looks like a study where everything is disease-related rather than like
+     * a broken predicate. */
+    name: "SQL disease-related cost silently sums EVERY payment (attribution falls back to all-cause)",
+    kind: "resource_use", lang: "sql", source: "H",
+    apply: (t) => t.replace(/SUM\(CASE WHEN dr = 1 THEN paid ELSE 0 END\) AS dr_paid,/g, "SUM(paid) AS dr_paid,"),
+  },
+  {
+    name: "SAS disease-related cost silently sums EVERY payment",
+    kind: "resource_use", lang: "sas", source: "H",
+    apply: (t) => t.replace(/sum\(case when dr = 1 then paid else 0 end\) as dr_paid,/g, "sum(paid) as dr_paid,"),
+  },
+  {
+    /* THE DIAGNOSIS SLOT, shifted. The outpatient family has no principal
+     * column, so "primary" means DX1; reading DX2 instead attributes exactly
+     * the claims the declared rule excludes and excludes the ones it counts.
+     * The label still says primary_only. On Gold H this is the difference
+     * between $20,250 and a number built from the wrong claim. */
+    name: "SAS attribution reads a SECONDARY outpatient slot while still labelled primary_only",
+    kind: "resource_use", lang: "sas", source: "H",
+    apply: (t) => t.replace(/o\.dx1 in \(/g, "o.dx2 in ("),
+  },
+  {
+    /* THE PPPM DENOMINATOR REVERTING TO THE FIXED WINDOW. observed_days is the
+     * stitched-episode figure — the very quantity CostNormalization exists to
+     * replace. On Gold H it turns $200.00 into $172.73 and nothing about the
+     * table looks wrong. */
+    name: "SQL PPPM divides by the fixed-window observed days instead of eligible member-time",
+    kind: "resource_use", lang: "sql", source: "H",
+    apply: (t) => t.replace(/s\.paid_elig \* 30\.0 \/ NULLIF\(s\.eligible_days, 0\)/g,
+      "s.paid_elig * 30.0 / NULLIF(s.observed_days, 0)"),
+  },
+  {
+    name: "SAS PPPM divides by the fixed-window observed days instead of eligible member-time",
+    kind: "resource_use", lang: "sas", source: "H",
+    apply: (t) => t.replace(/= round\(paid_elig \* 30\.0 \/ eligible_days, 0\.01\)/g,
+      "= round(paid_elig * 30.0 / observed_days, 0.01)"),
+  },
+  {
+    /* THE MEMBER-MONTH SOURCE. Reading the STITCHED episodes instead of the
+     * enrollment segments puts every bridged gap back into the denominator —
+     * months in which nobody was covered — and silently ignores capitation. */
+    name: "SQL member-months read the stitched episodes, so bridged gaps re-enter the denominator",
+    kind: "resource_use", lang: "sql", source: "H",
+    apply: (t) => t.replace(/JOIN ccaet_all e ON e\.enrolid = c\.enrolid/g,
+      "JOIN tz_h_enroll_episodes e ON e.enrolid = c.enrolid"),
+  },
+  {
+    /* THE CPI FACTOR BECOMING 1.0. Every claim then enters in the dollars of
+     * its own service year while the program still prints "2021 dollars". */
+    name: "SQL CPI restatement becomes a no-op (every factor 1.0, label unchanged)",
+    kind: "resource_use", lang: "sql", source: "H",
+    apply: (t) => t.replace(/WHEN (\d{4}) THEN [\d.]+/g, "WHEN $1 THEN 1.00000000"),
+  },
+  {
+    name: "SAS CPI restatement becomes a no-op (every factor 1.0, label unchanged)",
+    kind: "resource_use", lang: "sas", source: "H",
+    apply: (t) => t.replace(/when (\d{4}) then [\d.]+/g, "when $1 then 1.00000000"),
+  },
+  {
+    /* A MISSING INDEX YEAR TREATED AS 1.0 rather than as missing: the claim
+     * enters unadjusted, beside adjusted dollars, and nothing counts it. */
+    name: "SQL restates a claim with no index year at 1.0 instead of leaving it NULL",
+    kind: "resource_use", lang: "sql", source: "H",
+    apply: (t) => t.replace(/ELSE NULL END AS paid/g, "ELSE 1.00000000 END AS paid"),
+  },
+  {
+    /* THE QUANTILE DEFINITION FLIPPED. Both twins still compute a median; they
+     * compute DIFFERENT medians, and on Gold H the answer moves from $1,575 to
+     * $1,050 while the emitted label still reads "interpolated". */
+    name: "SQL quantiles flip from the declared interpolated definition to nearest-rank",
+    kind: "resource_use", lang: "sql", source: "H",
+    apply: (t) => t.replace(/PERCENTILE_CONT\(/g, "PERCENTILE_DISC("),
+  },
+  {
+    name: "SAS quantiles flip from the declared interpolated definition to nearest-rank (PCTLDEF=3)",
+    kind: "resource_use", lang: "sas", source: "H",
+    apply: (t) => t.replace(/pctldef=5/g, "pctldef=3"),
+  },
+  {
+    /* CAPITATED MONTHS BACK IN THE NUMERATOR while the denominator still drops
+     * them: real dollars over fewer months, so PPPM rises for a reason that has
+     * nothing to do with the cohort. */
+    name: "SQL PPPM numerator stops excluding claims from capitated months",
+    kind: "resource_use", lang: "sql", source: "H",
+    apply: (t) => t.replace(/SUM\(CASE WHEN elig = 1 THEN paid ELSE 0 END\) AS paid_elig,/g, "SUM(paid) AS paid_elig,"),
+  },
+  {
+    /* THE CAPITATED PLAN LIST, emptied. Capitated months quietly rejoin the
+     * denominator and the PPPM falls, with the program still saying they were
+     * excluded. */
+    name: "SAS capitated plan-type list loses POS-with-capitation (7)",
+    kind: "resource_use", lang: "sas", source: "H",
+    apply: (t) => t.replace(/not in \('4', '7'\)/g, "not in ('4')"),
   },
   {
     /* The hierarchy stops applying: severe forms ADD to their milder forms
@@ -1089,12 +1207,14 @@ export function mutationChecks(): Check[] {
    * resolves against the FIRST gold spec that emits its kind in both languages,
    * exactly as verify/coverage.ts does. */
   const SOURCES = [
-    { spec: GOLD_A_SPEC, opts: GOLD_A_OPTS },
-    { spec: GOLD_F_SPEC, opts: GOLD_F_OPTS },
-    { spec: GOLD_G_SPEC, opts: GOLD_G_OPTS },
-  ].map(({ spec, opts }) => {
+    { name: "A", spec: GOLD_A_SPEC, opts: GOLD_A_OPTS },
+    { name: "F", spec: GOLD_F_SPEC, opts: GOLD_F_OPTS },
+    { name: "G", spec: GOLD_G_SPEC, opts: GOLD_G_OPTS },
+    { name: "H", spec: GOLD_H_SPEC, opts: GOLD_H_OPTS },
+  ].map(({ name, spec, opts }) => {
     const sas = emitSas(spec, opts);
     return {
+      name,
       sql: emitSql(spec, "postgres", opts),
       sas,
       setup: sas.find((f) => /setup/i.test(f.path))?.content ?? "",
@@ -1102,12 +1222,13 @@ export function mutationChecks(): Check[] {
   });
 
   for (const m of MUTATIONS) {
+    const pool = m.source ? SOURCES.filter((s) => s.name === m.source) : SOURCES;
     const src =
-      SOURCES.find(
+      pool.find(
         (s) =>
           (m.pathMatch ? programsByKind(s.sql, m.pathMatch) : programsByKind(s.sql)).get(m.kind) &&
           (m.pathMatch ? programsByKind(s.sas, m.pathMatch) : programsByKind(s.sas)).get(m.kind),
-      ) ?? SOURCES[0];
+      ) ?? pool[0] ?? SOURCES[0];
     const setup = src.setup;
     const sqlProg = (m.pathMatch ? programsByKind(src.sql, m.pathMatch) : programsByKind(src.sql)).get(m.kind);
     const sasProg = (m.pathMatch ? programsByKind(src.sas, m.pathMatch) : programsByKind(src.sas)).get(m.kind);

@@ -164,13 +164,12 @@ with the reason attached to the refusal.
 | **Optimal matching** | An assignment problem — needs the Hungarian algorithm or min-cost flow, neither expressible in warehouse SQL, and its ties need a rule the method does not specify. |
 | **Bootstrap confidence intervals** | Need an RNG, which breaks byte-stable emission outright. |
 | **Gray's test** | Closed form, but a *different and more intricate statistic* than the log-rank. A close-enough version would be a mislabeled test rather than a rounding error. |
-| **Quantile parity** | `PROC UNIVARIATE` PCTLDEF and SQL `PERCENTILE_CONT` are different estimators, and no SAS runs in CI to arbitrate. |
 | **Runtime data-dependent test routing** | A SAS `%IF` on a Shapiro-Wilk p-value has no SQL counterpart; the twins would silently disagree about which test ran. |
 | **Continuous covariates in the causal family** | The propensity score is closed form *only* because a logistic model over categorical cells is saturated. One continuous covariate and the score stops being the MLE — every weight downstream would be a wrong number rather than a missing one. |
 
 ### Corrected refusals
 
-Two entries were refused and later found to be wrong, and are recorded here
+Three entries were refused and later found to be wrong, and are recorded here
 because the reasoning matters more than the verdict:
 
 - **Negative binomial** was refused twice on the grounds that a dispersion
@@ -180,9 +179,25 @@ because the reasoning matters more than the verdict:
   reason." It is not a different statistic — it is a Cox model over a different
   risk set, and takes exactly the Cox carve-out.
 
-The rule those two produced: **"needs Newton" is never on its own a reason to
-refuse a model. It is a reason to carve out the coefficient and execute
-everything around it.**
+- **Quantile parity** was refused on the grounds that `PROC UNIVARIATE` PCTLDEF
+  and SQL `PERCENTILE_CONT` are different estimators with no SAS in CI to
+  arbitrate. The hazard was real and the remedy was wrong: the fix is to remove
+  the CHOICE, not the statistic. `quantileDefinition` now names one definition,
+  both twins emit it explicitly — `PERCENTILE_CONT`/`PCTLDEF=5` for
+  "interpolated", `PERCENTILE_DISC`/`PCTLDEF=3` for "nearest_rank" — and the
+  parity fingerprint scrapes it from each language's own text, so a twin using
+  its default is a failing check rather than a silent disagreement. What remains
+  is stated in an always-emitted method note rather than hidden: the
+  interpolated pairing agrees exactly at the median for every n and away from it
+  only where n×p is not a whole number; the nearest-rank pairing is the same
+  estimator at every probability. Refusing the single most common row in a cost
+  table over a bounded, statable gap read as brittleness rather than rigour, and
+  it pushed analysts back to hand-written SAS.
+
+The rule those three produced: **"the twins might disagree" is a reason to
+remove the choice and stamp the one that remains, not to remove the statistic.
+"Needs Newton" is never on its own a reason to refuse a model — it is a reason
+to carve out the coefficient and execute everything around it.**
 
 ---
 

@@ -21,6 +21,7 @@ import { GOLD_D_SPEC, GOLD_D_OPTS, EXPECTED_D, fixtureDSeedSql } from "./fixture
 import { GOLD_E_SPEC, GOLD_E_OPTS, EXPECTED_E, fixtureESeedSql } from "./fixture-e";
 import { GOLD_F_SPEC, GOLD_F_OPTS, EXPECTED_F, fixtureFSeedSql } from "./fixture-f";
 import { GOLD_G_SPEC, GOLD_G_OPTS, EXPECTED_G, fixtureGSeedSql } from "./fixture-g";
+import { GOLD_H_SPEC, GOLD_H_OPTS, EXPECTED_H, fixtureHSeedSql } from "./fixture-h";
 import { EMITTABLE_ANALYSIS_KINDS } from "../spec/types";
 import type { StudySpec, EmitOptions } from "../index";
 
@@ -994,6 +995,257 @@ export async function verifyGoldG(): Promise<Check[]> {
 
   out.push(...sasSqlParityChecks(GOLD_G_SPEC, GOLD_G_OPTS));
   out.push(...sasStructureChecks(emitSas(GOLD_G_SPEC, GOLD_G_OPTS)));
+  return out;
+}
+
+/**
+ * Gold Case H — the economics layer, executed.
+ *
+ * Four options that each move a cost figure without changing the shape of the
+ * table, checked against a derivation written down before the module ran (see
+ * fixture-h.ts). The controls matter as much as the values: every option is
+ * re-emitted with its choice FLIPPED and the resulting number asserted, because
+ * a figure that stays put when the declared rule changes is not being computed
+ * from the rule at all.
+ */
+export async function verifyGoldH(): Promise<Check[]> {
+  const { db, ok, steps } = await seedAndRun(GOLD_H_SPEC, GOLD_H_OPTS, fixtureHSeedSql());
+  const out: Check[] = [];
+  if (!ok) {
+    return [{
+      name: "Gold Case H executes",
+      status: "fail",
+      detail: steps.filter((x) => !x.ok).map((x) => `${x.path}: ${x.error}`).join(" | "),
+    }];
+  }
+  const eq = (name: string, got: number | null | undefined, want: number) =>
+    out.push({ name, status: Number(got) === want ? "pass" : "fail", detail: `expected ${want}, got ${got}` });
+  const approx = (name: string, got: number, want: number, tol: number) =>
+    out.push({ name, status: Math.abs(got - want) <= tol ? "pass" : "fail", detail: `expected ${want}±${tol}, got ${got}` });
+  const push = (name: string, cond: boolean, detail: string) =>
+    out.push({ name, status: cond ? "pass" : "fail", detail });
+
+  eq("H: cohort N = 6", await scalar<number>(db, "SELECT count(*)::int FROM tz_h_cohort"), EXPECTED_H.cohortN);
+
+  type Row = Record<string, number | string | null>;
+  const row = async (setting: string): Promise<Row | undefined> =>
+    (
+      await rows<Row>(
+        db,
+        `SELECT users, denominator, encounters, enc_per_patient::float8, enc_sd::float8, enc_median::float8,
+                enc_max, observed_days, paid_total::float8, paid_per_patient::float8, paid_sd::float8,
+                paid_median::float8, paid_q1::float8, paid_q3::float8, paid_iqr::float8, paid_max::float8,
+                paid_total_nominal::float8, enc_not_restated, paid_per_person_year::float8,
+                dr_users, dr_encounters, dr_paid_total::float8, dr_paid_share_pct::float8,
+                eligible_days, member_months::float8, paid_in_eligible_months::float8,
+                enc_excluded_months, paid_per_member_month::float8, dr_paid_per_member_month::float8,
+                quantile_definition, dx_position, cost_basis, denominator_basis
+           FROM tz_h_hcru WHERE setting = '${setting}'`,
+      )
+    )[0];
+
+  /* ---- the ledger, all-cause and disease-related side by side ---- */
+  for (const [setting, want] of Object.entries(EXPECTED_H.bySetting)) {
+    const r = await row(setting);
+    if (!r) {
+      out.push({ name: `H hcru ${setting}`, status: "fail", detail: "row missing" });
+      continue;
+    }
+    const tag = `H hcru ${setting}`;
+    eq(`${tag}: users = ${want.users}`, Number(r.users), want.users);
+    eq(`${tag}: encounters = ${want.encounters}`, Number(r.encounters), want.encounters);
+    approx(`${tag}: restated cost = ${want.paid}`, Number(r.paid_total), want.paid, 0.01);
+    approx(`${tag}: NOMINAL cost = ${want.nominal} (the restatement is visible beside it)`, Number(r.paid_total_nominal), want.nominal, 0.01);
+    eq(`${tag}: disease-related users = ${want.drUsers}`, Number(r.dr_users), want.drUsers);
+    eq(`${tag}: disease-related encounters = ${want.drEnc}`, Number(r.dr_encounters), want.drEnc);
+    approx(`${tag}: disease-related cost = ${want.drPaid}`, Number(r.dr_paid_total), want.drPaid, 0.01);
+    eq(`${tag}: denominator = whole cohort (6)`, Number(r.denominator), EXPECTED_H.cohortN);
+  }
+
+  const all = (await row("ALL"))!;
+
+  /* The inpatient double count, in this fixture too: the admission total is
+   * taken and its own two service lines are dropped. */
+  push(
+    "H: inpatient cost takes the ADMISSION total, not admission + its own service lines",
+    Math.abs(Number((await row("IP"))!.paid_total) - EXPECTED_H.bySetting.IP.paid) < 0.01,
+    `$${Number((await row("IP"))!.paid_total).toLocaleString()}; a double-counting ledger would report $${EXPECTED_H.ipDoubleCountWouldBe.toLocaleString()}`,
+  );
+
+  /* ---- the distribution ---- */
+  approx("H: mean cost per member = 22800/6 = 3800", Number(all.paid_per_patient), EXPECTED_H.paidMean, 0.01);
+  approx("H: cost SD = sqrt(39,327,000) = 6271.12", Number(all.paid_sd), EXPECTED_H.paidSd, 0.01);
+  approx("H: encounters per member = 7/6", Number(all.enc_per_patient), EXPECTED_H.encMean, 0.00001);
+  approx("H: encounter SD = sqrt(17/30)", Number(all.enc_sd), EXPECTED_H.encSd, 0.00001);
+  eq("H: encounter median = 1", Number(all.enc_median), EXPECTED_H.encMedian);
+  eq("H: max encounters for one member = 2", Number(all.enc_max), EXPECTED_H.encMax);
+  approx("H: max cost for one member = 16500", Number(all.paid_max), 16500, 0.01);
+
+  /* ---- QUANTILES, and the definition that decides the median ---- */
+  approx("H: Q1 = 1050", Number(all.paid_q1), EXPECTED_H.quantiles.q1, 0.01);
+  approx("H: Q3 = 2100", Number(all.paid_q3), EXPECTED_H.quantiles.q3, 0.01);
+  approx("H: IQR = Q3 - Q1 = 1050", Number(all.paid_iqr), EXPECTED_H.quantiles.iqr, 0.01);
+  approx(
+    "H: median = 1575 under the DECLARED interpolated definition ((x3+x4)/2)",
+    Number(all.paid_median),
+    EXPECTED_H.quantiles.medianInterpolated,
+    0.01,
+  );
+  push("H: and the emitted table SAYS which definition produced it", all.quantile_definition === "interpolated",
+    `quantile_definition = "${all.quantile_definition}"`);
+
+  /* THE CONTROL. The same six patients under nearest_rank. If the median did
+   * not move, the declaration is not reaching the estimator. */
+  {
+    const spec: StudySpec = JSON.parse(JSON.stringify(GOLD_H_SPEC));
+    const an = spec.analyses.find((a) => a.kind === "resource_use");
+    if (an && an.kind === "resource_use") an.quantileDefinition = "nearest_rank";
+    const v = await seedAndRun(spec, GOLD_H_OPTS, fixtureHSeedSql());
+    const med = v.ok ? await scalar<number>(v.db, "SELECT paid_median::float8 FROM tz_h_hcru WHERE setting='ALL'") : undefined;
+    const q1 = v.ok ? await scalar<number>(v.db, "SELECT paid_q1::float8 FROM tz_h_hcru WHERE setting='ALL'") : undefined;
+    approx(
+      "H control: nearest_rank moves the median to 1050 — a value somebody was actually billed",
+      Number(med),
+      EXPECTED_H.quantiles.medianNearestRank,
+      0.01,
+    );
+    /* Q1 and Q3 must NOT move: the fixture is built so both definitions agree
+     * there, which is also the only arrangement in which PCTLDEF=5 and
+     * PERCENTILE_CONT are provably equal away from the median. */
+    approx("H control: Q1 does NOT move — the two definitions agree there by construction", Number(q1), EXPECTED_H.quantiles.q1, 0.01);
+  }
+
+  /* ---- ATTRIBUTION ---- */
+  approx("H: disease-related share of all-cause cost = 88.82%", Number(all.dr_paid_share_pct), EXPECTED_H.drSharePct, 0.01);
+  push("H: the emitted table SAYS which diagnosis position produced it", all.dx_position === "primary_only",
+    `dx_position = "${all.dx_position}"`);
+  push(
+    "H: the all-cause and disease-related columns are BOTH present, so the difference is readable",
+    Number(all.paid_total) === EXPECTED_H.bySetting.ALL.paid && Number(all.dr_paid_total) === EXPECTED_H.bySetting.ALL.drPaid,
+    `all-cause $${all.paid_total} vs disease-related $${all.dr_paid_total}; the difference, $2,550, is P6's secondary-slot claim plus P4's unrelated visit`,
+  );
+  {
+    const spec: StudySpec = JSON.parse(JSON.stringify(GOLD_H_SPEC));
+    const an = spec.analyses.find((a) => a.kind === "resource_use");
+    if (an && an.kind === "resource_use" && an.attribution?.kind === "disease_related")
+      an.attribution.dxPosition = "any_position";
+    const v = await seedAndRun(spec, GOLD_H_OPTS, fixtureHSeedSql());
+    const dr = v.ok ? await scalar<number>(v.db, "SELECT dr_paid_total::float8 FROM tz_h_hcru WHERE setting='ALL'") : undefined;
+    approx(
+      "H control: any_position adds P6's SECONDARY-slot claim and nothing else (20250 -> 21300)",
+      Number(dr),
+      EXPECTED_H.drPaidAnyPosition,
+      0.01,
+    );
+    push(
+      "H control: the position rule alone moves the disease-related total by exactly $1,050",
+      Math.abs(Number(dr) - EXPECTED_H.bySetting.ALL.drPaid - EXPECTED_H.drPaidDelta) < 0.01,
+      `difference ${Number(dr) - EXPECTED_H.bySetting.ALL.drPaid}, expected ${EXPECTED_H.drPaidDelta}`,
+    );
+  }
+
+  /* ---- THE DENOMINATOR ---- */
+  eq(`H: observed days (stitched episodes) = ${EXPECTED_H.observedDays}`, Number(all.observed_days), EXPECTED_H.observedDays);
+  eq(`H: ELIGIBLE days (segments, capitated dropped) = ${EXPECTED_H.eligibleDays}`, Number(all.eligible_days), EXPECTED_H.eligibleDays);
+  approx(`H: member-months = 3420/30 = ${EXPECTED_H.memberMonths}`, Number(all.member_months), EXPECTED_H.memberMonths, 0.00001);
+  approx("H: PPPM = 22800/114 = $200.00 exactly", Number(all.paid_per_member_month), EXPECTED_H.pppm, 0.01);
+  approx("H: disease-related PPPM = 20250/114 = 3375/19", Number(all.dr_paid_per_member_month), EXPECTED_H.drPppm, 0.01);
+  push(
+    `H: the fixed window would divide by ${EXPECTED_H.fixedWindowMemberMonths} member-months and report $${EXPECTED_H.naivePppm} instead of $${EXPECTED_H.pppm}`,
+    Math.abs(Number(all.paid_per_patient) / 24 - EXPECTED_H.naivePppm) < 0.01,
+    `window-based ${(Number(all.paid_per_patient) / 24).toFixed(2)} vs true ${all.paid_per_member_month} — understated by 21% for exactly the members who left early or went capitated`,
+  );
+  approx("H: the existing per-person-year figure = 22800/11 = 2072.73", Number(all.paid_per_person_year), EXPECTED_H.paidPerPersonYear, 0.01);
+  push(
+    "H: and 12 x the true PPPM is 2400, so the two denominators genuinely disagree",
+    Math.abs(Number(all.paid_per_member_month) * 12 - EXPECTED_H.truePerMemberYear) < 0.01 &&
+      Math.abs(Number(all.paid_per_person_year) - EXPECTED_H.truePerMemberYear) > 100,
+    `stitched-episode annualization ${all.paid_per_person_year} vs eligible member-time ${EXPECTED_H.truePerMemberYear}`,
+  );
+  eq("H: exactly 1 encounter falls in a month the denominator excludes", Number(all.enc_excluded_months), EXPECTED_H.encountersInExcludedMonths);
+  push(
+    "H: that encounter paid $0 — which is what capitation looks like, and why its months cannot be a denominator",
+    Number(all.paid_in_eligible_months) === EXPECTED_H.bySetting.ALL.paid,
+    `payments in eligible months ${all.paid_in_eligible_months} = the full ${EXPECTED_H.bySetting.ALL.paid}, because the excluded claim recorded nothing`,
+  );
+  push("H: the emitted table NAMES the denominator in force", /eligible member-months/.test(String(all.denominator_basis)),
+    String(all.denominator_basis));
+
+  /* CONTROLS on the denominator: turn capitation exclusion off, and change the
+   * study's year length. Both must move it, or the declaration is decorative. */
+  {
+    const spec: StudySpec = JSON.parse(JSON.stringify(GOLD_H_SPEC));
+    const an = spec.analyses.find((a) => a.kind === "resource_use");
+    if (an && an.kind === "resource_use" && an.normalization?.kind === "observed_member_months")
+      an.normalization.excludeCapitated = false;
+    const v = await seedAndRun(spec, GOLD_H_OPTS, fixtureHSeedSql());
+    const r = v.ok ? (await rows<Row>(v.db, "SELECT eligible_days, member_months::float8, paid_per_member_month::float8 FROM tz_h_hcru WHERE setting='ALL'"))[0] : undefined;
+    eq("H control: keeping capitated months restores P5's 540 days (3420 -> 3960)", Number(r?.eligible_days), EXPECTED_H.eligibleDaysNoCapExclusion);
+    approx("H control: and the denominator becomes 132 member-months", Number(r?.member_months), EXPECTED_H.memberMonthsNoCapExclusion, 0.00001);
+    approx("H control: PPPM falls to 22800/132 = 172.73 on months whose cost is invisible", Number(r?.paid_per_member_month), EXPECTED_H.pppmNoCapExclusion, 0.01);
+  }
+  {
+    /* The month length is DERIVED from the study's own year length, not baked
+     * in. At the 365.25 default a member-month is 30.4375 days. */
+    const spec: StudySpec = JSON.parse(JSON.stringify(GOLD_H_SPEC));
+    delete spec.meta.daysPerYear;
+    const v = await seedAndRun(spec, GOLD_H_OPTS, fixtureHSeedSql());
+    const r = v.ok ? (await rows<Row>(v.db, "SELECT member_months::float8, paid_per_member_month::float8 FROM tz_h_hcru WHERE setting='ALL'"))[0] : undefined;
+    approx("H control: at the 365.25 default a member-month is 30.4375 days (114 -> 112.36)", Number(r?.member_months), EXPECTED_H.memberMonthsAtDefaultYear, 0.0001);
+    approx("H control: and PPPM moves with it, to 202.92", Number(r?.paid_per_member_month), EXPECTED_H.pppmAtDefaultYear, 0.01);
+  }
+
+  /* ---- CPI ---- */
+  approx("H: restated total 22800 vs nominal 22500 — the CPI is worth $300 here", Number(all.paid_total_nominal), EXPECTED_H.bySetting.ALL.nominal, 0.01);
+  eq("H: no claim fell in a year with no index, so nothing was silently unrestated", Number(all.enc_not_restated), EXPECTED_H.encountersNotRestated);
+  push("H: the emitted table NAMES the dollar year and the series", /^2021 dollars, restated by CPI-U/.test(String(all.cost_basis)),
+    String(all.cost_basis));
+  {
+    const spec: StudySpec = JSON.parse(JSON.stringify(GOLD_H_SPEC));
+    const an = spec.analyses.find((a) => a.kind === "resource_use");
+    if (an && an.kind === "resource_use") delete an.inflation;
+    const v = await seedAndRun(spec, GOLD_H_OPTS, fixtureHSeedSql());
+    const tot = v.ok ? await scalar<number>(v.db, "SELECT paid_total::float8 FROM tz_h_hcru WHERE setting='ALL'") : undefined;
+    const cols = v.ok
+      ? await scalar<number>(v.db, "SELECT count(*)::int FROM information_schema.columns WHERE table_name='tz_h_hcru' AND column_name='cost_basis'")
+      : undefined;
+    approx("H control: with no inflation declared the total is the NOMINAL 22500", Number(tot), EXPECTED_H.bySetting.ALL.nominal, 0.01);
+    push(
+      "H control: and the restated columns are absent entirely rather than silently equal",
+      Number(cols) === 0,
+      `cost_basis column present: ${Number(cols) > 0}`,
+    );
+  }
+
+  /* ---- DISCLOSURE CONTROL over the option-dependent columns ----
+   * The suppression shape is per stamp KIND and cannot know these columns
+   * exist. Unlisted, they would ride the SAS `set` straight into the released
+   * data set — a leak, not a drop. */
+  {
+    const rel = (
+      await rows<Row>(
+        db,
+        `SELECT suppressed, dr_paid_total::float8, paid_per_member_month::float8, paid_q1::float8,
+                denominator_basis, member_months::float8
+           FROM tz_h_hcru_released WHERE setting = 'ALL'`,
+      )
+    )[0];
+    push("H: the released table CARRIES the economics columns rather than dropping them", rel !== undefined,
+      rel ? "present" : "missing from the released projection");
+    push(
+      "H: and every disclosive one is masked with its row (6 users is below the threshold)",
+      !!rel && Number(rel.suppressed) === 1 && rel.dr_paid_total === null && rel.paid_per_member_month === null && rel.paid_q1 === null,
+      rel ? `suppressed=${rel.suppressed} dr_paid_total=${rel.dr_paid_total} pppm=${rel.paid_per_member_month} q1=${rel.paid_q1}` : "no row",
+    );
+    push(
+      "H: while the method labels and the enrollment denominator stay visible",
+      !!rel && typeof rel.denominator_basis === "string" && rel.member_months !== null,
+      rel ? `denominator_basis kept, member_months=${rel.member_months}` : "no row",
+    );
+  }
+
+  out.push(...sasSqlParityChecks(GOLD_H_SPEC, GOLD_H_OPTS));
+  out.push(...sasStructureChecks(emitSas(GOLD_H_SPEC, GOLD_H_OPTS)));
   return out;
 }
 
