@@ -291,7 +291,12 @@ export function verifySilenceGuards(): Check[] {
     const dead: StudySpec = JSON.parse(JSON.stringify(base));
     dead.analyses.push(survivalAnalysis({ kind: "death", source: "dstatus" }) as never);
     const rd = specReadiness(dead);
-    const refusal = rd.problems.find((p) => p.includes("overall survival is REFUSED"));
+    /* Matched on the DSTATUS-specific wording. The constant used to say
+     * "overall survival is REFUSED" for every death source including declared
+     * linkages, which made the refusal contradict its own advice to bring
+     * linked mortality. Now DSTATUS is refused and a linkage is unbuilt, so
+     * this guard pins the narrower claim. */
+    const refusal = rd.problems.find((p) => p.includes("overall survival on DSTATUS is REFUSED"));
     push(
       "guard: a DEATH survival endpoint is REFUSED by readiness",
       !rd.ready && !!refusal,
@@ -352,9 +357,36 @@ export function verifySilenceGuards(): Check[] {
     const rdc = specReadiness(deadCox);
     push(
       "guard: a DEATH endpoint on a COX model is refused too, from the same constant",
-      !rdc.ready && rdc.problems.some((p) => p.includes("overall survival is REFUSED") && p.includes("DSTATUS")),
+      !rdc.ready && rdc.problems.some((p) => p.includes("overall survival on DSTATUS is REFUSED")),
       rdc.problems.find((p) => p.includes("REFUSED"))?.slice(0, 90) ?? "cox accepted a mortality endpoint",
     );
+
+    /* A REFUSAL MUST NOT CONTRADICT ITSELF.
+     *
+     * One constant used to fire on every kind:"death" endpoint regardless of
+     * source, while its own closing sentence told the analyst to bring linked
+     * mortality data. The type has offered ssa_master_file and linked_registry
+     * throughout, so the tool refused the exact remedy it recommended, and to
+     * anyone who has run an SSA- or NDI-linked study it read as not knowing the
+     * data asset exists. These two guards pin the distinction: DSTATUS is
+     * refused because the data cannot answer it, a declared linkage is merely
+     * unbuilt here, and those are different claims. */
+    for (const src of ["ssa_master_file", "linked_registry"] as const) {
+      const linked: StudySpec = JSON.parse(JSON.stringify(base));
+      linked.analyses.push(coxAnalysis({ endpoint: { kind: "death", source: src } }) as never);
+      const rl = specReadiness(linked);
+      const msg = rl.problems.find((p) => p.includes("mortality") || p.includes("MORTALITY") || p.includes("LINKAGE")) ?? "";
+      push(
+        `guard: a declared ${src} linkage is named UNBUILT, not refused`,
+        !rl.ready && msg.includes("not built yet") && msg.includes("NOT a refusal"),
+        msg.slice(0, 110) || "no mortality message at all",
+      );
+      push(
+        `guard: and the ${src} message does NOT claim the data cannot answer it`,
+        !msg.includes("is REFUSED"),
+        msg.includes("is REFUSED") ? "STILL SAYS REFUSED for a linked source" : "says unbuilt, which is the true claim",
+      );
+    }
 
     /* EFRON is refused, and the reason is the twin contract rather than taste:
      * every closed form the SQL twin computes is Breslow's, so a SAS fit

@@ -381,8 +381,44 @@ export interface SurvivalAnalysis extends AnalysisCommon {
  * accepted a `death` endpoint, a refusal copied into one switch arm and not the
  * other would be a gate with a hole in it. Survival and Cox both read this.
  */
+/**
+ * DSTATUS is refused permanently and for a reason that will never change.
+ *
+ * Kept SEPARATE from the linked-mortality message below, because conflating
+ * them was a real defect: a single refusal fired on every `kind:"death"`
+ * endpoint regardless of source, while its own closing sentence told the
+ * analyst to "bring linked mortality data". The type has offered
+ * `ssa_master_file` and `linked_registry` the whole time, so the tool was
+ * refusing the exact remedy it recommended. Merative sells a MarketScan
+ * Mortality Detail file and a substantial published literature uses SSA and NDI
+ * linkage, so to anyone who has run one of those studies that refusal read as
+ * the tool not knowing the data asset exists.
+ *
+ * A refusal earns its authority by being right. One that contradicts itself
+ * spends that authority instead.
+ */
 export const MORTALITY_REFUSAL =
-  `overall survival is REFUSED, not approximated. MarketScan's only native death signal is DSTATUS, which records IN-HOSPITAL death only and is masked from data year 2016 — so this analysis would silently become "time to in-hospital death before 2016, with every other death censored". Censoring by death is exactly the informative censoring Kaplan-Meier and Cox both assume away, and it biases survival UPWARD. Use a claims_event endpoint (an observable diagnosis or procedure), or bring linked mortality data and a design that states its ascertainment.`;
+  `overall survival on DSTATUS is REFUSED, not approximated. MarketScan's only native death signal is DSTATUS, which records IN-HOSPITAL death only and is masked from data year 2016 — so this analysis would silently become "time to in-hospital death before 2016, with every other death censored". Censoring by death is exactly the informative censoring Kaplan-Meier and Cox both assume away, and it biases survival UPWARD. Use a claims_event endpoint (an observable diagnosis or procedure), or declare an external mortality linkage — see below.`;
+
+/**
+ * Linked mortality is UNBUILT, which is a different claim from refused.
+ *
+ * The survival machinery already exists and is execution-verified; what is
+ * missing is the ascertainment scaffolding that makes a linked analysis
+ * honest. Two things are non-negotiable before this opens, and both are
+ * standard in the published literature:
+ *
+ *   - a LINKED-SUBSET attrition row, because mortality is ascertained for some
+ *     members and not others (one published HCC study had survival for 758 of
+ *     1459), and a curve drawn over the whole cohort while only part of it can
+ *     die is the same informative-censoring bias by another route;
+ *   - a hard block on reporting survival over the UNLINKED complement.
+ *
+ * Saying "not built yet" here rather than "refused" matters: refused means the
+ * data cannot answer it, and that is simply untrue of a linked design.
+ */
+export const LINKED_MORTALITY_UNBUILT =
+  `overall survival on an EXTERNAL MORTALITY LINKAGE is not built yet. This is an unbuilt feature, NOT a refusal: the linkage makes the question answerable and a large published literature does exactly this. What is missing is the ascertainment scaffolding that keeps it honest — a linked-subset attrition row (mortality ascertained in N of M members) and a block on reporting survival over the unlinked complement, since a curve drawn across a cohort where only part of it is able to die carries the same informative-censoring bias the DSTATUS refusal exists to prevent. Until it lands, use a claims_event endpoint.`;
 
 /** The outcome definition a time-to-event endpoint carries, or null for the
  *  refused mortality endpoint. Callers that reach the emitters never see null:
@@ -1460,7 +1496,11 @@ export function validateAnalyses(spec: StudySpec): string[] {
          * direction that flatters survival, because dying is the most
          * censoring-like thing a person can do. */
         if (a.endpoint.kind === "death") {
-          problems.push(`${w}: ${MORTALITY_REFUSAL}`);
+          /* The message depends on the SOURCE. DSTATUS is refused because the
+           * data cannot answer it; a declared linkage is merely unbuilt. Saying
+           * "refused" for both told analysts their design was impossible when
+           * it was only unsupported here. */
+          problems.push(`${w}: ${a.endpoint.source === "dstatus" ? MORTALITY_REFUSAL : LINKED_MORTALITY_UNBUILT}`);
           break;
         }
         requireCodeList(a.endpoint.outcomeDefinition.codeListId, `${w} endpoint`);
@@ -1497,7 +1537,11 @@ export function validateAnalyses(spec: StudySpec): string[] {
          * time-to-event kind is exactly how a refusal quietly stops covering
          * everything it was written for. */
         if (a.endpoint.kind === "death") {
-          problems.push(`${w}: ${MORTALITY_REFUSAL}`);
+          /* The message depends on the SOURCE. DSTATUS is refused because the
+           * data cannot answer it; a declared linkage is merely unbuilt. Saying
+           * "refused" for both told analysts their design was impossible when
+           * it was only unsupported here. */
+          problems.push(`${w}: ${a.endpoint.source === "dstatus" ? MORTALITY_REFUSAL : LINKED_MORTALITY_UNBUILT}`);
           break;
         }
         requireCodeList(a.endpoint.outcomeDefinition.codeListId, `${w} endpoint`);
@@ -1539,7 +1583,7 @@ export function validateAnalyses(spec: StudySpec): string[] {
          * estimates, and DSTATUS cannot ascertain it. A competing cause read
          * from a claims code list is fine and is what competingEvents carries. */
         if (a.endpoint.kind === "death") {
-          problems.push(`${w}: ${MORTALITY_REFUSAL} (this is the CIF's event of INTEREST; a competing cause read from a claims code list is a different matter and belongs in competingEvents[])`);
+          problems.push(`${w}: ${a.endpoint.source === "dstatus" ? MORTALITY_REFUSAL : LINKED_MORTALITY_UNBUILT} (this is the CIF's event of INTEREST; a competing cause read from a claims code list is a different matter and belongs in competingEvents[])`);
           break;
         }
         requireCodeList(a.endpoint.outcomeDefinition.codeListId, `${w} endpoint`);
@@ -1569,7 +1613,7 @@ export function validateAnalyses(spec: StudySpec): string[] {
       case "fine_gray": {
         /* The FOURTH time-to-event kind, and the same constant. */
         if (a.endpoint.kind === "death") {
-          problems.push(`${w}: ${MORTALITY_REFUSAL} (a competing cause read from a claims code list belongs in competingEvents[])`);
+          problems.push(`${w}: ${a.endpoint.source === "dstatus" ? MORTALITY_REFUSAL : LINKED_MORTALITY_UNBUILT} (a competing cause read from a claims code list belongs in competingEvents[])`);
           break;
         }
         requireCodeList(a.endpoint.outcomeDefinition.codeListId, `${w} endpoint`);
