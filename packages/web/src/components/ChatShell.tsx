@@ -30,6 +30,7 @@ import {
 } from "@heor-studio/core";
 import type { AppSettings } from "./SettingsModal";
 import { buildZip, downloadBlob } from "../lib/exportZip";
+import Margin from "./Margin";
 import "./chatshell.css";
 
 type Dialect = "sas" | "postgres" | "snowflake";
@@ -292,7 +293,7 @@ export default function ChatShell(props: ChatShellProps) {
   );
 
   return (
-    <div className={paneOpen && files.length > 0 ? "cs-shell cs-split" : "cs-shell"}>
+    <div className={paneOpen && files.length > 0 ? "cs-shell cs-split cs-split-margin" : "cs-shell"}>
       <section className="cs-chat" aria-label="Conversation">
         <div className="cs-log" ref={logRef}>
           {landing}
@@ -467,6 +468,11 @@ export default function ChatShell(props: ChatShellProps) {
       </section>
 
       {paneOpen && files.length > 0 && (
+        /* A fragment, so both stay DIRECT children of the shell grid: the
+           Margin is a real 44px track between the panes, not an overlay and not
+           a child of either one. */
+        <>
+        <Margin programCount={files.length} />
         <section className="cs-pane" aria-label="Generated study code">
           <div className="cs-pane-head">
             <h2 className="cs-pane-title">Generated code</h2>
@@ -509,6 +515,7 @@ export default function ChatShell(props: ChatShellProps) {
             </div>
           </div>
         </section>
+        </>
       )}
 
       {!paneOpen && files.length > 0 && (

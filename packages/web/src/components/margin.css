@@ -1,0 +1,174 @@
+/* THE MARGIN — the ruled column between the conversation and the code.
+
+   It belongs materially to the PLATE side: its ground is --plate-edge in both
+   themes, one step off the code pane, so the seam gets a value step without a
+   border doing the work. It is the only element in this product allowed to sit
+   on a hue.
+
+   Everything here is CSS. No animation runtime, no positioning library. */
+
+.mg {
+  /* Fixed track. The grid owns the width; this is the material. */
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  background: var(--plate-edge);
+  /* Bounded by hairlines on both sides plus a specular top edge. This is what
+     stops the column from reading as a coloured div. */
+  box-shadow:
+    inset 1px 0 0 var(--hairline),
+    inset -1px 0 0 var(--hairline),
+    inset 0 1px 0 var(--specular-plate);
+  overflow: hidden;
+  transition: width var(--dur-sheet) var(--ease-sheet);
+}
+
+/* ---- the cells ---- */
+
+.mg-rail {
+  overflow: hidden;
+  padding: var(--space-2) 7px;
+  min-height: 0;
+}
+
+.mg-cells {
+  display: grid;
+  /* 4 columns of 5px marks at 3px gutters = the 44px track, minus padding. */
+  grid-template-columns: repeat(4, 5px);
+  gap: 2px 3px;
+  align-content: start;
+  justify-content: center;
+}
+
+.mg-mark {
+  inline-size: 5px;
+  block-size: 3px;
+  border-radius: 1px;
+  /* Fill is instantaneous, because the event IS the animation. Only the
+     hairline dissolving is eased. Truthful, not decorative. */
+  transition: box-shadow calc(90ms * var(--motion-speed)) var(--ease-out-quad);
+}
+
+/* UNVERIFIED. Hollow. The whole point: an artifact nobody has run renders as a
+   column of empty boxes, and that absence is the product's central claim
+   rendered as geometry. */
+.mg-mark[data-s="hollow"] {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--plate-edge) 78%, var(--plate-ink) 22%);
+}
+
+/* STRUCK. A pass is a mark, not a celebration. Achromatic on purpose: 1,572
+   passes must encode density, never approval. */
+.mg-mark[data-s="struck"] {
+  background: var(--mark);
+  box-shadow: none;
+}
+
+/* FAILED. Wider, so it bleeds past the column's inner padding, plus a full-bleed
+   rule. It is the only thing permitted to break the seam, which is exactly why
+   one failure is findable at any scroll position. Colour is never the sole
+   carrier: the mark is also a different SIZE. */
+.mg-mark[data-s="failed"] {
+  position: relative;
+  inline-size: 9px;
+  margin-inline: -2px;
+  background: var(--danger);
+  box-shadow: none;
+}
+.mg-mark[data-s="failed"]::after {
+  content: "";
+  position: absolute;
+  inset-block: 1px;
+  inset-inline: -6px;
+  background: var(--danger);
+  opacity: .55;
+}
+
+/* ---- the foot ---- */
+
+.mg-foot {
+  display: grid;
+  place-items: center;
+  padding: var(--space-2) var(--space-1);
+  border-top: 1px solid var(--hairline);
+  min-block-size: 2.5rem;
+}
+
+.mg-run,
+.mg-count {
+  display: grid;
+  place-items: center;
+  gap: 1px;
+  inline-size: 100%;
+  min-block-size: 2rem;
+  padding: var(--space-1);
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--plate-ink-dim);
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: var(--t-micro);
+  letter-spacing: .04em;
+  line-height: 1.1;
+  cursor: pointer;
+  /* Asymmetric hover: in is instant, out is eased. Fading a hover IN is the
+     single most common reason a competent UI feels a notch cheap. */
+  transition: background var(--speed-hl-out) var(--ease-out-quad),
+              color var(--speed-hl-out) var(--ease-out-quad);
+}
+@media (any-hover: hover) {
+  .mg-run:hover,
+  .mg-count:hover {
+    background: color-mix(in srgb, var(--plate-edge) 84%, var(--plate-ink) 16%);
+    color: var(--plate-ink);
+    transition-duration: var(--speed-hl-in);
+  }
+}
+.mg-run:active,
+.mg-count:active { transform: scale(.97); }
+
+.mg-run { text-transform: uppercase; text-wrap: balance; }
+
+.mg-num { color: var(--plate-ink); font-size: var(--text-sm); font-weight: 600; }
+.mg-den { color: var(--plate-ink-dim); }
+
+.mg-running {
+  font-family: var(--font-mono);
+  font-size: var(--t-micro);
+  color: var(--plate-ink-dim);
+}
+
+/* A failed run recolours the count, and the foot says so in words too. */
+.mg[data-phase="done"]:has(.mg-mark[data-s="failed"]) .mg-num { color: var(--danger); }
+
+/* ---- expanded: the countable proof ----
+   The same marks re-laid as a unit chart, so the number stops being claimed and
+   starts being countable. */
+.mg-expanded { position: relative; }
+.mg-expanded .mg-cells {
+  grid-template-columns: repeat(auto-fill, 7px);
+  gap: 3px;
+  justify-content: start;
+}
+.mg-expanded .mg-mark {
+  block-size: 7px;
+  inline-size: 7px;
+  transition: transform calc(90ms * var(--motion-speed)) var(--ease-out-quad),
+              box-shadow calc(90ms * var(--motion-speed)) var(--ease-out-quad);
+}
+@media (any-hover: hover) {
+  .mg-expanded .mg-mark:hover { transform: scale(1.6); z-index: 1; }
+}
+.mg-expanded .mg-mark[data-s="failed"] { inline-size: 7px; margin-inline: 0; }
+.mg-expanded .mg-mark[data-s="failed"]::after { content: none; }
+
+/* Long ledgers stay flat in layout cost while wasm Postgres saturates a core. */
+.mg-rail { content-visibility: auto; contain-intrinsic-size: auto 400px; }
+
+/* Narrow viewports: the seam collapses, the ledger becomes a strip under the
+   conversation rather than disappearing. The claim must survive the breakpoint. */
+@media (max-width: 60rem) {
+  .mg { grid-template-rows: auto auto; }
+  .mg-cells { grid-template-columns: repeat(auto-fill, 5px); justify-content: start; }
+  .mg-rail { contain-intrinsic-size: auto 64px; max-block-size: 4.5rem; }
+}

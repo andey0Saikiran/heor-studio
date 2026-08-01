@@ -37,8 +37,20 @@
   grid-template-columns: minmax(22rem, 30rem) minmax(0, 1fr);
 }
 
+/* THE MARGIN gets a real 44px track between the two materials, not an overlay
+   and not a border. The seam is structural: paper on the left, the ledger, then
+   plate. There is no drop shadow between panes, because the material change is
+   what does the separating. */
+.cs-shell.cs-split-margin {
+  grid-template-columns: minmax(22rem, 30rem) 44px minmax(0, 1fr);
+  gap: 0 var(--space-4);
+}
+.cs-shell.cs-split-margin > .mg { margin-inline: calc(var(--space-4) * -1); }
+
 @media (max-width: 60rem) {
-  .cs-shell.cs-split { grid-template-columns: minmax(0, 1fr); }
+  .cs-shell.cs-split,
+  .cs-shell.cs-split-margin { grid-template-columns: minmax(0, 1fr); }
+  .cs-shell.cs-split-margin > .mg { margin-inline: 0; }
 }
 
 /* ---------- conversation ---------- */
@@ -255,11 +267,45 @@
 /* ---------- artifact pane ---------- */
 
 .cs-pane {
+  /* PLATE. Dark in BOTH themes on purpose: generated code is a specimen
+     surface, not a document, and the two-material split has to read as
+     material rather than as a theme flip. color-scheme also flips the pane's
+     scrollbars and form controls to their dark variants, which is the detail
+     that stops a dark panel looking like a light one painted over. */
+  color-scheme: dark;
   display: flex; flex-direction: column; min-height: 0;
-  background: var(--surface);
-  border: 1px solid var(--line);
+  background: var(--plate);
+  color: var(--plate-ink);
+  border: 1px solid var(--hairline);
   border-radius: var(--radius-lg);
   overflow: hidden;
+  /* Specular top edge plus a lower bevel. One line each, and the rectangle
+     becomes an object rather than a coloured div. */
+  box-shadow: inset 0 1px 0 var(--specular-plate), inset 0 -1px 0 var(--bevel-plate);
+}
+/* THE PLATE REDEFINES THE TOKENS FOR EVERYTHING INSIDE IT.
+   Scoping the values rather than patching selectors is what makes this hold:
+   any component dropped into the pane later gets correct colours for free, and
+   nobody has to remember a parallel set of plate-specific class names. This is
+   the same mechanism the dark-theme block uses, applied to a region instead of
+   to the document. */
+.cs-pane {
+  --paper: var(--plate);
+  --surface: #131A1F;
+  --surface-deep: #182027;
+  --surface-2: #161D23;
+  --ink: var(--plate-ink);          /* 13.5:1 on plate */
+  --ink-soft: var(--plate-ink-dim); /*  7.1:1 */
+  --ink-faint: #8B96A0;             /*  5.5:1 */
+  --hairline: #242C33;
+  --line: #242C33;
+  --accent: #7FB2E5;                /*  7.6:1 */
+  --accent-ink: #9CC6F0;
+  --accent-wash: #17293A;
+  --danger: #FF9E96;
+  --warn: #E8B15C;
+  --ok: #6FCB9F;
+  --specular: var(--specular-plate);
 }
 .cs-pane-head {
   display: flex; align-items: center; gap: var(--space-3);
@@ -273,6 +319,7 @@
   display: grid;
   grid-template-columns: minmax(0, 15rem) minmax(0, 1fr);
 }
+
 @media (max-width: 48rem) { .cs-pane-body { grid-template-columns: minmax(0, 1fr); } }
 
 .cs-files {
@@ -294,7 +341,7 @@
 .cs-file-path { display: block; font-family: var(--font-mono); font-size: var(--text-xs); color: var(--ink-faint); font-weight: 400; }
 .cs-file.cs-on .cs-file-path { color: inherit; opacity: 0.75; }
 
-.cs-code-wrap { display: flex; flex-direction: column; min-width: 0; }
+.cs-code-wrap { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
 .cs-code-head {
   display: flex; align-items: center; gap: var(--space-2);
   padding: var(--space-2) var(--space-3);
@@ -303,10 +350,18 @@
 .cs-code-name { font-family: var(--font-mono); font-size: var(--text-sm); color: var(--ink-soft); flex: 1 1 auto; }
 .cs-code {
   margin: 0; padding: var(--space-4);
+  /* min-width:0 on the wrapper is what actually lets this shrink; without it a
+     long SQL line makes the grid track wider than the pane and the block
+     escapes to the right. */
+  min-width: 0;
   overflow: auto;
-  max-height: calc(100vh - var(--cs-chrome) - 15rem);
-  background: var(--code-bg); color: var(--code-ink);
-  font-family: var(--font-mono); font-size: var(--text-sm); line-height: var(--leading-prose);
+  flex: 1 1 auto;
+  background: transparent;        /* the pane IS the plate now */
+  color: var(--plate-ink);
+  font-family: var(--font-mono);
+  font-size: var(--t-code);
+  line-height: var(--leading-code);
+  font-variant-ligatures: none;   /* <= and != must not fuse in a specimen */
   tab-size: 2;
 }
 .cs-tabs {
@@ -342,4 +397,30 @@
   background: var(--accent);
   border-radius: var(--radius);
   transition: width var(--dur) var(--ease-out);
+}
+
+/* CONTAINER QUERY, not a media query. The panes resize independently of the
+   window: dragging the seam or opening the ledger changes how much room the
+   code has while the viewport never moves, so a viewport breakpoint asks the
+   wrong question and the file list keeps its 15rem while the code is squeezed
+   to nothing. Below 34rem OF PANE the list becomes a horizontal strip and the
+   code gets the full width.
+
+   Gotcha worth knowing: container-type creates a containing block, so a
+   position:fixed child would anchor to the pane rather than the viewport.
+   Nothing in here is fixed. */
+.cs-pane { container: codepane / inline-size; }
+
+@container codepane (max-width: 34rem) {
+  .cs-pane-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .cs-files {
+    display: flex; flex-direction: row; gap: var(--space-1);
+    overflow-x: auto; overscroll-behavior-x: contain;
+    border-right: 0; border-bottom: 1px solid var(--hairline);
+    max-height: none;
+  }
+  .cs-file { flex: 0 0 auto; white-space: nowrap; }
+  /* The path under each title is what makes the strip unreadable at this size;
+     the title alone still identifies the program. */
+  .cs-file span:last-child { display: none; }
 }
