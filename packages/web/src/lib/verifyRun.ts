@@ -30,8 +30,16 @@ export interface RunProgress {
   /** every mark, in execution order, updated in place as the run proceeds */
   marks: MarkCheck[];
   done: number;
+  /** grows as the run proceeds. It is NOT known in advance, because how many
+   *  checks exist depends on what the emitters produce, and announcing a total
+   *  before computing it would be the fabrication this product refuses. */
   total: number;
   failed: number;
+  /** the only thing knowable up front: how many groups the suite has */
+  groupsDone: number;
+  groupsTotal: number;
+  /** the group that just finished, for the band label */
+  group?: string;
   /** wall clock of the run so far, ms. Real, never interpolated. */
   elapsed: number;
   phase: "idle" | "loading" | "running" | "done" | "error";
@@ -57,7 +65,9 @@ export async function runVerification(
 ): Promise<RunProgress> {
   const started = now();
   let state: RunProgress = {
-    marks: [], done: 0, total: 0, failed: 0, elapsed: 0, phase: "loading",
+    marks: [], done: 0, total: 0, failed: 0,
+    groupsDone: 0, groupsTotal: 0,
+    elapsed: 0, phase: "loading",
   };
   const emit = (patch: Partial<RunProgress>) => {
     state = { ...state, ...patch, elapsed: now() - started };
@@ -71,13 +81,33 @@ export async function runVerification(
     const mod = await import("@heor-studio/core/verify");
     emit({ phase: "running" });
 
-    const result = await mod.verifyGoldA();
-    const checks = result.checks ?? [];
+    /* THE WHOLE SUITE, the same one CI runs, not Gold Case A alone. The browser
+     * used to run a subset, so the screen said 1058 while the README said 1572:
+     * both honest, and not the same number. A headline figure nobody can
+     * reproduce from the UI is exactly the kind of unbacked claim this project
+     * exists to refuse. */
+    const final = await mod.verifyAll((p) => {
+      /* Marks are built from REAL completions, group by group, so the column
+       * fills at the pace the engine actually reports. A slow group reads as a
+       * slow group. Nothing is interpolated or pre-filled. */
+      const marks: MarkCheck[] = p.checks.map((c, i) => ({
+        id: i,
+        name: c.name,
+        state: c.status === "pass" ? "struck" : "failed",
+        detail: c.detail,
+      }));
+      emit({
+        marks,
+        total: marks.length,
+        done: marks.length,
+        failed: p.failed,
+        groupsDone: p.groupsDone,
+        groupsTotal: p.groupsTotal,
+        group: p.groups[p.groups.length - 1]?.title,
+      });
+    });
 
-    /* Marks are built from the REAL result. An unverified artifact renders as a
-     * column of hollow boxes, and that absence is the product's central claim
-     * rendered as geometry, so it must never be faked full. */
-    const marks: MarkCheck[] = checks.map((c, i) => ({
+    const marks: MarkCheck[] = final.checks.map((c, i) => ({
       id: i,
       name: c.name,
       state: c.status === "pass" ? "struck" : "failed",
@@ -88,7 +118,9 @@ export async function runVerification(
       marks,
       total: marks.length,
       done: marks.length,
-      failed: marks.filter((m) => m.state === "failed").length,
+      failed: final.failed,
+      groupsDone: final.groupsDone,
+      groupsTotal: final.groupsTotal,
       phase: "done",
     });
   } catch (err) {
