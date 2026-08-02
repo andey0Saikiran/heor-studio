@@ -47,9 +47,24 @@
 }
 .cs-shell.cs-split-margin > .mg { margin-inline: calc(var(--space-4) * -1); }
 
+/* THE WORKSPACE FITS THE VIEWPORT. In split mode the shell used to take the
+   height of its tallest pane, and the tallest pane holds thousands of lines of
+   generated code, so the PAGE was 3,000+ px tall and everything anchored to a
+   pane's foot (the Margin's run control, the composer) sat below three screens
+   of scroll. An analyst had to scroll past the entire artifact to discover
+   that verification exists. The split is now a fixed desk: panes scroll
+   INSIDE, controls stay on screen. */
+.cs-shell.cs-split { height: calc(100vh - var(--cs-chrome)); }
+
 @media (max-width: 60rem) {
   .cs-shell.cs-split,
-  .cs-shell.cs-split-margin { grid-template-columns: minmax(0, 1fr); }
+  .cs-shell.cs-split-margin {
+    grid-template-columns: minmax(0, 1fr);
+    /* Stacked panes read as a page again; a fixed desk would trap the lower
+       pane in a sliver. The pane header still carries the run control near the
+       top of the code pane, so discoverability survives the breakpoint. */
+    height: auto;
+  }
   .cs-shell.cs-split-margin > .mg { margin-inline: 0; }
 }
 
@@ -475,7 +490,32 @@
   padding: var(--space-3) var(--space-4);
   border-bottom: 1px solid var(--line);
   background: var(--surface-deep);
+  flex-wrap: wrap;
 }
+
+/* The run's verdict, in the header, backed by a real run and nothing else.
+   Idle never shows a chip: an unverified artifact gets a BUTTON, not a badge,
+   because the absence of a verdict is the honest state. */
+.cs-verdict {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  padding: 0.15rem 0.6rem;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.cs-verdict-ok {
+  color: var(--ok);
+  background: var(--ok-wash);
+  border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+}
+.cs-verdict-bad {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 18%, transparent);
+  border-color: color-mix(in srgb, var(--danger) 50%, transparent);
+  font-weight: 600;
+}
+.cs-verdict-live { color: var(--ink-soft); }
 .cs-pane-title { font-family: var(--font-display); font-size: var(--text-lg); font-weight: 600; margin: 0; flex: 1 1 auto; }
 .cs-pane-body {
   flex: 1 1 auto; min-height: 0;

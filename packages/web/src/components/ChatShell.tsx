@@ -30,6 +30,8 @@ import {
 } from "@heor-studio/core";
 import type { AppSettings } from "./SettingsModal";
 import { buildZip, downloadBlob } from "../lib/exportZip";
+import type { RunProgress } from "../lib/verifyRun";
+import { runVerification } from "../lib/verifyRun";
 import Margin from "./Margin";
 import "./chatshell.css";
 
@@ -69,6 +71,17 @@ export default function ChatShell(props: ChatShellProps) {
   const [selected, setSelected] = useState("");
   const [copied, setCopied] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
+
+  /* THE VERIFICATION RUN, owned here so its trigger can sit in the pane header
+   * where a person actually looks, instead of at the foot of the Margin. The
+   * Margin renders this same state as the ledger. */
+  const [run, setRun] = useState<RunProgress | null>(null);
+  const runStartedRef = useRef(false);
+  const startRun = useCallback(() => {
+    if (runStartedRef.current) return;
+    runStartedRef.current = true;
+    void runVerification(setRun).finally(() => { runStartedRef.current = false; });
+  }, []);
 
   const say = useCallback((text: string) => {
     setMsgs((m) => [...m, { id: nextId(), role: "assistant", kind: "text", text }]);
@@ -132,6 +145,7 @@ export default function ChatShell(props: ChatShellProps) {
       if (r.ready) {
         say(
           "That is everything signed off. The study code is ready, and I have opened it on the right.\n\n" +
+          "Nothing in it has been verified yet. Run the checks, top right of the code pane, and this browser will download Postgres and execute the full suite against the emitted SQL.\n\n" +
           "You can still ask for changes: anything you accept re-runs the emitters, and anything you touch goes back to needing a look.",
         );
         setPaneOpen(true);
@@ -513,10 +527,28 @@ export default function ChatShell(props: ChatShellProps) {
            Margin is a real 44px track between the panes, not an overlay and not
            a child of either one. */
         <>
-        <Margin programCount={files.length} />
+        <Margin programCount={files.length} run={run} onStart={startRun} />
         <section className="cs-pane" aria-label="Generated study code">
           <div className="cs-pane-head">
             <h2 className="cs-pane-title">Generated code</h2>
+            {(!run || run.phase === "idle" || run.phase === "error") ? (
+              <button type="button" className="btn btn-primary btn-sm" onClick={startRun}>
+                {run?.phase === "error" ? "Run failed. Try again" : "Run the checks"}
+              </button>
+            ) : run.phase === "done" ? (
+              <span
+                className={run.failed > 0 ? "cs-verdict cs-verdict-bad" : "cs-verdict cs-verdict-ok"}
+                role="status"
+              >
+                {run.failed > 0
+                  ? `${run.failed} of ${run.total.toLocaleString()} checks failed`
+                  : `${run.total.toLocaleString()} checks passed`}
+              </span>
+            ) : (
+              <span className="cs-verdict cs-verdict-live" role="status" data-num>
+                {run.phase === "loading" ? "loading engine…" : `${run.done.toLocaleString()} checks…`}
+              </span>
+            )}
             <button type="button" className="btn btn-sm" onClick={() => void download()}>Download bundle</button>
             <button type="button" className="btn btn-quiet btn-sm" aria-label="Close the code pane"
               onClick={() => setPaneOpen(false)}>&times;</button>

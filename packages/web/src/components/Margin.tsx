@@ -25,9 +25,9 @@
  * a slow band. Nothing is interpolated, pre-filled or eased: easing a count is
  * fabricating intermediate states of a fact.
  */
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import type { MarkCheck, RunProgress } from "../lib/verifyRun";
-import { ENGINE_DOWNLOAD_MB, runVerification } from "../lib/verifyRun";
+import { ENGINE_DOWNLOAD_MB } from "../lib/verifyRun";
 import "./margin.css";
 
 /** Marks rendered before a run exists. Enough to read as a full ledger without
@@ -37,15 +37,21 @@ const HOLLOW_ROWS = 220;
 export interface MarginProps {
   /** how many programs the emitters produced, for the hollow ledger's height */
   programCount: number;
+  /** THE RUN LIVES IN THE SHELL, not here. It used to be owned by this column,
+   *  which put the only trigger for the product's central feature at the foot
+   *  of a ledger that could be thousands of pixels tall: the analyst had to
+   *  scroll past everything to discover that verification exists. The shell
+   *  owns the state and offers the button in the pane header where eyes
+   *  already are; this column renders the same run as marks. */
+  run: RunProgress | null;
+  onStart: () => void;
   /** opens the expanded unit chart */
   onExpand?: () => void;
 }
 
-export default function Margin({ programCount, onExpand }: MarginProps) {
-  const [run, setRun] = useState<RunProgress | null>(null);
+export default function Margin({ programCount, run, onStart, onExpand }: MarginProps) {
   const [expanded, setExpanded] = useState(false);
   const liveId = useId();
-  const startedRef = useRef(false);
 
   const marks: MarkCheck[] = useMemo(() => {
     if (run?.marks.length) return run.marks;
@@ -60,12 +66,6 @@ export default function Margin({ programCount, onExpand }: MarginProps) {
   const done = run?.done ?? 0;
   const failed = run?.failed ?? 0;
   const phase = run?.phase ?? "idle";
-
-  const start = () => {
-    if (startedRef.current) return;
-    startedRef.current = true;
-    void runVerification(setRun).finally(() => { startedRef.current = false; });
-  };
 
   /* Keyboard: M toggles the expanded unit chart, matching the affordance the
    * count button advertises. Ignored while typing. */
@@ -119,7 +119,7 @@ export default function Margin({ programCount, onExpand }: MarginProps) {
 
       <div className="mg-foot">
         {phase === "idle" || phase === "error" ? (
-          <button type="button" className="mg-run" onClick={start}>
+          <button type="button" className="mg-run" onClick={onStart}>
             Run the checks
           </button>
         ) : phase === "done" ? (
