@@ -13,10 +13,21 @@
   "compatibility_date": "2026-08-02",
   "assets": {
     "directory": "./dist",
-    // Single-page app: React Router owns the paths, so an unknown route must be
-    // served index.html rather than a 404, or a deep link into the app 404s on
-    // first load and works on every navigation after it.
-    "not_found_handling": "single-page-application"
+    // NOT "single-page-application", which is what this said first, on the
+    // assumption that React Router owned the paths. It does not: there is no
+    // router in packages/web/src at all. The app is one page with panels.
+    //
+    // The assumption was not merely wrong, it was ACTIVELY HARMFUL. SPA fallback
+    // serves index.html for any unmatched path, so a missing hashed asset comes
+    // back as HTTP 200 with content-type text/html instead of a 404. The browser
+    // then fails to parse HTML as a JavaScript module, and the error surfaces as
+    // "Failed to fetch dynamically imported module" with no hint that the file is
+    // simply absent. A half-uploaded deploy looks like a healthy one, and the
+    // verification chunk, which is the whole point of this app, is exactly the
+    // kind of lazily imported file that would go missing.
+    //
+    // "none" returns a real 404, so a broken deploy reports itself.
+    "not_found_handling": "none"
   },
   "observability": { "enabled": true }
 }

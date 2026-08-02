@@ -110,11 +110,56 @@ async function main() {
     for (const p of publishedProblems) console.log(`  - ${p}`);
   }
 
+  /* NO UI STRING MAY PROMISE AN ENDPOINT THE APP CANNOT HONOUR.
+   *
+   * The web app once carried a settings field, "API base URL", that was
+   * collected, defaulted, persisted, reset and read by nothing: every request
+   * went to a hardcoded constant. The field is gone. The SENTENCES took longer.
+   * The same promise was written FIVE separate times, in SettingsModal, App
+   * (twice), ChatShell and SpecChat, and each round of fixing found fewer than
+   * were there. The fifth was discovered by loading the deployed site and
+   * reading the footer.
+   *
+   * The person this misleads is specific: an analyst at a shop that mandates an
+   * LLM gateway, who sets the proxy precisely because policy forbids a direct
+   * vendor call, sees no error, and sends a study protocol and their key to
+   * Anthropic anyway. That is a compliance incident caused by a sentence.
+   *
+   * Counting instances by hand is what let it survive four passes. */
+  const promiseProblems: string[] = [];
+  {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const url = await import("node:url");
+    const root = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), "../../../..");
+    const webSrc = path.join(root, "packages/web/src");
+    /* Phrasings that assert the destination is the analyst's to choose. */
+    const BANNED = /(endpoint|url)\s+you\s+(configure|configured|set)|your\s+configured\s+(endpoint|url)|endpoint\s+you\s+specified|only\s+to\s+this\s+endpoint/i;
+    const walk = (dir: string): string[] =>
+      fs.existsSync(dir)
+        ? fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+            const p = path.join(dir, e.name);
+            return e.isDirectory() ? walk(p) : /\.(tsx?|html)$/.test(e.name) ? [p] : [];
+          })
+        : [];
+    for (const file of walk(webSrc)) {
+      const lines = fs.readFileSync(file, "utf8").split("\n");
+      lines.forEach((line, i) => {
+        if (BANNED.test(line))
+          promiseProblems.push(`${path.relative(root, file)}:${i + 1} promises a configurable endpoint; there is none — every request goes to ANTHROPIC_ENDPOINT`);
+      });
+    }
+  }
+  if (promiseProblems.length > 0) {
+    console.log("\nUI STRINGS PROMISING AN ENDPOINT THE APP CANNOT HONOUR:");
+    for (const p of promiseProblems) console.log(`  - ${p}`);
+  }
+
   /* Derived, not assembled. Every failure channel is represented, and adding a
    * group cannot leave it out of the verdict. */
   const ok =
     failed.length === 0 && invariantsFailed.length === 0 && execFailed.length === 0 &&
-    publishedProblems.length === 0;
+    publishedProblems.length === 0 && promiseProblems.length === 0;
   console.log(`\nVerification: ${ok ? "PASSED" : "FAILED"}`);
   process.exit(ok ? 0 : 1);
 }

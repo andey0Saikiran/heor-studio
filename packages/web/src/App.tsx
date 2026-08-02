@@ -527,8 +527,8 @@ export default function App() {
       <footer className="app-footer">
         <div className="app-footer-inner">
           <p className="privacy-line">
-            Runs entirely in your browser. Documents go only to the LLM endpoint you configure, with
-            your key. Nothing touches our servers.
+            Runs entirely in your browser. Documents go only to Anthropic, with your key. Nothing
+            touches our servers.
           </p>
           <span className="footer-note">
             HEOR Studio is an independent open-source project, not affiliated with or endorsed by
