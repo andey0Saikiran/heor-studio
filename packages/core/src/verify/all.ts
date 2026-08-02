@@ -22,7 +22,7 @@
  */
 import type { Check } from "./run";
 import {
-  verifyGoldA, verifyGoldB, verifyGoldC, verifyGoldD, verifyGoldE, verifyGoldF, verifyGoldG, verifyGoldH, verifyGoldI, verifyGoldJ,
+  verifyGoldA, verifyGoldB, verifyGoldC, verifyGoldD, verifyGoldE, verifyGoldF, verifyGoldG, verifyGoldH, verifyGoldI, verifyGoldJ, verifyGoldK,
   verifyDaysPerYearChoice, verifySettingFilterControl, verifyAscertainmentWindow,
   verifyDataCutReachesBothTwins, verifyWashoutToggle, verifySuppression,
 } from "./run";
@@ -64,6 +64,7 @@ const GROUPS: Array<{ title: string; run: () => Check[] | Promise<Check[]> }> = 
   { title: "Gold Case H — cost attribution, PPPM, CPI and quantiles", run: verifyGoldH },
   { title: "Gold Case I — coarsening, stratification, negative controls, E-values", run: verifyGoldI },
   { title: "Gold Case J — negative index weights, the ICD transition, and declared sweeps", run: verifyGoldJ },
+  { title: "Gold Case K — line-of-therapy construction and linked mortality", run: verifyGoldK },
   { title: "Person-time constant", run: verifyDaysPerYearChoice },
   { title: "Care-setting filter (negative control)", run: verifySettingFilterControl },
   { title: "Ascertainment window", run: verifyAscertainmentWindow },

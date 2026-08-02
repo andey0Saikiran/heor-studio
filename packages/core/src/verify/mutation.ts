@@ -39,6 +39,7 @@ import { GOLD_G_SPEC, GOLD_G_OPTS } from "./fixture-g";
 import { GOLD_H_SPEC, GOLD_H_OPTS } from "./fixture-h";
 import { GOLD_I_SPEC, GOLD_I_OPTS } from "./fixture-i";
 import { GOLD_J_SPEC, GOLD_J_OPTS } from "./fixture-j";
+import { GOLD_K_SPEC, GOLD_K_OPTS } from "./fixture-k";
 import type { StudySpec } from "../spec/types";
 import type { Check } from "./run";
 
@@ -71,7 +72,7 @@ interface Mutation {
    * stratification and no E-value, so every corruption of those would land on a
    * program that never asked for them.
    */
-  source?: "A" | "F" | "G" | "H" | "I" | "J";
+  source?: "A" | "F" | "G" | "H" | "I" | "J" | "K";
   /**
    * Set when the mutation is DELIBERATELY not idempotent, with the reason.
    *
@@ -996,6 +997,171 @@ const MUTATIONS: Mutation[] = [
     apply: (t) => t.replace(/tz\.&tag\._ev_\w+/g, "tz.&tag._020_rx"),
   },
 
+  /* ---- LINE-OF-THERAPY CONSTRUCTION (Gold K) --------------------------
+   * Gold G declares the two-line approximation and emits none of this, so
+   * every mutation below names K explicitly. Each corruption leaves a program
+   * that still reports a line distribution between 1 and maxLines with a
+   * plausible PPPM beside it — there is no impossible value to notice, which
+   * is the entire reason these have to be caught by the fingerprint. */
+  {
+    /* THE COMBINATION WINDOW COLLAPSED. Every agent then starts its own
+     * regimen: a planned doublet reads as a line of therapy followed
+     * immediately by another, and the line count rises for a reason that is
+     * pure definition error. */
+    name: "SQL collapses the line combination window to 0 (every agent its own line)",
+    kind: "treatment_switching", lang: "sql", source: "K",
+    apply: (t) => t.replace(/WHERE r\.agent_first <= o\.t \+ 28/g, "WHERE r.agent_first <= o.t + 0"),
+  },
+  {
+    name: "SAS collapses the line combination window to 0",
+    kind: "treatment_switching", lang: "sas", source: "K",
+    apply: (t) => t.replace(/where r\.agent_first <= o\.t \+ 28;/g, "where r.agent_first <= o.t + 0;"),
+  },
+  {
+    /* THE COMBINATION WINDOW CHANGED IN ONE BLOCK ONLY. The construction is
+     * unrolled per line, so a hand edit that fixes line 1 and forgets lines 2
+     * and 3 is the realistic version of this defect — and the reason the
+     * fingerprint joins EVERY occurrence rather than reading the first. */
+    name: "SQL changes the combination window in the FIRST line block only",
+    kind: "treatment_switching", lang: "sql", source: "K",
+    apply: (t) => t.replace(/WHERE r\.agent_first <= o\.t \+ 28/, "WHERE r.agent_first <= o.t + 60"),
+    notIdempotent: "deliberately partial - it corrupts one unrolled block out of maxLines, which is exactly the defect being tested; a second pass would corrupt the next one",
+  },
+  {
+    /* THE GAP RULE IGNORED. With the threshold at zero every uncovered day
+     * closes a line, so ordinary refill timing advances therapy and the line
+     * count inflates. Nothing raises. */
+    name: "SQL ignores the line gap rule (any uncovered day closes the line)",
+    kind: "treatment_switching", lang: "sql", source: "K",
+    apply: (t) => t.replace(/WHERE g_len >= 60 GROUP BY enrolid/g, "WHERE g_len >= 0 GROUP BY enrolid"),
+  },
+  {
+    name: "SAS ignores the line gap rule",
+    kind: "treatment_switching", lang: "sas", source: "K",
+    apply: (t) => t.replace(/where g_len >= 60 group by enrolid;/g, "where g_len >= 0 group by enrolid;"),
+  },
+  {
+    /* THE ADVANCE TRIGGER FLIPPED. An ADDITION silently stops (or starts)
+     * advancing the line. On Gold K this moves a patient into line 2 and moves
+     * two closes from "gap" to "addition" — every count stays plausible and
+     * the line distribution is simply a different study's. */
+    name: "SQL flips the advance trigger so an ADDITION advances the line too",
+    kind: "treatment_switching", lang: "sql", source: "K",
+    apply: (t) => t.replace(/WHERE is_sub = 1 GROUP BY enrolid/g, "WHERE is_sub IN (0, 1) GROUP BY enrolid"),
+  },
+  {
+    name: "SAS flips the advance trigger so an ADDITION advances the line too",
+    kind: "treatment_switching", lang: "sas", source: "K",
+    apply: (t) => t.replace(/where is_sub = 1 group by enrolid;/g, "where is_sub in (0, 1) group by enrolid;"),
+  },
+  {
+    /* SUBSTITUTION vs ADDITION decided by nothing. With the coverage
+     * comparison replaced by a constant every new agent is a substitution, so
+     * the advance trigger stops meaning anything while still being stamped. */
+    name: "SQL stops distinguishing a substitution from an addition",
+    kind: "treatment_switching", lang: "sql", source: "K",
+    apply: (t) => t.replace(/CASE WHEN v\.n_cov < z\.n_reg THEN 1 ELSE 0 END AS is_sub/g, "1 AS is_sub"),
+  },
+  {
+    /* THE TRUNCATION GOING UNREPORTED. The patients who would have opened a
+     * further line are simply not counted, and a line distribution that
+     * silently drops its own tail looks exactly like a cohort that did not
+     * progress. */
+    name: "SQL stops reporting maxLines truncation",
+    kind: "treatment_switching", lang: "sql", source: "K",
+    apply: (t) => t.replace(/patients_truncated_at_max_lines/g, "patients_reaching_the_end"),
+  },
+  {
+    name: "SAS stops reporting maxLines truncation",
+    kind: "treatment_switching", lang: "sas", source: "K",
+    apply: (t) => t.replace(/patients_truncated_at_max_lines/g, "patients_reaching_the_end"),
+  },
+  {
+    /* THE ISLAND MERGE reverting to LAG on the LAST line only. A nested supply
+     * interval then opens a spurious island, inventing a treatment gap that
+     * closes a line early — and only on one line, so two thirds of the table
+     * stays right. */
+    name: "SQL line-3 island merge reverts to LAG (spurious gap closes a line early)",
+    kind: "treatment_switching", lang: "sql", source: "K",
+    apply: (t) => t.replace(
+      /(lot_m3mark AS \([\s\S]*?)MAX\(d_end\) OVER \(PARTITION BY enrolid ORDER BY d_start, d_end ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING\)/,
+      "$1LAG(d_end) OVER (PARTITION BY enrolid ORDER BY d_start, d_end)"),
+  },
+  {
+    /* PPPM ON THE WRONG DENOMINATOR. Dividing by the window length instead of
+     * the line's own eligible member-months understates cost for exactly the
+     * patients who advanced fastest — the single reason CostNormalization
+     * exists. The mutation keeps a dollar figure that looks entirely normal. */
+    name: "SQL divides line cost by the WINDOW instead of the line's member-months",
+    kind: "treatment_switching", lang: "sql", source: "K",
+    apply: (t) => t.replace(/elig_days \/ 30\.4375/g, "360 / 30.4375"),
+  },
+  {
+    name: "SAS divides line cost by the WINDOW instead of the line's member-months",
+    kind: "treatment_switching", lang: "sas", source: "K",
+    apply: (t) => t.replace(/elig_days \/ 30\.4375/g, "360 / 30.4375"),
+  },
+  {
+    /* THE AGENT LIST NARROWED. One agent silently leaves the construction, so
+     * its dispensings can neither join a regimen nor trigger a line. Every
+     * count falls and nothing looks impossible. */
+    name: "SQL drops an agent from the line construction",
+    kind: "treatment_switching", lang: "sql", source: "K",
+    apply: (t) => t.replace(/'agent_a', 'agent_b', 'agent_c'\)\n  WHERE/g, "'agent_a', 'agent_b')\n  WHERE"),
+  },
+
+  /* ---- LINKED MORTALITY (Gold K) --------------------------------------
+   * Both corruptions below produce a complete, publishable survival curve
+   * that is biased UPWARD — the same destination as the DSTATUS refusal, by
+   * two different routes. Neither raises anything. */
+  {
+    /* THE IMMORTALITY BUG, and the most important mutation in this file.
+     * Dropping the linked-flag predicate puts members who CANNOT BE OBSERVED
+     * TO DIE back into the risk set: they contribute person-time and never an
+     * event. On Gold K it moves S(270) from 0.5 to 2/3 and turns a median of
+     * 200 days into "not reached". */
+    name: "SQL puts UNLINKED members back in the risk set (the immortality bug)",
+    kind: "survival", lang: "sql", source: "K",
+    apply: (t) => t.replace(/WHERE CAST\(m\.linked_flag AS VARCHAR\) IN \([^)]*\)/g, "WHERE 1 = 1"),
+  },
+  {
+    name: "SAS puts UNLINKED members back in the risk set (the immortality bug)",
+    kind: "survival", lang: "sas", source: "K",
+    apply: (t) => t.replace(/where strip\(vvalue\(m\.linked\)\) in \([^)]*\);/g, "where 1;"),
+  },
+  {
+    /* THE RISK SET WIDENED FROM THE OTHER END: the linked-flag predicate stays
+     * and the at-risk table reads the whole cohort instead of the linked
+     * subset. Same bias, and the attrition row still reports 4 of 6 — so the
+     * program would SAY it restricted while not restricting. */
+    name: "SQL at-risk table reverts to the whole cohort while still reporting 4 of 6",
+    kind: "survival", lang: "sql", source: "K",
+    apply: (t) => t.replace(/atrisk AS \(([\s\S]{0,400}?)SELECT enrolid, index_date FROM mcov/,
+      "atrisk AS ($1SELECT enrolid, index_date FROM cohort"),
+  },
+  {
+    /* THE ASCERTAINMENT DATE IGNORED. Follow-up then runs past the date beyond
+     * which a death cannot appear, so the tail is reported as survival. On
+     * Gold K it turns one member's post-ascertainment death into an event and
+     * drives S(330) from 0.5 to 0.25. */
+    name: "SQL ignores the ascertainment date in the administrative censor",
+    kind: "survival", lang: "sql", source: "K",
+    apply: (t) => t.replace(/LEAST\((LEAST\([^\n]*?\)), DATE '2020-09-30'\)/g, "$1"),
+  },
+  {
+    name: "SAS ignores the ascertainment date in the administrative censor",
+    kind: "survival", lang: "sas", source: "K",
+    apply: (t) => t.replace(/min\((min\([^\n]*?\)), '30SEP2020'd\)/g, "$1"),
+  },
+  {
+    /* THE ATTRITION ROW DELETED. The curve is right and nobody can see the
+     * denominator it was drawn over — which is the state the LINKED_MORTALITY
+     * gate existed to prevent. */
+    name: "SQL deletes the linked-subset attrition row",
+    kind: "survival", lang: "sql", source: "K",
+    apply: (t) => t.replace(/unlinked_excluded_from_risk_set/g, "unlinked_members"),
+  },
+
   /* ---- ADHERENCE ------------------------------------------------------
    * Every corruption below leaves a program that runs and reports a PDC
    * between 0 and 1. That is the whole failure mode of this module: there is
@@ -1376,6 +1542,7 @@ export function mutationChecks(): Check[] {
     { name: "H", spec: GOLD_H_SPEC, opts: GOLD_H_OPTS },
     { name: "I", spec: GOLD_I_SPEC, opts: GOLD_I_OPTS },
     { name: "J", spec: GOLD_J_SPEC, opts: GOLD_J_OPTS },
+    { name: "K", spec: GOLD_K_SPEC, opts: GOLD_K_OPTS },
   ].map(({ name, spec, opts }) => {
     const sas = emitSas(spec, opts);
     return {
@@ -1752,7 +1919,19 @@ function sasPrimaryMutationChecks(): Check[] {
 
 /** Corruptions the SAS STRUCTURAL lint must catch. Same principle as above: a
  *  structural check that has never gone red is an unproven check. */
-const SAS_STRUCTURE_MUTATIONS: Array<{ name: string; apply: (t: string) => string }> = [
+const SAS_STRUCTURE_MUTATIONS: Array<{
+  name: string;
+  apply: (t: string) => string;
+  /**
+   * The failure detail must MATCH this, not merely exist.
+   *
+   * "Some check went red" is a weaker claim than it looks: a corruption can trip
+   * a rule other than the one it was written to exercise, and the new rule it
+   * was meant to prove stays unproven while the test reads green. Pinning the
+   * message makes the mutation testify about a specific rule.
+   */
+  expect?: RegExp;
+}> = [
   {
     name: "SAS proc sql left unclosed (missing quit;)",
     apply: (t) => t.replace(/\bquit\s*;/i, ""),
@@ -1780,6 +1959,28 @@ const SAS_STRUCTURE_MUTATIONS: Array<{ name: string; apply: (t: string) => strin
     name: "SAS analysis program loses its %include of 00_setup",
     apply: (t) => t.replace(/%include\s+["'][^"']*setup[^"']*["']\s*;/i, ""),
   },
+  {
+    /* THE DEFECT THIS REPO ALREADY SHIPPED ONCE, ON THE SIDE THAT IS EXECUTED.
+     * A prose edit put a possessive apostrophe into a generated string literal.
+     * The SQL twin runs in the harness, so it broke loudly and was fixed the
+     * same minute. The SAS twin runs nowhere: the identical slip passed the
+     * structural lint, passed parity (both twins carry the same INTENDED text),
+     * and would have reached the analyst as a program that does not execute.
+     *
+     * `'Age band'` -> `'Patient's age band'` is that edit exactly. SAS reads it
+     * as the literal `Patient`, then loose code, then a quote that opens and
+     * never closes — swallowing the statement's own terminator with it. */
+    name: "SAS string literal gets an unescaped apostrophe (a prose edit, unescaped)",
+    apply: (t) => t.replace(/'Age band'/, "'Patient's age band'"),
+    expect: /unterminated single-quoted string literal/,
+  },
+  {
+    /* The other half of the same rule. Both quote characters open literals in
+     * SAS, and a rule proven on only one of them is proven on half of itself. */
+    name: "SAS double-quoted title left unterminated",
+    apply: (t) => t.replace(/(title "Level check: work\._090_atrisk \(at-risk cohort\))"/, "$1"),
+    expect: /unterminated double-quoted string literal/,
+  },
 ];
 
 function sasStructureMutationChecks(): Check[] {
@@ -1801,13 +2002,41 @@ function sasStructureMutationChecks(): Check[] {
       continue;
     }
     const failures = sasStructureChecks(mutated).filter((c) => c.status === "fail");
+    const detail = failures.map((f) => f.detail).join(" | ");
+    const caught = failures.length > 0 && (m.expect ? m.expect.test(detail) : true);
     checks.push({
       name: `sas structure mutation caught: ${m.name}`,
-      status: failures.length > 0 ? "pass" : "fail",
-      detail: failures.length > 0
-        ? failures.map((f) => f.detail).join(" | ").slice(0, 180)
-        : "NOT CAUGHT — the SAS structural lint is blind to this",
+      status: caught ? "pass" : "fail",
+      detail: caught
+        ? detail.slice(0, 180)
+        : failures.length === 0
+          ? "NOT CAUGHT — the SAS structural lint is blind to this"
+          : `caught by the WRONG rule — expected ${m.expect} but got: ${detail.slice(0, 140)}`,
     });
   }
+
+  /* FALSE-POSITIVE CONTROL.
+   *
+   * A quote rule that fires on any apostrophe would be worse than no rule: it
+   * would fail correct programs, and this file already records two rules that
+   * did exactly that (the `title` counted as a ninth procedure, PROC LIFETEST's
+   * `outsurv=`). The properly escaped form of the very literal the mutation
+   * above corrupts must stay green — that is what distinguishes reading SAS's
+   * doubled-quote escape from merely counting apostrophes. */
+  const escaped = files.map((f, i) =>
+    i === targetIdx ? { ...f, content: f.content.replace(/'Age band'/, "'Patient''s age band'") } : f,
+  );
+  const escapedChanged = escaped[targetIdx].content !== files[targetIdx].content;
+  const escapedFailures = sasStructureChecks(escaped).filter((c) => c.status === "fail");
+  checks.push({
+    name: "sas structure: a CORRECTLY escaped apostrophe ('') is NOT flagged",
+    status: escapedChanged && escapedFailures.length === 0 ? "pass" : "fail",
+    detail: !escapedChanged
+      ? "control pattern did not match — vacuous test; update the pattern"
+      : escapedFailures.length === 0
+        ? "'Patient''s age band' reads as one literal, the way SAS reads it"
+        : `FALSE POSITIVE — ${escapedFailures.map((f) => f.detail).join(" | ").slice(0, 180)}`,
+  });
+
   return checks;
 }

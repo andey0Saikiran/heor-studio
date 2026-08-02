@@ -460,7 +460,57 @@ export interface CostInflation {
  */
 export type SurvivalEndpoint =
   | { kind: "claims_event"; outcomeDefinition: OutcomeDefinition }
-  | { kind: "death"; source: "dstatus" | "ssa_master_file" | "linked_registry" };
+  | { kind: "death"; source: "dstatus" }
+  | {
+      kind: "death";
+      source: "ssa_master_file" | "linked_registry";
+      /** REQUIRED. Without it this stays refused, because the linkage IS the
+       *  ascertainment and an undeclared one cannot be reported honestly. */
+      linkage: MortalityLinkage;
+    };
+
+/**
+ * AN EXTERNAL MORTALITY LINKAGE, declared.
+ *
+ * DSTATUS is refused permanently: in-hospital only, masked from 2016, and
+ * censoring by death is exactly the informative censoring KM and Cox assume
+ * away. A linkage to the SSA Master Death File, the National Death Index or
+ * Merative's own MarketScan Mortality Detail file makes the question genuinely
+ * answerable, and a substantial published literature does it.
+ *
+ * THE HAZARD MOVES RATHER THAN DISAPPEARING. Linkage is never complete. One
+ * published HCC study reports survival for 758 of 1459 members. If the curve is
+ * drawn across the whole cohort while only the linked part is ABLE to die, the
+ * unlinked members are immortal by construction and survival is biased upward
+ * again, by a different route than DSTATUS but to the same place.
+ *
+ * So two things are structural here rather than advisory:
+ *
+ *   `linkedFlagColumn` names how a member is known to be IN the linked set,
+ *   which is what lets the program count ascertainment and restrict the risk
+ *   set to it. Without it there is no way to tell "did not die" from "could not
+ *   be observed to die".
+ *
+ *   `ascertainedThrough` is the date beyond which a death would not appear even
+ *   if it happened. Follow-up past it is administrative censoring, and a study
+ *   that runs past its own ascertainment date silently reports the tail as
+ *   survival.
+ */
+export interface MortalityLinkage {
+  /** the site's linked mortality table, configured in 00_setup */
+  tableHandle: string;
+  /** column carrying the date of death, NULL for members not known to have died */
+  deathDateColumn: string;
+  /** column that is true for every member the LINKAGE COVERS, whether or not
+   *  they died. This is the one that separates "alive" from "unobservable". */
+  linkedFlagColumn: string;
+  /** deaths are complete only through this date; beyond it, censor */
+  ascertainedThrough: string;
+  /** for the stamp and the methods section, e.g. "SSA Master Death File, 2024
+   *  vintage" — linkages are revised and re-released, so the vintage is part of
+   *  the result */
+  vintageLabel: string;
+}
 
 /** Survival-curve interval.
  *  `log_log` transforms to ln(-ln S), so its limits are inside [0,1] by
@@ -527,30 +577,86 @@ export const MORTALITY_REFUSAL =
   `overall survival on DSTATUS is REFUSED, not approximated. MarketScan's only native death signal is DSTATUS, which records IN-HOSPITAL death only and is masked from data year 2016 — so this analysis would silently become "time to in-hospital death before 2016, with every other death censored". Censoring by death is exactly the informative censoring Kaplan-Meier and Cox both assume away, and it biases survival UPWARD. Use a claims_event endpoint (an observable diagnosis or procedure), or declare an external mortality linkage — see below.`;
 
 /**
- * Linked mortality is UNBUILT, which is a different claim from refused.
+ * Linked mortality is UNBUILT FOR THIS ANALYSIS KIND, which is a different
+ * claim from refused.
  *
- * The survival machinery already exists and is execution-verified; what is
- * missing is the ascertainment scaffolding that makes a linked analysis
- * honest. Two things are non-negotiable before this opens, and both are
- * standard in the published literature:
+ * The ascertainment scaffolding this message used to describe as missing now
+ * EXISTS: `kind:"survival"` builds the linked-subset attrition row, restricts
+ * the risk set to the linked subset, and censors at the declared ascertainment
+ * date (emitters/mortality-core.ts). What is not wired is the same treatment
+ * for the other three time-to-event kinds — Cox, competing risks and Fine-Gray
+ * each carry their own risk-set construction, and opening the endpoint without
+ * restricting THAT risk set would reintroduce the immortality bias in the exact
+ * place it is hardest to see.
  *
- *   - a LINKED-SUBSET attrition row, because mortality is ascertained for some
- *     members and not others (one published HCC study had survival for 758 of
- *     1459), and a curve drawn over the whole cohort while only part of it can
- *     die is the same informative-censoring bias by another route;
- *   - a hard block on reporting survival over the UNLINKED complement.
- *
- * Saying "not built yet" here rather than "refused" matters: refused means the
- * data cannot answer it, and that is simply untrue of a linked design.
+ * Saying "not built yet" rather than "refused" still matters, and matters more
+ * now that one kind can do it: refused means the data cannot answer it, and
+ * that is untrue of a linked design.
  */
 export const LINKED_MORTALITY_UNBUILT =
-  `overall survival on an EXTERNAL MORTALITY LINKAGE is not built yet. This is an unbuilt feature, NOT a refusal: the linkage makes the question answerable and a large published literature does exactly this. What is missing is the ascertainment scaffolding that keeps it honest — a linked-subset attrition row (mortality ascertained in N of M members) and a block on reporting survival over the unlinked complement, since a curve drawn across a cohort where only part of it is able to die carries the same informative-censoring bias the DSTATUS refusal exists to prevent. Until it lands, use a claims_event endpoint.`;
+  `overall survival on an EXTERNAL MORTALITY LINKAGE is not built yet FOR THIS ANALYSIS KIND. This is an unbuilt feature, NOT a refusal: the linkage makes the question answerable, a large published literature does exactly this, and kind:"survival" now emits it — with a linked-subset attrition row (mortality ascertained in N of M members), a risk set restricted to the linked subset, and administrative censoring at the declared ascertainment date. What is missing here is the same restriction inside THIS kind's own risk-set construction, and opening the endpoint without it would put the immortality bias back where it is hardest to see. Run the Kaplan-Meier analysis on the linked endpoint, or use a claims_event endpoint for this one.`;
 
-/** The outcome definition a time-to-event endpoint carries, or null for the
- *  refused mortality endpoint. Callers that reach the emitters never see null:
- *  readiness blocks the death arm before any code is generated. */
+/**
+ * A linked source with NO declared linkage, which is refused rather than
+ * unbuilt — and refused for a reason that is about honesty, not capability.
+ *
+ * The linkage IS the ascertainment. Without `linkedFlagColumn` there is no way
+ * to tell "did not die" from "could not be observed to die", so the risk set
+ * cannot be restricted and the attrition row cannot be counted. A curve emitted
+ * anyway would be the immortality bias with a linkage's name on it, which is
+ * worse than DSTATUS: it would carry the authority of an external death file
+ * while making the same error.
+ */
+export const LINKED_MORTALITY_UNDECLARED =
+  `a linked mortality endpoint is declared with NO linkage. Add the MortalityLinkage: the table handle, the death-date column, the LINKED-FLAG column, the ascertainment date and the vintage label. The linked flag is not optional bookkeeping — it is the only thing separating "did not die" from "could not be observed to die", and without it the risk set cannot be restricted to the linked subset. A curve drawn over the whole cohort while only part of it is able to die makes the unlinked members immortal by construction and biases survival UPWARD, which is precisely the failure the DSTATUS refusal exists to prevent.`;
+
+/** The outcome definition a time-to-event endpoint carries, or null for a
+ *  mortality endpoint, which has no code list by construction.
+ *
+ *  It stays null for the LINKED arm too, deliberately. A linked death is
+ *  ascertained from an external table rather than from claims, so there is no
+ *  OutcomeDefinition to return and inventing one would let every downstream
+ *  caller keep reading `od.codeListId` and quietly build a claims query. The
+ *  linked arm is picked up by `mortalityLinkageOf` instead, and a module that
+ *  handles neither emits its NOT EMITTED banner — which is the correct
+ *  behaviour for a kind that has not been wired. */
 export function survivalOutcome(an: { endpoint: SurvivalEndpoint }): OutcomeDefinition | null {
   return an.endpoint.kind === "claims_event" ? an.endpoint.outcomeDefinition : null;
+}
+
+/** The declared linkage a mortality endpoint carries, or null. Null for every
+ *  claims endpoint, for DSTATUS, and for a linked source whose linkage was
+ *  never declared — all three of which readiness has already stopped. */
+export function mortalityLinkageOf(an: { endpoint: SurvivalEndpoint }): MortalityLinkage | null {
+  if (an.endpoint.kind !== "death") return null;
+  if (an.endpoint.source === "dstatus") return null;
+  return an.endpoint.linkage ?? null;
+}
+
+/** Identifiers a linkage embeds VERBATIM in generated SQL and SAS.
+ *  Validated at readiness (see validateAnalyses) because a table handle from
+ *  untrusted JSON is a code-injection surface, not merely a typo risk. */
+const LINKAGE_IDENT = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$/;
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Problems with a declared linkage, or an empty list. Shared by every gate so
+ *  a fifth time-to-event kind cannot validate it more loosely than the fourth. */
+export function mortalityLinkageProblems(lk: MortalityLinkage, w: string): string[] {
+  const out: string[] = [];
+  const ident = (v: string, field: string) => {
+    if (!LINKAGE_IDENT.test(v ?? ""))
+      out.push(`${w}: linkage.${field} ${JSON.stringify(v)} is not a safe identifier — it is embedded VERBATIM in the generated SQL and SAS, so it must be letters, digits and underscores (optionally one dot for a schema or libref).`);
+  };
+  ident(lk.tableHandle, "tableHandle");
+  ident(lk.deathDateColumn, "deathDateColumn");
+  ident(lk.linkedFlagColumn, "linkedFlagColumn");
+  if (!ISO_DATE.test(lk.ascertainedThrough ?? ""))
+    out.push(`${w}: linkage.ascertainedThrough must be an ISO date (YYYY-MM-DD) — it becomes an administrative censoring bound in both twins, and follow-up past it is not evidence of survival.`);
+  if (!(lk.vintageLabel ?? "").trim())
+    out.push(`${w}: linkage.vintageLabel is empty. Linkages are revised and re-released, so two runs a year apart can produce different curves from identical claims; the vintage is part of the result, not metadata about it.`);
+  if (lk.deathDateColumn === lk.linkedFlagColumn)
+    out.push(`${w}: linkage.deathDateColumn and linkage.linkedFlagColumn are the same column. They answer different questions — WHEN did this member die, and IS this member covered by the linkage at all — and collapsing them makes every survivor indistinguishable from every unlinked member.`);
+  return out;
 }
 
 /** One competing cause: an event that makes the event of interest impossible.
@@ -1083,6 +1189,17 @@ export function fillsCodeListIds(spec: StudySpec): string[] {
     if (a.kind === "treatment_switching") {
       ids.add(a.fromCodeListId);
       for (const to of a.toCodeListIds) ids.add(to);
+      /* THE AGENT LISTS, and only under the declared_regimen rule.
+       *
+       * A regimen is named by which agents are active, so every agent list has
+       * to reach the feeder or the construction silently builds lines out of
+       * the drugs it happens to see. Guarded on the rule rather than on the
+       * presence of `lineConstruction` so that a spec using the two-line
+       * approximation emits the byte-identical feeder it emitted before this
+       * wave — which is what the snapshot gate checks. */
+      if (a.lineRule === "declared_regimen" && a.lineConstruction) {
+        for (const ag of a.lineConstruction.agentCodeListIds) ids.add(ag);
+      }
     }
   }
   return [...ids].sort();
@@ -1141,8 +1258,66 @@ export interface TreatmentSwitchingAnalysis extends AnalysisCommon {
    * So execution can prove that the SAS and SQL twins implement the SAME rule.
    * It can never prove the rule is the one a given protocol meant. The emitted
    * code says so, in both languages, next to the number.
+   *
+   * `new_line_on_switch` is the two-line approximation: line 1 from index, line
+   * 2 at the first switch, nothing beyond. `declared_regimen` is the full
+   * construction, and it requires `lineConstruction` below.
    */
-  lineRule: "new_line_on_switch";
+  lineRule: "new_line_on_switch" | "declared_regimen";
+  /** required when lineRule is "declared_regimen" */
+  lineConstruction?: LineConstruction;
+}
+
+/**
+ * FULL LINE-OF-THERAPY CONSTRUCTION — the spine of nearly every oncology claims
+ * study, and the place where a declared rule matters most.
+ *
+ * A line of therapy is a REGIMEN: the set of agents a patient is on together.
+ * Building it from dispensings needs three decisions, and all three move the
+ * line count more than anything else in the analysis. None has a defensible
+ * default, so all three are required and all three are stamped.
+ *
+ *   COMBINATION WINDOW. Agents started within this many days of the line's
+ *   first agent are part of the SAME regimen rather than a new line. 28 days is
+ *   the common choice. Too short and a planned doublet reads as an immediate
+ *   progression; too long and a genuine second line is absorbed into the first.
+ *
+ *   GAP DAYS. Uncovered days that end the current line. 60, 90 and 180 all
+ *   appear in the published literature, and they do not agree with each other.
+ *
+ *   ADVANCE TRIGGER. What starts a new line once the regimen is established:
+ *     - "substitution": only replacing an agent advances. Adding one is
+ *       intensification WITHIN the line.
+ *     - "addition_or_substitution": adding an agent also advances. This is the
+ *       stricter reading and produces more lines on the same data.
+ *
+ * WHAT NO CHOICE HERE CAN FIX. Claims record dispensings, not intent. A
+ * clinician's decision to call something second line is not in the data at all,
+ * and two protocols applying different rules to identical claims will both be
+ * correct and disagree. The module therefore reports the line distribution
+ * UNDER THE DECLARED RULE and says, in both twins, that the rule is an input
+ * rather than a finding.
+ */
+/** The construction is UNROLLED to `maxLines` in both twins (one block of set
+ *  operations per line), so the bound is also a bound on program length. Deep
+ *  lines are rare and thin; this is where "report line 9 from two patients"
+ *  stops being possible. */
+export const MAX_CONSTRUCTED_LINES = 8;
+
+export interface LineConstruction {
+  /** agents starting within this many days of the line's first agent join it */
+  combinationWindowDays: number;
+  /** uncovered days that close the current line */
+  gapDays: number;
+  /** what advances the line once the regimen is set */
+  advanceTrigger: "substitution" | "addition_or_substitution";
+  /** the agents in scope, one code list per agent or class. A line's regimen is
+   *  named by which of these are active, so the granularity of this list IS the
+   *  granularity of the line definition. */
+  agentCodeListIds: string[];
+  /** stop constructing after this many lines. Deep lines are rare and thin, and
+   *  an unbounded count invites reporting a line 9 estimated from two patients. */
+  maxLines: number;
 }
 
 /**
@@ -2169,17 +2344,32 @@ export function validateAnalyses(spec: StudySpec): string[] {
          * direction that flatters survival, because dying is the most
          * censoring-like thing a person can do. */
         if (a.endpoint.kind === "death") {
-          /* The message depends on the SOURCE. DSTATUS is refused because the
-           * data cannot answer it; a declared linkage is merely unbuilt. Saying
-           * "refused" for both told analysts their design was impossible when
-           * it was only unsupported here. */
-          problems.push(`${w}: ${a.endpoint.source === "dstatus" ? MORTALITY_REFUSAL : LINKED_MORTALITY_UNBUILT}`);
-          break;
+          /* DSTATUS is refused because the data cannot answer it, permanently
+           * and for a reason that will never change. */
+          if (a.endpoint.source === "dstatus") {
+            problems.push(`${w}: ${MORTALITY_REFUSAL}`);
+            break;
+          }
+          /* A LINKED source WITHOUT a declared linkage stays refused: the
+           * linkage IS the ascertainment, and an undeclared one cannot be
+           * reported honestly. */
+          if (!a.endpoint.linkage) {
+            problems.push(`${w}: ${LINKED_MORTALITY_UNDECLARED}`);
+            break;
+          }
+          /* A linked source WITH a declared linkage is EMITTABLE. It falls
+           * through to the checks below that are about the CLOCK rather than
+           * about the code list, because the ascertainment scaffolding
+           * (linked-subset attrition, a risk set restricted to the linked
+           * subset, censoring at the ascertainment date) is what this endpoint
+           * needed and it exists — see emitters/mortality-core.ts. */
+          problems.push(...mortalityLinkageProblems(a.endpoint.linkage, w));
+        } else {
+          requireCodeList(a.endpoint.outcomeDefinition.codeListId, `${w} endpoint`);
+          if (a.endpoint.outcomeDefinition.minClaims < 1) problems.push(`${w}: minClaims must be >= 1.`);
+          if (a.endpoint.outcomeDefinition.minClaims >= 2 && a.endpoint.outcomeDefinition.claimSeparationDays == null)
+            problems.push(`${w}: minClaims>=2 requires claimSeparationDays.`);
         }
-        requireCodeList(a.endpoint.outcomeDefinition.codeListId, `${w} endpoint`);
-        if (a.endpoint.outcomeDefinition.minClaims < 1) problems.push(`${w}: minClaims must be >= 1.`);
-        if (a.endpoint.outcomeDefinition.minClaims >= 2 && a.endpoint.outcomeDefinition.claimSeparationDays == null)
-          problems.push(`${w}: minClaims>=2 requires claimSeparationDays.`);
         if (a.horizonDays.length === 0) problems.push(`${w}: horizonDays[] is empty — no survival probability would be reported.`);
         if (a.horizonDays.some((h) => !(h > 0))) problems.push(`${w}: every horizonDays entry must be > 0.`);
         if (a.horizonDays.some((h, i) => i > 0 && h <= a.horizonDays[i - 1]))
@@ -2447,6 +2637,49 @@ export function validateAnalyses(spec: StudySpec): string[] {
             checkCellCovariate(id, banded, `${w}: covariateIds`, (kind) =>
               `${w}: covariate "${id}" is kind "${kind}", which is not categorical. The control estimates use the same SATURATED closed-form score as the primary analysis, and a continuous covariate breaks saturation there in exactly the same way. Band it with bandings: [{ baselineId: "${id}", cutPoints: [...] }], or drop it from the control adjustment — but then it is not the same pipeline the primary analysis used.`,
             );
+        }
+        break;
+      }
+      case "treatment_switching": {
+        requireCodeList(a.fromCodeListId, `${w} from-drug`);
+        for (const to of a.toCodeListIds) requireCodeList(to, `${w} to-drug`);
+        if (typeof a.window.start !== "number" || typeof a.window.end !== "number")
+          problems.push(`${w}: the observation window must have numeric day bounds.`);
+        /* THE FULL LINE CONSTRUCTION. Every one of these three parameters moves
+         * the line count more than anything else in the analysis, and none has
+         * a defensible default — so they are required, checked, and stamped
+         * rather than filled in quietly. */
+        if (a.lineRule === "declared_regimen") {
+          const lc = a.lineConstruction;
+          if (!lc) {
+            problems.push(
+              `${w}: lineRule "declared_regimen" requires lineConstruction. Without it there is no combination window, no gap rule and no advance trigger, and the three of them ARE the line definition — a default would be this tool choosing your protocol for you.`,
+            );
+          } else {
+            for (const ag of lc.agentCodeListIds) requireCodeList(ag, `${w} agent`);
+            if (lc.agentCodeListIds.length === 0)
+              problems.push(
+                `${w}: lineConstruction.agentCodeListIds[] is empty. A line's regimen is named by which agents are active, so with no agents every patient reaches line 1 with an empty regimen and the analysis reports a line distribution it never constructed.`,
+              );
+            if (new Set(lc.agentCodeListIds).size !== lc.agentCodeListIds.length)
+              problems.push(`${w}: lineConstruction.agentCodeListIds[] contains a duplicate — the same agent would be counted twice in every regimen size.`);
+            if (!(lc.combinationWindowDays >= 0))
+              problems.push(`${w}: lineConstruction.combinationWindowDays must be >= 0; got ${lc.combinationWindowDays}.`);
+            if (!(lc.gapDays > 0))
+              problems.push(
+                `${w}: lineConstruction.gapDays must be positive; got ${lc.gapDays}. A gap of zero days closes the line on the first uncovered day, so every ordinary refill boundary would advance a line.`,
+              );
+            if (!(lc.maxLines >= 1))
+              problems.push(`${w}: lineConstruction.maxLines must be at least 1; got ${lc.maxLines}.`);
+            if (lc.maxLines > MAX_CONSTRUCTED_LINES)
+              problems.push(
+                `${w}: lineConstruction.maxLines is ${lc.maxLines}. The construction is UNROLLED to this bound in both twins, so a large value emits a very long program for lines that are rare and thin — a line ${lc.maxLines} estimated from two patients is not a finding. The cap here is ${MAX_CONSTRUCTED_LINES}.`,
+              );
+          }
+        } else if (a.lineConstruction) {
+          problems.push(
+            `${w}: lineConstruction is declared but lineRule is "${a.lineRule}", so none of it is consumed. The emitted line numbers would come from the two-line approximation while the spec, the stamp and the methods section all described a regimen construction that never ran.`,
+          );
         }
         break;
       }

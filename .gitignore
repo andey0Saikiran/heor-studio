@@ -34,3 +34,6 @@ docs/research/
 # CI workflow. Pushing it needs a token with the "workflow" scope; run
 #   gh auth refresh -h github.com -s workflow
 # once, then this tree pushes normally.
+
+# Dev scratch used while hand-deriving a fixture. Never shipped.
+packages/core/src/verify/.scratch/

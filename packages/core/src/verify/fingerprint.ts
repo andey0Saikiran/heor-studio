@@ -114,6 +114,29 @@ function count(text: string, re: RegExp): string {
   return String((text.match(re) ?? []).length);
 }
 
+/** EVERY capture of a repeated pattern, joined — not just the first.
+ *
+ *  The line-of-therapy construction is UNROLLED, so a parameter like the
+ *  combination window appears once per line. `grab` would read only the first
+ *  copy, and a mutation that changed the second and third would read as caught
+ *  by nothing. Joining every occurrence makes a partial change a different
+ *  string AND makes a wrong unroll count (too few lines) visible in the same
+ *  key — which is the same lesson the POWER-exponent list already encodes. */
+function allOf(text: string, re: RegExp): string {
+  const out: string[] = [];
+  for (const m of text.matchAll(re)) out.push((m[1] ?? "").trim());
+  return out.length > 0 ? out.join(",") : "ABSENT";
+}
+
+/** The highest integer a repeated pattern captures, as a string. Used for the
+ *  unroll bound: the construction emits lot_x1 .. lot_x<maxLines>, so the
+ *  largest suffix IS the bound the emitter consumed. */
+function maxOf(text: string, re: RegExp): string {
+  let best = -1;
+  for (const m of text.matchAll(re)) best = Math.max(best, Number(m[1]));
+  return best < 0 ? "ABSENT" : String(best);
+}
+
 /** Every exponent applied in the program, in order (e.g. "3,3").
  *  A dropped or altered cube changes the list even when a sibling is intact. */
 function exponents(text: string, re: RegExp): string {
@@ -586,6 +609,39 @@ function sqlFingerprint(kind: string, raw: string): Fingerprint {
         put(fp, "logrank_p_null_in_sql",
           /CAST\('p_value' AS VARCHAR\),\s*\n\s*CAST\(\d+ AS INT\),(?:\s*CAST\(NULL AS INT\),)+\s*\n\s*CAST\(NULL AS NUMERIC\)/i.test(sql) ? "yes" : "no");
       }
+      /* ---- THE EXTERNAL MORTALITY LINKAGE ----
+       *
+       * Two of these are the whole feature and the rest are supporting: the
+       * risk set must be the LINKED SUBSET, and follow-up must stop at the
+       * ASCERTAINMENT DATE. Both corruptions leave a complete, plausible curve
+       * that is biased UPWARD, which is exactly the failure mode the DSTATUS
+       * refusal exists to prevent — so both are scraped from the expression
+       * that implements them, not from a label near it. */
+      if (/AS linked_flag/i.test(sql)) {
+        const src = /SELECT enrolid, (\w+) AS death_date, (\w+) AS linked_flag\s*\n\s*FROM ([\w.]+)/i.exec(sql);
+        put(fp, "mortality_death_column", src?.[1]);
+        put(fp, "mortality_linked_flag_column", src?.[2]);
+        put(fp, "mortality_linkage_table", src?.[3]);
+        /* THE RISK SET. Anchored on BOTH halves: the linked-flag predicate that
+         * builds the subset, and the atrisk CTE that reads it. Dropping either
+         * one alone puts the unlinked members back into the denominator. */
+        put(fp, "mortality_linked_predicate",
+          /JOIN mlink m ON m\.enrolid = c\.enrolid\s*\n\s*WHERE CAST\(m\.linked_flag AS VARCHAR\) IN \(/i.test(sql) ? "yes" : "no");
+        put(fp, "mortality_risk_set_is_linked_subset",
+          /atrisk AS \(\s*SELECT enrolid, index_date FROM mcov/i.test(sql) ? "yes" : "no");
+        /* THE ASCERTAINMENT DATE, twice and from two different places: the
+         * administrative censor (which decides the curve) and the attrition
+         * row (which reports it). They must agree, and the cross-language diff
+         * plus the stamp check together pin both. Anchored on the
+         * `) AS admin_censor` slot rather than on any DATE literal nearby —
+         * a censoring plan legitimately carries several. */
+        put(fp, "mortality_censor_at_ascertainment",
+          grab(sql, [/, DATE '(\d{4}-\d{2}-\d{2})'\) AS admin_censor/i]));
+        put(fp, "mortality_ascertained_through",
+          grab(sql, [/AND k\.death_date <= DATE '(\d{4}-\d{2}-\d{2})' THEN 1 ELSE 0 END\) AS n_deaths/i]));
+        put(fp, "mortality_attrition_row",
+          /AS n_linked/i.test(sql) && /AS n_unlinked/i.test(sql) && /unlinked_excluded_from_risk_set/i.test(sql) ? "yes" : "no");
+      }
       break;
     }
     case "treatment_switching": {
@@ -614,6 +670,50 @@ function sqlFingerprint(kind: string, raw: string): Fingerprint {
       put(fp, "line_definitional_row", /DEFINITIONAL, NOT MEASURED/i.test(sql) ? "yes" : "no");
       put(fp, "line_estimate_is_null", /CAST\(NULL AS NUMERIC\) AS estimate[\s\S]{0,200}DEFINITIONAL/i.test(sql) || /rule_is_definitional/i.test(sql) ? "yes" : "no");
       put(fp, "days_supply_cap", grab(sql, [/days_supply IS NULL OR days_supply <= (\d+)\)/i]));
+      /* ---- THE FULL REGIMEN CONSTRUCTION (lineRule "declared_regimen") ----
+       *
+       * Emitted only on that rule, so the keys are PUT only when the program
+       * actually contains it — a key set that appeared unconditionally would
+       * read ABSENT on every two-line program and turn the cross-language diff
+       * into noise. Every pattern below is anchored on an expression that
+       * exists nowhere else in the program: this module already carries a
+       * `f.code_list_id IN (...)` for the to-drug list, and a pattern loose
+       * enough to match either would scrape the wrong drug set while looking
+       * entirely healthy (see the days_supply_cap and condition_weights
+       * comments for two earlier instances of exactly that). */
+      if (/lot_agw AS \(/i.test(sql)) {
+        put(fp, "lot_agents", grab(sql, [/SELECT c\.enrolid, f\.code_list_id AS agent,[\s\S]{0,500}?f\.code_list_id IN \(([^)]*)\)/i])?.replace(/['\s]/g, ""));
+        /* ONE OCCURRENCE PER LINE, all joined. The construction is unrolled to
+         * maxLines, so these also pin the unroll count. */
+        put(fp, "lot_combination_window_days", allOf(sql, /WHERE r\.agent_first <= o\.t \+ (\d+)/gi));
+        put(fp, "lot_gap_days", allOf(sql, /WHERE g_len >= (\d+) GROUP BY enrolid/gi));
+        put(fp, "lot_advance_trigger", allOf(sql, /WHERE (is_sub = 1|is_sub IN \(0, 1\)) GROUP BY enrolid/gi)
+          .split(",").map((t) => (t === "is_sub = 1" ? "substitution" : "addition_or_substitution")).join(","));
+        /* THE UNROLL BOUND, read off the per-line island-merge CTEs.
+         *
+         * NOT off `lot_x<k> AS (`: the construction also emits `lot_x<k>0` (the
+         * pre-NULL close), so `lot_x(\d+)` reads "30" from `lot_x30` and the
+         * bound comes back as thirty. That is the loose-pattern failure this
+         * file keeps re-learning — the merge CTEs have no `<k>0` sibling. */
+        put(fp, "lot_max_lines", maxOf(sql, /lot_m(\d+) AS \(/gi));
+        /* THE REGIMEN RULE ITSELF. Each of these is an expression whose
+         * corruption still yields a line distribution between 1 and maxLines. */
+        put(fp, "lot_merge_uses_running_max",
+          String((sql.match(/MAX\(d_end\) OVER \(PARTITION BY enrolid ORDER BY d_start, d_end/gi) ?? []).length));
+        put(fp, "lot_substitution_is_coverage_based",
+          /CASE WHEN v\.n_cov < z\.n_reg THEN 1 ELSE 0 END AS is_sub/i.test(sql) ? "yes" : "no");
+        put(fp, "lot_next_line_opens_at_close",
+          /JOIN lot_agw a ON a\.enrolid = x\.enrolid AND a\.d_start >= x\.close_day/i.test(sql) ? "yes" : "no");
+        put(fp, "lot_truncation_reported",
+          /lot_trunc AS \(/i.test(sql) && /patients_truncated_at_max_lines/i.test(sql) ? "yes" : "no");
+        /* PPPM BY LINE. The denominator is the whole argument for the feature,
+         * so both the per-line clip and the days-per-month literal are pinned. */
+        put(fp, "lot_cost_denominator_is_line_span",
+          /LEAST\(l\.line_end, /i.test(sql) && /GREATEST\(l\.line_start, /i.test(sql) ? "yes" : "no");
+        put(fp, "lot_days_per_month", allOf(sql, /elig_days \/ ([\d.]+)/gi));
+        put(fp, "lot_cost_on_eligible_time_only",
+          /SUM\(CASE WHEN e\.elig = 1 THEN e\.paid ELSE 0 END\)/i.test(sql) ? "yes" : "no");
+      }
       break;
     }
     case "adherence": {
@@ -1204,8 +1304,13 @@ function sqlFingerprint(kind: string, raw: string): Fingerprint {
   }
 
   // Care setting actually filtered on the outcome event stream.
+  //
+  // A LINKED MORTALITY endpoint reads an external death table, so there is no
+  // claim to filter and "any" would be the wrong answer rather than a neutral
+  // one: it would say a filter was considered and widened. The emitter stamps
+  // its own token for that case, and the scrape has to agree.
   const setting = grab(sql, [/code_list_id\s*=\s*'[^']*'\s+AND\s+setting\s*=\s*'(\w+)'/i]);
-  put(fp, "setting_filter", setting ?? "any");
+  put(fp, "setting_filter", /AS linked_flag/i.test(sql) ? "not_applicable_external_linkage" : (setting ?? "any"));
   return fp;
 }
 
@@ -1364,6 +1469,26 @@ function sasFingerprint(kind: string, rawSas: string, setup: string): Fingerprin
       put(fp, "km_anchor_present",
         /proc lifetest data=work\.\w+ method=km conftype=\w+ outsurv=/i.test(sas) &&
         /anchor_verdict = 'PASS: LIFETEST = closed-form product limit'/i.test(sas) ? "yes" : "no");
+      /* The SAS twin of the linkage scrapes, read from THIS language's own
+       * text. The names differ throughout (min/LEAST, ne ./IS NOT NULL, SAS
+       * date literals) precisely so neither pattern can pass by borrowing the
+       * other twin's correctness. */
+      if (/create table work\.\w+_mcov as/i.test(sas)) {
+        const srcS = /select a\.enrolid, a\.index_date, m\.(\w+) as death_date[\s\S]{0,400}?inner join ([\w.]+) as m[\s\S]{0,200}?where strip\(vvalue\(m\.(\w+)\)\) in \(/i.exec(sas);
+        put(fp, "mortality_death_column", srcS?.[1]);
+        put(fp, "mortality_linkage_table", srcS?.[2]);
+        put(fp, "mortality_linked_flag_column", srcS?.[3]);
+        put(fp, "mortality_linked_predicate",
+          /where strip\(vvalue\(m\.\w+\)\) in \('1', 'Y'/i.test(sas) ? "yes" : "no");
+        put(fp, "mortality_risk_set_is_linked_subset",
+          /create table work\.(\w+)_atrisk as\s*\n\s*select \* from work\.\1_mcov;/i.test(sas) ? "yes" : "no");
+        put(fp, "mortality_censor_at_ascertainment",
+          sasDateToIso(grab(sas, [/, ('\d{2}[A-Z]{3}\d{4}'d)\) as admin_censor/i])));
+        put(fp, "mortality_ascertained_through",
+          sasDateToIso(grab(sas, [/sum\(k\.death_date ne \. and k\.death_date <= ('\d{2}[A-Z]{3}\d{4}'d)\) as n_deaths/i])));
+        put(fp, "mortality_attrition_row",
+          /as n_linked/i.test(sas) && /as n_unlinked/i.test(sas) && /unlinked_excluded_from_risk_set/i.test(sas) ? "yes" : "no");
+      }
       break;
     }
     case "treatment_switching": {
@@ -1382,6 +1507,31 @@ function sasFingerprint(kind: string, rawSas: string, setup: string): Fingerprin
       put(fp, "line_definitional_row", /DEFINITIONAL, NOT MEASURED/i.test(sas) ? "yes" : "no");
       put(fp, "line_estimate_is_null", /rule_is_definitional/i.test(sas) ? "yes" : "no");
       put(fp, "days_supply_cap", grab(sas, [/daysupp = \. OR daysupp <= (\d+)\)/i]));
+      /* The SAS twin of the regimen-construction scrapes. Read from THIS
+       * language's own text: the names differ (daysupp/days_supply,
+       * work._NNN_lot_x1/lot_x1 AS) precisely so that neither pattern can pass
+       * by borrowing the other twin's correctness. */
+      if (/create table work\.\w+_lot_agw as/i.test(sas)) {
+        put(fp, "lot_agents", [...sas.matchAll(/"([^"]+)" as agent length=64/g)].map((m) => m[1]).join(",") || "ABSENT");
+        put(fp, "lot_combination_window_days", allOf(sas, /where r\.agent_first <= o\.t \+ (\d+);/gi));
+        put(fp, "lot_gap_days", allOf(sas, /where g_len >= (\d+) group by enrolid;/gi));
+        put(fp, "lot_advance_trigger", allOf(sas, /where (is_sub = 1|is_sub in \(0, 1\)) group by enrolid;/gi)
+          .split(",").map((t) => (t === "is_sub = 1" ? "substitution" : "addition_or_substitution")).join(","));
+        put(fp, "lot_max_lines", maxOf(sas, /_lot_m(\d+) as/gi));
+        put(fp, "lot_merge_uses_running_max",
+          String((sas.match(/_maxend = max\(_maxend, d_end\);/gi) ?? []).length));
+        put(fp, "lot_substitution_is_coverage_based",
+          /\(case when v\.n_cov < z\.n_reg then 1 else 0 end\) as is_sub/i.test(sas) ? "yes" : "no");
+        put(fp, "lot_next_line_opens_at_close",
+          /on a\.enrolid = x\.enrolid and a\.d_start >= x\.close_day/i.test(sas) ? "yes" : "no");
+        put(fp, "lot_truncation_reported",
+          /_lot_trunc as/i.test(sas) && /patients_truncated_at_max_lines/i.test(sas) ? "yes" : "no");
+        put(fp, "lot_cost_denominator_is_line_span",
+          /min\(l\.line_end, /i.test(sas) && /max\(l\.line_start, /i.test(sas) ? "yes" : "no");
+        put(fp, "lot_days_per_month", allOf(sas, /elig_days \/ ([\d.]+)/gi));
+        put(fp, "lot_cost_on_eligible_time_only",
+          /sum\(case when e\.elig = 1 then e\.paid else 0 end\)/i.test(sas) ? "yes" : "no");
+      }
       break;
     }
     case "adherence": {
@@ -1804,8 +1954,12 @@ function sasFingerprint(kind: string, rawSas: string, setup: string): Fingerprin
     }
   }
 
+  // Twin of the SQL note: an EXTERNAL MORTALITY LINKAGE has no claim to filter,
+  // so "any" would misdescribe it rather than describe nothing.
   const rawSetting = grab(sas, [/e\.setting\s*=\s*'(\w+)'/i]);
-  put(fp, "setting_filter", rawSetting === undefined ? "any" : (SAS_SETTING_TO_SPEC[rawSetting] ?? `UNMAPPED(${rawSetting})`));
+  put(fp, "setting_filter", /create table work\.\w+_mcov as/i.test(sas)
+    ? "not_applicable_external_linkage"
+    : rawSetting === undefined ? "any" : (SAS_SETTING_TO_SPEC[rawSetting] ?? `UNMAPPED(${rawSetting})`));
   return fp;
 }
 
@@ -2100,6 +2254,27 @@ export function expectedFromStamp(kind: string, stamp: Record<string, unknown>):
         exp.exposed_level = String(stamp.exposedLevel ?? "");
         exp.arm_levels = [stamp.referenceLevel, stamp.exposedLevel].filter(Boolean).join(",");
       }
+      /* THE LINKAGE. Only when the stamp declares one — a claims endpoint must
+       * keep the expectations it had before this arm existed, or every survival
+       * analysis in the repo would start failing against keys its code has no
+       * reason to contain. */
+      const lk = stamp.mortalityLinkage as Record<string, unknown> | undefined;
+      if (lk) {
+        exp.mortality_linkage_table = String(lk.tableHandle ?? "");
+        exp.mortality_death_column = String(lk.deathDateColumn ?? "");
+        exp.mortality_linked_flag_column = String(lk.linkedFlagColumn ?? "");
+        /* THE SAME DATE FROM TWO PLACES. One decides the curve (the
+         * administrative censor), the other reports it (the attrition row).
+         * Checking only one would leave a program that censors correctly and
+         * says it censored somewhere else, or the reverse. */
+        exp.mortality_ascertained_through = String(lk.ascertainedThrough ?? "");
+        exp.mortality_censor_at_ascertainment = String(lk.ascertainedThrough ?? "");
+        /* Stamped as VALUES, not implied by the presence of the block: these
+         * two are the entire reason the endpoint is emittable. */
+        exp.mortality_risk_set_is_linked_subset = String(lk.riskSet ?? "") === "linked_subset_only" ? "yes" : "no";
+        exp.mortality_linked_predicate = String(lk.riskSet ?? "") === "linked_subset_only" ? "yes" : "no";
+        exp.mortality_attrition_row = String(lk.attritionRow ?? "") === "ascertained_n_of_m" ? "yes" : "no";
+      }
       break;
     }
     case "cox": {
@@ -2134,6 +2309,34 @@ export function expectedFromStamp(kind: string, stamp: Record<string, unknown>):
       exp.new_drug_strictly_after_index = String(stamp.newDrugMustStartAfterIndex ?? "") === "strictly_after_index" ? "yes" : "no";
       exp.overlap_is_remaining_supply = String(stamp.overlapDefinition ?? "") === "remaining_from_supply_on_to_start_day" ? "yes" : "no";
       exp.line_definitional_row = String(stamp.lineRuleIsDefinitional ?? "") === "yes" ? "yes" : "no";
+      /* THE THREE PARAMETERS, cross-checked against the code that consumed
+       * them — and REPEATED maxLines times, because the construction is
+       * unrolled and a value corrected in only the first block is the exact
+       * partial mutation this repo has been bitten by five times. */
+      const lc = stamp.lineConstruction as Record<string, unknown> | undefined;
+      if (lc) {
+        const n = Number(lc.maxLines ?? 0);
+        const rep = (v: unknown) => Array(Math.max(n, 0)).fill(String(v)).join(",");
+        exp.lot_combination_window_days = rep(lc.combinationWindowDays);
+        exp.lot_gap_days = rep(lc.gapDays);
+        exp.lot_advance_trigger = rep(lc.advanceTrigger);
+        exp.lot_max_lines = String(lc.maxLines ?? "");
+        exp.lot_agents = String(lc.agentCodeListIds ?? "");
+        /* One island merge per line, so the count IS the unroll bound: a
+         * construction that quietly stopped merging on the last line would
+         * still report a line distribution, with one line's gaps invented. */
+        exp.lot_merge_uses_running_max = String(lc.maxLines ?? "");
+        exp.lot_substitution_is_coverage_based = "yes";
+        exp.lot_next_line_opens_at_close = "yes";
+        exp.lot_truncation_reported = String(lc.truncationReported ?? "") === "yes" ? "yes" : "no";
+        exp.lot_cost_denominator_is_line_span = String(lc.costNormalization ?? "") === "observed_member_months" ? "yes" : "no";
+        exp.lot_cost_on_eligible_time_only = "yes";
+        /* Two occurrences per line (the member-month row and the PPPM row), so
+         * a literal changed in one of the two - which would make the reported
+         * denominator disagree with the denominator actually divided by - is a
+         * different string here. */
+        exp.lot_days_per_month = Array(Math.max(n * 2, 0)).fill(String(lc.daysPerMonth ?? "")).join(",");
+      }
       break;
     }
     case "adherence": {

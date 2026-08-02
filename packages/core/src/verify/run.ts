@@ -24,6 +24,10 @@ import { GOLD_G_SPEC, GOLD_G_OPTS, EXPECTED_G, fixtureGSeedSql } from "./fixture
 import { GOLD_H_SPEC, GOLD_H_OPTS, EXPECTED_H, fixtureHSeedSql } from "./fixture-h";
 import { GOLD_I_SPEC, GOLD_I_OPTS, EXPECTED_I, fixtureISeedSql } from "./fixture-i";
 import { GOLD_J_SPEC, GOLD_J_OPTS, EXPECTED_J, fixtureJSeedSql } from "./fixture-j";
+import {
+  GOLD_K_SPEC, GOLD_K_OPTS, EXPECTED_K, fixtureKSeedSql,
+  EXPECTED_K_TRIGGER_FLIPPED, EXPECTED_K_WINDOW_ZERO, EXPECTED_K_NO_GAP,
+} from "./fixture-k";
 import { eValueSql, nearestNullLimitSql } from "../emitters/evalue-core";
 import { EMITTABLE_ANALYSIS_KINDS, specReadiness } from "../spec/types";
 import { checkSpecShape } from "../spec/shape";
@@ -999,6 +1003,295 @@ export async function verifyGoldG(): Promise<Check[]> {
 
   out.push(...sasSqlParityChecks(GOLD_G_SPEC, GOLD_G_OPTS));
   out.push(...sasStructureChecks(emitSas(GOLD_G_SPEC, GOLD_G_OPTS)));
+  return out;
+}
+
+/**
+ * Gold Case K — the FULL LINE-OF-THERAPY CONSTRUCTION and LINKED MORTALITY.
+ *
+ * Two things are being established here and they are different in kind.
+ *
+ * The LINE numbers are checked against a hand derivation written into
+ * fixture-k.ts BEFORE anything ran — but a line count is DEFINITIONAL, so
+ * agreeing with the derivation only proves the program implements the rule it
+ * declares. What makes that meaningful is the second half: each of the three
+ * declared parameters is re-emitted with a different value and the resulting
+ * number asserted, because a figure that does not move when the rule that
+ * produced it changes was never computed from that rule at all.
+ *
+ * The LINKED MORTALITY numbers are checked the same way, plus one assertion
+ * that is not about correctness but about a specific WRONG answer: the curve is
+ * asserted to be 0.5 at 270 days AND asserted NOT to be 2/3, which is what
+ * leaving the two unlinked members in the risk set would give. That is the
+ * immortality bias, stated as a number the program must not produce.
+ */
+export async function verifyGoldK(): Promise<Check[]> {
+  const { db, ok, steps } = await seedAndRun(GOLD_K_SPEC, GOLD_K_OPTS, fixtureKSeedSql());
+  const out: Check[] = [];
+  if (!ok) {
+    return [{
+      name: "Gold Case K executes",
+      status: "fail",
+      detail: steps.filter((x) => !x.ok).map((x) => `${x.path}: ${x.error}`).join(" | "),
+    }];
+  }
+  const eq = (name: string, got: number | null | undefined, want: number) =>
+    out.push({ name, status: got === want ? "pass" : "fail", detail: `expected ${want}, got ${got}` });
+  const approx = (name: string, got: number, want: number, tol: number) =>
+    out.push({ name, status: Math.abs(got - want) <= tol ? "pass" : "fail", detail: `expected ${want}±${tol}, got ${got}` });
+  const differs = (name: string, got: number, wrong: number, tol: number) =>
+    out.push({ name, status: Math.abs(got - wrong) > tol ? "pass" : "fail", detail: `must NOT be ${wrong}; got ${got}` });
+
+  eq("K: cohort N = 6", await scalar<number>(db, "SELECT count(*)::int FROM tz_k_cohort"), EXPECTED_K.cohortN);
+  /* THE FEEDER. All three agent lists have to reach it, or the construction
+   * silently builds lines out of the drugs it happens to see — and the line
+   * numbers would still look entirely reasonable. */
+  eq("K: the fills feeder carries all THREE agent code lists",
+    await scalar<number>(db, "SELECT count(DISTINCT code_list_id)::int FROM tz_k_fills"), 3);
+
+  const r = async (statistic: string) =>
+    (
+      await rows<{ estimate: number | null; method: string }>(
+        db,
+        `SELECT estimate::float8, method FROM tz_k_switch WHERE statistic = '${statistic}'`,
+      )
+    )[0];
+  const est = async (statistic: string) => Number((await r(statistic))?.estimate);
+
+  /* ---- the declared parameters are ECHOED, not just stamped ---- */
+  eq("K: the combination window is reported as a row, not only stamped", await est("combination_window_days"), 28);
+  eq("K: the gap rule is reported as a row", await est("gap_days"), 60);
+  eq("K: the advance trigger is reported as a row (0 = substitution only)", await est("advance_on_addition"), 0);
+  eq("K: maxLines is reported as a row", await est("max_lines"), 3);
+
+  /* ---- N reaching each line ---- */
+  for (const k of [1, 2, 3]) {
+    eq(`K: ${EXPECTED_K.linesReached[k]} patients reach line ${k}`, await est(`line${k}_n_patients`), EXPECTED_K.linesReached[k]);
+  }
+  /* THE COMBINATION WINDOW, AS A PAIR OF PATIENTS. P1 and P2 differ only in
+   * whether the second agent starts on day 20 or day 35 against a 28-day
+   * window. P1's B joins line 1 (regimen of two, one line); P2's does not
+   * (regimen of one, and a second line at day 125). The two counts below are
+   * the whole argument for the parameter. */
+  approx("K: line 1 mean regimen size = 7/6 — P1's doublet is ONE line",
+    await est("line1_regimen_size_mean"), EXPECTED_K.regimenSizeMean[1], 0.00001);
+  eq("K: exactly 1 patient has agent_b IN their line-1 regimen (P1, inside the 28-day window)",
+    await est("line1_agent_agent_b"), EXPECTED_K.regimen[1].agent_b);
+  eq("K: and 3 patients reach line 2 — P2's identical agent, 15 days later, is a SECOND line",
+    await est("line2_n_patients"), EXPECTED_K.linesReached[2]);
+
+  /* ---- regimen composition ---- */
+  for (const k of [1, 2, 3]) {
+    for (const [agent, want] of Object.entries(EXPECTED_K.regimen[k])) {
+      eq(`K: line ${k} regimen includes ${agent} for ${want} patients`, await est(`line${k}_agent_${agent}`), want);
+    }
+  }
+
+  /* ---- how lines close, and time to the next one ---- */
+  for (const k of [1, 2, 3]) {
+    eq(`K: line ${k} closed by gap for ${EXPECTED_K.closedByGap[k]}`, await est(`line${k}_closed_by_gap`), EXPECTED_K.closedByGap[k]);
+    eq(`K: line ${k} closed by substitution for ${EXPECTED_K.closedBySubstitution[k]}`, await est(`line${k}_closed_by_substitution`), EXPECTED_K.closedBySubstitution[k]);
+    /* P4's four C dispensings all land while A is still covered, so every one
+     * is an ADDITION and the declared "substitution" trigger must ignore all
+     * four. A program that advanced on them would report a perfectly plausible
+     * extra line. */
+    eq(`K: line ${k} closed by addition for ${EXPECTED_K.closedByAddition[k]} — additions do NOT advance under this trigger`,
+      await est(`line${k}_closed_by_addition`), EXPECTED_K.closedByAddition[k]);
+    eq(`K: line ${k} advancing = ${EXPECTED_K.advancing[k]}`, await est(`line${k}_n_advancing`), EXPECTED_K.advancing[k]);
+    approx(`K: line ${k} mean days to next line`, await est(`line${k}_mean_days_to_next_line`), EXPECTED_K.meanDaysToNext[k], 0.00001);
+  }
+
+  /* ---- TRUNCATION IS REPORTED, not silent ---- */
+  eq("K: 1 patient truncated at maxLines — P3 would have opened line 4", await est("patients_truncated_at_max_lines"), EXPECTED_K.truncated);
+  const trunc = await r("patients_truncated_at_max_lines");
+  out.push({
+    name: "K: and the program SAYS they were counted rather than dropped",
+    status: /COUNTED here, not dropped/.test(trunc?.method ?? "") ? "pass" : "fail",
+    detail: (trunc?.method ?? "no row").slice(0, 100),
+  });
+
+  /* ---- PPPM BY LINE, on member-months and not on the window ---- */
+  for (const k of [1, 2, 3]) {
+    approx(`K: line ${k} member-months = ${EXPECTED_K.eligibleDays[k]}/30.4375`,
+      await est(`line${k}_member_months`), EXPECTED_K.memberMonths[k], 0.00001);
+    approx(`K: line ${k} PPPM = $${EXPECTED_K.pppm[k]}`, await est(`line${k}_pppm`), EXPECTED_K.pppm[k], 0.01);
+  }
+  /* THE REASON PPPM EXISTS. Line 3 runs 30 days and line 1 runs up to 180, so
+   * the same dollars over the 360-day WINDOW would report line 3 at
+   * 100/(360/30.4375) = $8.45 instead of $101.46 — a twelvefold understatement
+   * for exactly the patients who progressed fastest. */
+  const wrongFixedWindow = EXPECTED_K.paid[3] / (EXPECTED_K.windowDays / 30.4375);
+  differs("K: line 3 PPPM is NOT the fixed-window figure ($8.45) that unequal follow-up would produce",
+    await est("line3_pppm"), Number(wrongFixedWindow.toFixed(2)), 0.01);
+
+  /* ---- THE CAVEAT, strengthened ---- */
+  const defn = await r("rule_is_definitional");
+  out.push({
+    name: "K: the definitional row carries NO estimate and names ALL THREE declared parameters",
+    status:
+      defn?.estimate === null &&
+      /DEFINITIONAL, NOT MEASURED/.test(defn?.method ?? "") &&
+      /COMBINATION WINDOW of 28 days/.test(defn?.method ?? "") &&
+      /GAP of 60 days/.test(defn?.method ?? "") &&
+      /ADVANCE TRIGGER of "substitution"/.test(defn?.method ?? "")
+        ? "pass"
+        : "fail",
+    detail: `estimate=${defn?.estimate}, method="${(defn?.method ?? "").slice(0, 140)}"`,
+  });
+  /* THE TWO RULES DISAGREE ON THE SAME CLAIMS, which is the honest illustration
+   * of what "definitional" means. The switch block's two-line approximation
+   * says 2 patients reach line 2; the full construction says 3. Neither is
+   * wrong. Asserting both is the point. */
+  eq("K: the two-line approximation says 2 reach line 2 while the construction says 3 — same claims, different rules",
+    await est("n_reaching_line_2"), EXPECTED_K.reachingLine2TwoLineRule);
+
+  /* ================= THE LINKED MORTALITY ARM ================= */
+  const km = async (statistic: string) =>
+    (
+      await rows<{ estimate: number | null; n_risk: number | null; method: string }>(
+        db,
+        `SELECT estimate::float8, n_risk, method FROM tz_k_km WHERE statistic = '${statistic}'`,
+      )
+    )[0];
+  const surv = async (t: number) =>
+    (
+      await rows<{ estimate: number; n_risk: number }>(
+        db,
+        `SELECT estimate::float8, n_risk FROM tz_k_km WHERE component = 'horizon' AND time_days = ${t}`,
+      )
+    )[0];
+
+  eq("K: 6 cohort members before the linkage", Number((await km("cohort_members"))?.estimate), EXPECTED_K.cohortMembers);
+  eq("K: mortality ASCERTAINED IN 4 OF 6 — the linked subset is a STRICT subset",
+    Number((await km("linked_members"))?.estimate), EXPECTED_K.linkedMembers);
+  approx("K: ascertainment 66.67%", Number((await km("ascertainment_pct"))?.estimate), EXPECTED_K.ascertainmentPct, 0.01);
+  eq("K: 2 members EXCLUDED from the risk set for being unlinked",
+    Number((await km("unlinked_excluded_from_risk_set"))?.estimate), EXPECTED_K.unlinkedExcluded);
+  const restr = await km("unlinked_excluded_from_risk_set");
+  out.push({
+    name: "K: and the program SAYS the risk set is the linked subset, and why",
+    status: /THE RISK SET IS THE LINKED SUBSET ONLY/.test(restr?.method ?? "") &&
+      /immortal by construction/.test(restr?.method ?? "") ? "pass" : "fail",
+    detail: (restr?.method ?? "no row").slice(0, 110),
+  });
+  eq("K: 2 deaths ascertained on or before 2020-09-30", Number((await km("deaths_ascertained"))?.estimate), EXPECTED_K.deathsAscertained);
+  eq("K: 1 death recorded AFTER the ascertainment date", Number((await km("deaths_after_ascertainment_date"))?.estimate), EXPECTED_K.deathsAfterAscertainment);
+  const asc = await km("deaths_after_ascertainment_date");
+  out.push({
+    name: "K: and the program names the ascertainment date as ADMINISTRATIVE CENSORING",
+    status: /ADMINISTRATIVE CENSORING AT THE ASCERTAINMENT DATE 2020-09-30/.test(asc?.method ?? "") ? "pass" : "fail",
+    detail: (asc?.method ?? "no row").slice(0, 110),
+  });
+
+  /* THE CURVE over the linked subset: events at day 100 and day 200 out of 4. */
+  for (const t of [90, 180, 270, 330]) {
+    const row = await surv(t);
+    approx(`K: S(${t}) = ${EXPECTED_K.survival[t]} over the LINKED subset`, Number(row?.estimate), EXPECTED_K.survival[t], 0.00001);
+    eq(`K: ${EXPECTED_K.nRisk[t]} at risk at day ${t}`, Number(row?.n_risk), EXPECTED_K.nRisk[t]);
+  }
+  eq("K: median survival = 200 days", Number((await km("median_survival_days"))?.estimate), EXPECTED_K.median);
+
+  /* ================= AND NOT THE IMMORTALITY ANSWER =================
+   *
+   * Leaving the two UNLINKED members in the risk set gives 5/6 at day 180 and
+   * 2/3 at day 270, and makes the median disappear entirely — survival biased
+   * UPWARD at every horizon by members who could never have had the event.
+   * Those are the numbers this program must not produce. */
+  differs("K: S(180) is NOT 5/6 — the value the two unlinked members would produce",
+    Number((await surv(180))?.estimate), EXPECTED_K.survivalIfUnlinkedIncluded[180], 0.0001);
+  differs("K: S(270) is NOT 2/3 — the immortality bias, stated as the number it would give",
+    Number((await surv(270))?.estimate), EXPECTED_K.survivalIfUnlinkedIncluded[270], 0.0001);
+  out.push({
+    name: "K: and the median is REACHED (200), not the NULL the immortality bias would report",
+    status: Number((await km("median_survival_days"))?.estimate) === EXPECTED_K.median ? "pass" : "fail",
+    detail: `median=${(await km("median_survival_days"))?.estimate}; wrongly including the unlinked complement never reaches one half`,
+  });
+  /* AND NOT THE UNCENSORED ANSWER. Ignoring the ascertainment date turns P5's
+   * day-300 death into an event and drives S(330) to 0.25. */
+  differs("K: S(330) is NOT 0.25 — the value ignoring the ascertainment date would produce",
+    Number((await surv(330))?.estimate), EXPECTED_K.survivalIfAscertainmentIgnored330, 0.0001);
+
+  out.push(...(await goldKControls()));
+  out.push(...sasSqlParityChecks(GOLD_K_SPEC, GOLD_K_OPTS));
+  out.push(...sasStructureChecks(emitSas(GOLD_K_SPEC, GOLD_K_OPTS)));
+  return out;
+}
+
+/**
+ * THE CONTROLS. Each re-emits Gold K with exactly ONE declared line-construction
+ * parameter changed and asserts the number the changed rule must give.
+ *
+ * This is the same device Gold H uses for the economics options and it is the
+ * only thing that can distinguish "computed from the rule" from "computed and
+ * then labelled with the rule". A line count that stays put when the
+ * combination window collapses to zero is not being computed from the window.
+ */
+async function goldKControls(): Promise<Check[]> {
+  const out: Check[] = [];
+  const lotOf = (s: StudySpec) => {
+    const a = s.analyses.find((x) => x.id === "k_lot");
+    if (!a || a.kind !== "treatment_switching" || !a.lineConstruction) throw new Error("gold K lost its line construction");
+    return a.lineConstruction;
+  };
+  const run = async (label: string, mutate: (s: StudySpec) => void, want: Record<string, number>) => {
+    const spec: StudySpec = JSON.parse(JSON.stringify(GOLD_K_SPEC));
+    mutate(spec);
+    const v = await seedAndRun(spec, GOLD_K_OPTS, fixtureKSeedSql());
+    if (!v.ok) {
+      out.push({ name: `K control (${label}) executes`, status: "fail", detail: v.steps.filter((x) => !x.ok).map((x) => x.error).join(" | ") });
+      return;
+    }
+    for (const [stat, expect] of Object.entries(want)) {
+      const got = await scalar<number>(v.db, `SELECT estimate::float8 FROM tz_k_switch WHERE statistic = '${stat}'`);
+      out.push({
+        name: `K control (${label}): ${stat} = ${expect}`,
+        status: Math.abs(Number(got) - expect) < 0.00001 ? "pass" : "fail",
+        detail: `expected ${expect}, got ${got}`,
+      });
+    }
+  };
+
+  /* THE ADVANCE TRIGGER. P2's day-35 B and P4's day-60 C are both ADDITIONS —
+   * the regimen agent is still covered — so flipping the trigger closes two
+   * more line-1s and pushes P4 into line 2. A program ignoring the trigger
+   * would report the SAME line distribution under both rules. */
+  await run("advanceTrigger -> addition_or_substitution",
+    (s) => { lotOf(s).advanceTrigger = "addition_or_substitution"; },
+    {
+      line2_n_patients: EXPECTED_K_TRIGGER_FLIPPED.line2Patients,
+      line1_closed_by_addition: EXPECTED_K_TRIGGER_FLIPPED.line1ClosedByAddition,
+      line1_closed_by_gap: EXPECTED_K_TRIGGER_FLIPPED.line1ClosedByGap,
+      line1_closed_by_substitution: EXPECTED_K_TRIGGER_FLIPPED.line1ClosedBySubstitution,
+    });
+
+  /* THE COMBINATION WINDOW COLLAPSED TO ZERO: nothing may join a line unless it
+   * starts on the opening day itself, so every regimen becomes a single agent
+   * and P1's doublet stops being one line's worth of therapy. */
+  await run("combinationWindowDays -> 0",
+    (s) => { lotOf(s).combinationWindowDays = 0; },
+    {
+      line1_regimen_size_mean: EXPECTED_K_WINDOW_ZERO.line1RegimenSizeMean,
+      line1_agent_agent_b: EXPECTED_K_WINDOW_ZERO.line1AgentB,
+      line2_agent_agent_a: EXPECTED_K_WINDOW_ZERO.line2AgentA,
+    });
+
+  /* THE GAP RULE, widened past the window so no gap can ever close a line. Only
+   * substitutions then advance, and three patients end the study still on their
+   * first regimen — CENSORED, which the program reports separately rather than
+   * counting as a completed line. */
+  await run("gapDays -> 400 (longer than the window)",
+    (s) => { lotOf(s).gapDays = 400; },
+    {
+      line1_closed_by_gap: EXPECTED_K_NO_GAP.line1ClosedByGap,
+      line1_closed_by_substitution: EXPECTED_K_NO_GAP.line1ClosedBySubstitution,
+      line1_open_at_window_end: EXPECTED_K_NO_GAP.line1OpenAtWindowEnd,
+    });
+
+  /* THE BOUND, lowered. P3 still reaches the bound and is still COUNTED — a
+   * truncation row that only ever reported zero would be indistinguishable
+   * from one that was never computed. */
+  await run("maxLines -> 2", (s) => { lotOf(s).maxLines = 2; }, { patients_truncated_at_max_lines: 1 });
+
   return out;
 }
 

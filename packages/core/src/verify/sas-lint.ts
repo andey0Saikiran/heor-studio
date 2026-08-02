@@ -61,10 +61,137 @@ function n(text: string, re: RegExp): number {
  *
  * Only the STRUCTURAL rules use this. The macro-variable check deliberately
  * does not: SAS resolves `&var.` inside double quotes, so a macro reference in
- * a string is a real reference and must still be defined.
+ * a string is a real reference and must still be defined. That check reads
+ * scanQuotes' `macroScan` instead, which blanks single-quoted content only.
+ *
+ * This function is a regex approximation and stays one on purpose — it is used
+ * where over-blanking is harmless. scanQuotes is the real scanner, and it is
+ * what decides whether the quotes BALANCE.
  */
 function stripStrings(text: string): string {
   return text.replace(/'[^'\n]*'/g, "''").replace(/"[^"\n]*"/g, '""');
+}
+
+/** An unterminated literal: where it opened, which quote, and what statement. */
+interface QuoteFault {
+  /** 1-based line on which the unclosed quote was opened */
+  line: number;
+  quote: "'" | '"';
+  /** the statement it sits in — from the previous `;` through the end of that line */
+  statement: string;
+}
+
+/**
+ * Walk the program tracking quote state, the way SAS itself would.
+ *
+ * This is the one structural defect the SQL twin used to catch FOR us. A prose
+ * edit put a bare apostrophe into a generated string literal; the SQL twin is
+ * executed by the harness, so it went red the same minute. Nothing executes the
+ * SAS twin — an equivalent slip on the SAS side would pass this lint, pass
+ * parity (both twins would carry the same intended text), and reach the analyst
+ * as a program that does not run.
+ *
+ * The rules being enforced:
+ *
+ *   - A quote is escaped by DOUBLING it, not by backslash. `'Crohn''s'` is one
+ *     correct literal holding an apostrophe; `'Crohn's'` is a literal `Crohn`
+ *     followed by loose code and a second quote that opens and never shuts.
+ *   - `"` inside a `'...'` literal is content, and vice versa. Only the quote
+ *     that opened a literal can close it.
+ *   - Quotes inside a `/* *\/` comment are prose. `title "it's fine"` in a
+ *     header comment is not a defect and must not read as one.
+ *
+ * END OF LINE IS THE BOUNDARY. SAS does allow a literal to span lines, but the
+ * emitter never writes one — stripStrings above has assumed single-line
+ * literals since it was written, across every gold spec. Closing the state at
+ * the newline is what makes the check useful rather than merely correct: an
+ * apostrophe slip leaves the rest of ONE line quoted, and reporting it there
+ * names the line a reviewer has to look at. Resyncing at that newline also
+ * keeps one bad line to one message instead of cascading through the file.
+ *
+ * The scan doubles as the input to the macro-variable check, which is why it
+ * returns `macroScan` rather than just faults — see below.
+ */
+function scanQuotes(text: string): { faults: QuoteFault[]; macroScan: string } {
+  const faults: QuoteFault[] = [];
+  /* Comment-stripped text with SINGLE-quoted CONTENT blanked and double-quoted
+   * content kept verbatim. SAS resolves `&var.` and `%macro` inside double
+   * quotes but treats them as literal characters inside single quotes, so
+   * `'&notavar'` is text and must not be demanded as a definition, while
+   * `"&days_per_year."` is a real reference and must be. */
+  let macroScan = "";
+  let i = 0;
+  let line = 1;
+  let stmtStart = 0;
+
+  while (i < text.length) {
+    const ch = text[i];
+
+    if (ch === "\n") {
+      line++;
+      macroScan += "\n";
+      i++;
+      continue;
+    }
+
+    // Block comment: quotes inside are prose. An unterminated one is rule 1's.
+    if (ch === "/" && text[i + 1] === "*") {
+      const close = text.indexOf("*/", i + 2);
+      const end = close === -1 ? text.length : close + 2;
+      for (let k = i; k < end; k++) if (text[k] === "\n") { line++; macroScan += "\n"; }
+      macroScan += " ";
+      i = end;
+      continue;
+    }
+
+    // Statement boundary. Only counts outside comments and literals — a `;`
+    // inside a string is data, which is precisely why the apostrophe slip is
+    // dangerous: it swallows the terminator along with the rest of the line.
+    if (ch === ";") {
+      macroScan += ch;
+      i++;
+      stmtStart = i;
+      continue;
+    }
+
+    if (ch === "'" || ch === '"') {
+      const q = ch as "'" | '"';
+      const openLine = line;
+      let j = i + 1;
+      let closed = false;
+      while (j < text.length) {
+        const c = text[j];
+        if (c === "\n") break;
+        if (c === q) {
+          if (text[j + 1] === q) { j += 2; continue; } // doubled-quote escape
+          closed = true;
+          j++;
+          break;
+        }
+        j++;
+      }
+      if (!closed) {
+        const nl = text.indexOf("\n", i);
+        const lineEnd = nl === -1 ? text.length : nl;
+        faults.push({
+          line: openLine,
+          quote: q,
+          statement: text.slice(stmtStart, lineEnd).replace(/\s+/g, " ").trim(),
+        });
+        macroScan += " ";
+        i = lineEnd;
+        continue;
+      }
+      macroScan += q === "'" ? "''" : text.slice(i, j);
+      i = j;
+      continue;
+    }
+
+    macroScan += ch;
+    i++;
+  }
+
+  return { faults, macroScan };
 }
 
 /** Structural lint over every emitted .sas file. */
@@ -84,8 +211,9 @@ export function sasStructureChecks(files: SasFile[]): Check[] {
     const name = f.path.split("/").pop() ?? f.path;
     const { code, unbalanced } = stripBlockComments(f.content);
     /* Structural rules read the STRING-FREE text; see stripStrings. The macro
-     * check below deliberately reads `code` instead. */
+     * check below deliberately reads quote-aware text instead. */
     const codeNS = stripStrings(code);
+    const { faults, macroScan } = scanQuotes(f.content);
 
     // 1. An unterminated /* ... comment swallows the rest of the program.
     if (unbalanced) problems.push(`${name}: unterminated block comment`);
@@ -100,6 +228,20 @@ export function sasStructureChecks(files: SasFile[]): Check[] {
     if (opens !== closes) {
       problems.push(`${name}: ${opens} "/*" vs ${closes} "*/" — a comment delimiter is unpaired, so code is being swallowed into a comment`);
     }
+
+    /* 1c. Every string literal must close on the line it opened. See scanQuotes:
+     *     an unescaped apostrophe ends its literal early and re-opens one that
+     *     runs to end of line, swallowing the statement terminator with it. The
+     *     SQL twin's version of this defect was caught by execution; the SAS
+     *     twin has no execution to catch it, so it is caught here or not at all. */
+    for (const q of faults.slice(0, 3)) {
+      problems.push(
+        `${name}:${q.line}: unterminated ${q.quote === "'" ? "single" : "double"}-quoted string literal` +
+          ` — check for an unescaped ${q.quote === "'" ? "apostrophe (escape it by doubling: '')" : 'double quote (escape it by doubling: "")'}` +
+          ` in: ${q.statement.length > 160 ? `…${q.statement.slice(-160)}` : q.statement}`,
+      );
+    }
+    if (faults.length > 3) problems.push(`${name}: and ${faults.length - 3} further unterminated string literal(s)`);
 
     // 2. Every proc must be closed. `proc sql` and `proc datasets` close with
     //    quit; most others close with run;. An unclosed proc silently swallows
@@ -133,9 +275,16 @@ export function sasStructureChecks(files: SasFile[]): Check[] {
       problems.push(`${name}: unbalanced parentheses (${broke ? "closed too many" : `${depth} unclosed`})`);
     }
 
-    // 5. Every &macro. referenced must be defined — in this file, in 00_setup
-    //    (which each program %includes), or be a SAS automatic variable.
-    //    An undefined macro var resolves to literal text and corrupts results.
+    /* 5. Every &macro. referenced must be defined — in this file, in 00_setup
+     *    (which each program %includes), or be a SAS automatic variable.
+     *    An undefined macro var resolves to literal text and corrupts results.
+     *
+     *    This reads `macroScan`, NOT the string-free `codeNS`: SAS resolves
+     *    `&var.` inside DOUBLE quotes, so a macro reference in a title or a
+     *    label is a real reference and must still be defined. It equally does
+     *    not read the raw `code`, because inside SINGLE quotes `&` and `%` are
+     *    ordinary characters — demanding a definition for `'&notavar'` would
+     *    fail a program that is correct. scanQuotes draws that line. */
     const AUTOMATIC = new Set(["sysdate", "sysdate9", "systime", "sysuserid", "sysscp", "syserr", "sqlobs"]);
     const setup = sasFiles.find((s) => /setup/i.test(s.path));
     const defined = new Set<string>();
@@ -156,7 +305,7 @@ export function sasStructureChecks(files: SasFile[]): Check[] {
       }
     }
     const undef = new Set<string>();
-    for (const m of code.matchAll(/&(\w+)\.?/g)) {
+    for (const m of macroScan.matchAll(/&(\w+)\.?/g)) {
       const v = m[1].toLowerCase();
       if (!defined.has(v) && !AUTOMATIC.has(v)) undef.add(m[1]);
     }
@@ -214,7 +363,7 @@ export function sasStructureChecks(files: SasFile[]): Check[] {
     name: "sas: every program is structurally well-formed",
     status: problems.length === 0 ? "pass" : "fail",
     detail: problems.length === 0
-      ? `${sasFiles.length} programs: comments balanced, procs/data steps closed, parens balanced, all &macros. defined, setup included`
+      ? `${sasFiles.length} programs: comments balanced, procs/data steps closed, parens balanced, quotes balanced, all &macros. defined, setup included`
       : problems.join(" | "),
   });
 

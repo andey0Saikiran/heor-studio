@@ -33,7 +33,7 @@
  * 0.75968, below 3.8416. All hand-derived, all asserted in verify/run.ts.
  */
 import type { SurvivalAnalysis } from "../../spec/types";
-import { findCodeList, survivalOutcome } from "../../spec/types";
+import { findCodeList, survivalOutcome, mortalityLinkageOf } from "../../spec/types";
 import type { GeneratedFile } from "../types";
 import type { AnalysisModule, SqlCtx, SasCtx, SqlModuleFile } from "./types";
 import { describeWindow, oneLine, q, windowConds } from "../sql-base";
@@ -54,6 +54,14 @@ import {
   CHI2_CRIT_95_DF1_EXACT,
 } from "../km-core";
 import {
+  mortalityLinkageSqlCtes,
+  mortalityLinkageSasSteps,
+  linkageAttritionMethod,
+  linkageRestrictionMethod,
+  linkageAscertainmentMethod,
+  sasDate,
+} from "../mortality-core";
+import {
   outcomeSettingPlan,
   parityStamp,
   survivalLimitations,
@@ -64,6 +72,7 @@ import {
 const MEASURE = "survival";
 
 /** ord bands, so one ORDER BY sorts a table of five different row shapes. */
+const ORD_ASCERT = 5000;
 const ORD_LIFE = 10000;
 const ORD_HORIZON = 20000;
 const ORD_MEDIAN = 30000;
@@ -97,15 +106,19 @@ function sqlSurvival(ctx: SqlCtx, an: SurvivalAnalysis, suffix: string): SqlModu
   const { d, wp, spec } = ctx;
   const out = `${wp}_km${suffix}`;
   const od = survivalOutcome(an);
+  /* THE LINKED ARM. A death endpoint with a DECLARED external linkage is
+   * emittable; DSTATUS and an undeclared linkage are not, and readiness stops
+   * both before anything reaches here. */
+  const lk = mortalityLinkageOf(an);
   const p = plan(ctx, an);
 
   const L: string[] = [];
 
-  /* The death endpoint never reaches here — readiness refuses it (spec/types.ts,
-   * "survival" case). This is the belt to that braces: an emitter that silently
-   * produced an empty program for a refused endpoint would be a worse failure
-   * than the refusal it was meant to enforce. */
-  if (!od) {
+  /* A refused death endpoint never reaches here — readiness refuses it
+   * (spec/types.ts, "survival" case). This is the belt to that braces: an
+   * emitter that silently produced an empty program for a refused endpoint
+   * would be a worse failure than the refusal it was meant to enforce. */
+  if (!od && !lk) {
     L.push(`-- NOT EMITTED: this analysis declares a MORTALITY endpoint, which is refused.`);
     L.push(`-- MarketScan's only native death signal is DSTATUS: in-hospital death only,`);
     L.push(`-- masked from data year 2016. See specReadiness("survival").`);
@@ -118,9 +131,15 @@ function sqlSurvival(ctx: SqlCtx, an: SurvivalAnalysis, suffix: string): SqlModu
     };
   }
 
-  const clid = od.codeListId;
-  const listSystem = findCodeList(spec, clid)?.system ?? "icd10cm";
-  const setting = outcomeSettingPlan(od, listSystem);
+  const clid = od?.codeListId ?? "";
+  const listSystem = od ? (findCodeList(spec, clid)?.system ?? "icd10cm") : "icd10cm";
+  /* A linked death is ascertained from an external table, so there is no claim
+   * to filter by care setting. Stamped as its own token rather than as "any",
+   * because "any" would say a filter was considered and widened when in fact
+   * the concept does not apply. */
+  const setting = od
+    ? outcomeSettingPlan(od, listSystem)
+    : { enforce: null as null, stamped: "not_applicable_external_linkage", note: null as string | null };
   const wc = windowConds(an.washout, "a.event_date", "c.index_date", d);
   const washoutPred = wc.length > 0 ? wc.join("\n      AND ") : "TRUE";
 
@@ -128,7 +147,14 @@ function sqlSurvival(ctx: SqlCtx, an: SurvivalAnalysis, suffix: string): SqlModu
    * curve's follow-up cannot disagree with the incidence table's person-time
    * about when a subject stopped being observed. */
   const censor = censorPlan(spec, an.personTimeRule);
-  const adminCensor = renderCensorSql(ctx, censor);
+  /* THE ASCERTAINMENT DATE IS AN ADMINISTRATIVE CENSOR, and folding it in here
+   * rather than filtering deaths out is what makes it one: a death after the
+   * date becomes censored follow-up, not a member who never died. A study whose
+   * follow-up runs past its own ascertainment date otherwise reports its whole
+   * tail as survival. */
+  const adminCensor = lk
+    ? `LEAST(${renderCensorSql(ctx, censor)}, DATE '${lk.ascertainedThrough}')`
+    : renderCensorSql(ctx, censor);
 
   const indexListId = spec.indexEvent.codeListId;
   const viaNdc = findCodeList(spec, indexListId)?.system === "drug_name";
@@ -155,15 +181,21 @@ function sqlSurvival(ctx: SqlCtx, an: SurvivalAnalysis, suffix: string): SqlModu
   L.push(`-- The STATISTIC itself is computed below, in closed form, and executed.`);
 
   const C: string[] = [];
+  /* TWO WAYS TO REACH THE SAME TWO CTEs. Both chains end in `atrisk` and
+   * `first_fu`, so everything downstream is the byte-identical curve machinery
+   * whichever endpoint was declared — a second downstream would be a second
+   * place for the two arms to drift. */
   C.push(
-    ...rateCoreSqlCtes(ctx, {
-      wp,
-      codeListId: clid,
-      settingEnforce: setting.enforce,
-      washoutDescription: describeWindow(an.washout),
-      washoutPredicate: washoutPred,
-      needDemo: false,
-    }),
+    ...(lk
+      ? mortalityLinkageSqlCtes({ lk, cohortT: ctx.cohortT })
+      : rateCoreSqlCtes(ctx, {
+          wp,
+          codeListId: clid,
+          settingEnforce: setting.enforce,
+          washoutDescription: describeWindow(an.washout),
+          washoutPredicate: washoutPred,
+          needDemo: false,
+        })),
   );
   C.push(`s0 AS (   -- censoring: ${censor.applied.join(" / ")}${censor.dataCut ? ` / data cut ${censor.dataCut}` : ``}`);
   C.push(`  SELECT c.enrolid, c.index_date, ${adminCensor} AS admin_censor, f.fu_date${p.grouped ? `, ${armExpr} AS arm` : ``}`);
@@ -247,6 +279,46 @@ function sqlSurvival(ctx: SqlCtx, an: SurvivalAnalysis, suffix: string): SqlModu
   L.push(`FROM (`);
 
   const parts: string[][] = [];
+
+  /* THE LINKED-SUBSET ATTRITION BLOCK.
+   *
+   * Emitted BESIDE the curve, at an ord band that sorts it FIRST, because it is
+   * the denominator every probability below is conditioned on. A curve whose
+   * ascertainment nobody can see is a curve nobody can check — and the specific
+   * failure it guards is not exotic: draw the same curve over the whole cohort
+   * and the unlinked members become immortal by construction. */
+  if (lk) {
+    /* ALIASED, because this block is emitted FIRST and a UNION takes its
+     * column names from its first branch. It leads for a reason that is not
+     * cosmetic: the ascertainment IS the denominator, and a reader who meets
+     * the curve before the attrition has already formed an impression. */
+    /* `people` also lands in n_risk, which is the survival shape's DENOMINATOR
+     * column, so that these rows are reachable by disclosure control at all:
+     * every one of them is a count of members, and "4 of 6 linked" is as
+     * identifying as any life-table cell. Without it the block would carry
+     * NULLs in both the count and the denominator column and would ship
+     * unsuppressed at every threshold. The percentage row carries the LINKED
+     * count for the same reason — it is derivable from it. */
+    const ascRow = (ord: number, stat: string, people: string, est: string, method: string) => [
+      `  SELECT ${STR(`'ascertainment'`)} AS component, ${STR(`'Overall'`)} AS stratum,`,
+      `         ${STR(`'${stat}'`)} AS statistic, ${INT(String(ord))} AS ord,`,
+      `         ${NULLI} AS time_days, ${INT(people)} AS n_risk, ${NULLI} AS n_event, ${NULLI} AS n_censor,`,
+      `         ${est} AS estimate, ${NULLN} AS se, ${NULLN} AS ci_low, ${NULLN} AS ci_high,`,
+      `         ${STR(`'${q(method)}'`)} AS method`,
+      `  FROM mattr`,
+    ];
+    parts.push(ascRow(ORD_ASCERT + 0, "cohort_members", `n_cohort`, NUM(`n_cohort`),
+      `members in the cohort BEFORE the linkage is applied. This is the denominator the study selected; the one below is the denominator it can actually observe deaths in`));
+    parts.push(ascRow(ORD_ASCERT + 1, "linked_members", `n_linked`, NUM(`n_linked`), linkageAttritionMethod(lk)));
+    parts.push(ascRow(ORD_ASCERT + 2, "ascertainment_pct", `n_linked`,
+      d.roundN(`n_linked * 100.0 / NULLIF(n_cohort, 0)`, 2),
+      `share of the cohort the linkage covers. Report it with every survival probability: a curve over 52% of a cohort is a statement about that 52%`));
+    parts.push(ascRow(ORD_ASCERT + 3, "unlinked_excluded_from_risk_set", `n_unlinked`, NUM(`n_unlinked`), linkageRestrictionMethod(lk)));
+    parts.push(ascRow(ORD_ASCERT + 4, "deaths_ascertained", `n_deaths`, NUM(`n_deaths`),
+      `deaths recorded in the linkage on or before ${lk.ascertainedThrough}, among linked members. These are the events every curve below is built from`));
+    parts.push(ascRow(ORD_ASCERT + 5, "deaths_after_ascertainment_date", `n_after_ascert`, NUM(`n_after_ascert`), linkageAscertainmentMethod(lk)));
+  }
+
 
   if (an.emitLifeTable) {
     /* THE LIFE TABLE IS THE MOST DISCLOSIVE TABLE THIS PROJECT EMITS. Nearly
@@ -368,7 +440,9 @@ function sqlSurvival(ctx: SqlCtx, an: SurvivalAnalysis, suffix: string): SqlModu
     title: `Survival${suffix ? ` (${an.label})` : ""}`,
     subtitle: `Kaplan-Meier + ${an.ciMethod} CI, median${p.grouped ? ", log-rank" : ""} (only the p-value is SAS-primary)`,
     extra: [
-      `Analysis: ${oneLine(an.label)} (id ${an.id}); endpoint code list "${clid}".`,
+      lk
+        ? `Analysis: ${oneLine(an.label)} (id ${an.id}); endpoint is ALL-CAUSE DEATH from the external linkage ${lk.tableHandle} (${oneLine(lk.vintageLabel)}), ascertained through ${lk.ascertainedThrough}.`
+        : `Analysis: ${oneLine(an.label)} (id ${an.id}); endpoint code list "${clid}".`,
       `Horizons: ${an.horizonDays.join(", ")} days.${p.grouped ? ` Log-rank ${p.comparison}.` : ""}`,
     ],
     body: L.join("\n"),
@@ -384,10 +458,11 @@ function sasSurvival(ctx: SasCtx, an: SurvivalAnalysis, num: string, suffix: str
   const outT = ctx.tbl(`${num}_km${suffix}`);
   const cohT = ctx.finalCohort;
   const od = survivalOutcome(an);
+  const lk = mortalityLinkageOf(an);
   const p = plan(ctx, an);
   const label = an.label.replace(/"/g, "'");
 
-  if (!od) {
+  if (!od && !lk) {
     return {
       path: `sas/${num}_km${suffix}.sas`,
       language: "sas",
@@ -403,17 +478,23 @@ function sasSurvival(ctx: SasCtx, an: SurvivalAnalysis, num: string, suffix: str
     };
   }
 
-  const evT = ctx.evOf(od.codeListId);
+  const evT = od ? ctx.evOf(od.codeListId) : "";
   const epiT = ctx.tbl("050_epi");
-  const listSystem = findCodeList(spec, od.codeListId)?.system ?? "icd10cm";
-  const setting = outcomeSettingPlan(od, listSystem);
+  const listSystem = od ? (findCodeList(spec, od.codeListId)?.system ?? "icd10cm") : "icd10cm";
+  const setting = od
+    ? outcomeSettingPlan(od, listSystem)
+    : { enforce: null as null, stamped: "not_applicable_external_linkage", note: null as string | null };
   const sasSettingCond =
     setting.enforce === "outpatient" ? `and e.setting = 'OP'` :
     setting.enforce === "inpatient" ? `and e.setting = 'IP'` : null;
   const washLines = [...(sasSettingCond ? [sasSettingCond] : []), ...sasWindowConds(an.washout, "e")];
 
   const censorS = censorPlan(spec, an.personTimeRule);
-  const adminExpr = renderCensorSas(censorS);
+  /* The ascertainment date, folded into the SAME administrative censor the SQL
+   * twin folds it into. A death after it is censored follow-up, not a survivor. */
+  const adminExpr = lk
+    ? `min(${renderCensorSas(censorS)}, ${sasDate(lk.ascertainedThrough)})`
+    : renderCensorSas(censorS);
   const limits = survivalLimitations(an, listSystem, spec);
 
   const indexListIdS = spec.indexEvent.codeListId;
@@ -430,6 +511,16 @@ function sasSurvival(ctx: SasCtx, an: SurvivalAnalysis, num: string, suffix: str
       `SAS-primary column - a chi-square tail probability needs a CDF.`,
       `ANCHOR: PROC LIFETEST is run BESIDE the closed form and compared to it,`,
       `row by row, with a PASS/FAIL printed. The procedure is checked, not trusted.`,
+      ...(lk
+        ? [
+            `ENDPOINT: ALL-CAUSE DEATH from the EXTERNAL LINKAGE ${cmt(lk.tableHandle)}`,
+            `(${cmt(lk.vintageLabel)}), ascertained through ${lk.ascertainedThrough}.`,
+            `THE RISK SET IS THE LINKED SUBSET ONLY. A member outside the linkage cannot`,
+            `be observed to die, so leaving them in would make them immortal by`,
+            `construction and bias survival UPWARD. The ascertainment block reports how`,
+            `many members that excludes.`,
+          ]
+        : []),
       `Twin of the SQL km program (SQL twin is execution-verified; this SAS twin is parity-checked, not executed). Keep both in sync.`,
     ]),
     `/* ${parityStamp(
@@ -454,38 +545,50 @@ function sasSurvival(ctx: SasCtx, an: SurvivalAnalysis, num: string, suffix: str
     `  delete ${outT.replace("tz.", "")};`,
     `quit;`,
     ``,
-    `/*-------------------- prevalent-case washout -> at risk ---------------------*/`,
-    `/* washout window: ${cmt(describeWin(an.washout))} */`,
-    `proc sql;`,
-    `  create table work._${num}_prev as`,
-    `  select distinct a.enrolid`,
-    `  from ${cohT} as a`,
-    `  inner join ${evT} as e`,
-    `    on e.enrolid = a.enrolid`,
-    `  where 1 = 1`,
-    ...washLines.map((l, idx) => `    ${l}${idx === washLines.length - 1 ? ";" : ""}`),
-    ...(washLines.length === 0 ? [`  ;`] : []),
-    ``,
-    `  create table work._${num}_atrisk as`,
-    `  select a.*`,
-    `  from ${cohT} as a`,
-    `  where a.enrolid not in (select enrolid from work._${num}_prev);`,
-    `quit;`,
-    ``,
-    ...levelCheck(`work._${num}_atrisk`, "at-risk cohort"),
-    ``,
-    `/*-------------------- first endpoint strictly after index -------------------*/`,
-    `proc sql;`,
-    `  create table work._${num}_first_fu as`,
-    `  select a.enrolid, min(e.svcdate) as fu_date format=date9.`,
-    `  from work._${num}_atrisk as a`,
-    `  inner join ${evT} as e`,
-    `    on  e.enrolid = a.enrolid`,
-    `    and e.svcdate > a.index_date`,
-    ...(sasSettingCond ? [`    ${sasSettingCond}`] : []),
-    `  group by a.enrolid;`,
-    `quit;`,
-    ``,
+    /* TWO WAYS TO REACH THE SAME TWO TABLES. Both arms end in _atrisk and
+       _first_fu, so every step below is the identical curve machinery whichever
+       endpoint was declared. */
+    ...(lk
+      ? [
+          ...mortalityLinkageSasSteps({ lk, num, cohT }),
+          ``,
+          ...levelCheck(`work._${num}_atrisk`, "LINKED at-risk cohort (the linked subset, not the whole cohort)"),
+          ``,
+        ]
+      : [
+          `/*-------------------- prevalent-case washout -> at risk ---------------------*/`,
+          `/* washout window: ${cmt(describeWin(an.washout))} */`,
+          `proc sql;`,
+          `  create table work._${num}_prev as`,
+          `  select distinct a.enrolid`,
+          `  from ${cohT} as a`,
+          `  inner join ${evT} as e`,
+          `    on e.enrolid = a.enrolid`,
+          `  where 1 = 1`,
+          ...washLines.map((l, idx) => `    ${l}${idx === washLines.length - 1 ? ";" : ""}`),
+          ...(washLines.length === 0 ? [`  ;`] : []),
+          ``,
+          `  create table work._${num}_atrisk as`,
+          `  select a.*`,
+          `  from ${cohT} as a`,
+          `  where a.enrolid not in (select enrolid from work._${num}_prev);`,
+          `quit;`,
+          ``,
+          ...levelCheck(`work._${num}_atrisk`, "at-risk cohort"),
+          ``,
+          `/*-------------------- first endpoint strictly after index -------------------*/`,
+          `proc sql;`,
+          `  create table work._${num}_first_fu as`,
+          `  select a.enrolid, min(e.svcdate) as fu_date format=date9.`,
+          `  from work._${num}_atrisk as a`,
+          `  inner join ${evT} as e`,
+          `    on  e.enrolid = a.enrolid`,
+          `    and e.svcdate > a.index_date`,
+          ...(sasSettingCond ? [`    ${sasSettingCond}`] : []),
+          `  group by a.enrolid;`,
+          `quit;`,
+          ``,
+        ]),
     `/*----------------------------------------------------------------------------`,
     `  Follow-up time. The administrative censor is the SAME plan the incidence`,
     `  twins render (rate-core.censorPlan), earliest of:`,
@@ -653,8 +756,44 @@ function sasSurvival(ctx: SasCtx, an: SurvivalAnalysis, num: string, suffix: str
   lines.push(
     `/*-------------------- assemble the result table -----------------------------*/`,
     `data work._${num}_rows;`,
-    `  length measure $20 component $12 stratum $40 statistic $24 method $220;`,
+    /* WIDER COLUMNS ONLY ON THE LINKED ARM. The ascertainment block carries a
+       longer component name and much longer method text, and SAS truncates a
+       character variable silently at its declared length - so the arm that
+       needs the room gets it, and the arm that does not emits the identical
+       LENGTH statement it emitted before this existed. */
+    lk
+      ? `  length measure $20 component $14 stratum $40 statistic $32 method $900;`
+      : `  length measure $20 component $12 stratum $40 statistic $24 method $220;`,
     `  measure = "${MEASURE}";`,
+    ...(lk
+      ? [
+          `  /* THE LINKED-SUBSET ATTRITION BLOCK - the denominator every survival`,
+          `     probability below is conditioned on. Emitted FIRST by ord, because a`,
+          `     curve whose ascertainment nobody can see is a curve nobody can check. */`,
+          `  do until (_e0);`,
+          `    set work._${num}_mattr end=_e0;`,
+          `    component = 'ascertainment'; stratum = 'Overall';`,
+          `    time_days = .; n_event = .; n_censor = .;`,
+          `    se = .; ci_low = .; ci_high = .;`,
+          `    /* the member count also goes in n_risk, the survival shape's`,
+          `       DENOMINATOR column, so disclosure control can reach these rows:`,
+          `       "4 of 6 linked" identifies people as surely as a life-table cell */`,
+          `    statistic = 'cohort_members'; ord = ${ORD_ASCERT}; n_risk = n_cohort; estimate = n_cohort;`,
+          `    method = 'members in the cohort BEFORE the linkage is applied. This is the denominator the study selected; the one below is the denominator it can actually observe deaths in'; output;`,
+          `    statistic = 'linked_members'; ord = ${ORD_ASCERT + 1}; n_risk = n_linked; estimate = n_linked;`,
+          `    method = '${sq(cmt(linkageAttritionMethod(lk)))}'; output;`,
+          `    statistic = 'ascertainment_pct'; ord = ${ORD_ASCERT + 2}; n_risk = n_linked;`,
+          `    estimate = round(100 * n_linked / n_cohort, 0.01);`,
+          `    method = 'share of the cohort the linkage covers. Report it with every survival probability: a curve over 52% of a cohort is a statement about that 52%'; output;`,
+          `    statistic = 'unlinked_excluded_from_risk_set'; ord = ${ORD_ASCERT + 3}; n_risk = n_unlinked; estimate = n_unlinked;`,
+          `    method = '${sq(cmt(linkageRestrictionMethod(lk)))}'; output;`,
+          `    statistic = 'deaths_ascertained'; ord = ${ORD_ASCERT + 4}; n_risk = n_deaths; estimate = n_deaths;`,
+          `    method = 'deaths recorded in the linkage on or before ${lk.ascertainedThrough}, among linked members. These are the events every curve below is built from'; output;`,
+          `    statistic = 'deaths_after_ascertainment_date'; ord = ${ORD_ASCERT + 5}; n_risk = n_after_ascert; estimate = n_after_ascert;`,
+          `    method = '${sq(cmt(linkageAscertainmentMethod(lk)))}'; output;`,
+          `  end;`,
+        ]
+      : []),
     ...(an.emitLifeTable
       ? [
           `  /* THE LIFE TABLE IS THE MOST DISCLOSIVE TABLE HERE: most rows carry`,

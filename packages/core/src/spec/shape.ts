@@ -14,6 +14,7 @@
  * finite number > 0, got string".
  */
 import type { StudySpec } from "./types";
+import { MAX_CONSTRUCTED_LINES } from "./types";
 
 const DATABASES = new Set(["marketscan_ccae", "marketscan_mdcr", "marketscan_medicaid"]);
 const CODE_SYSTEMS = new Set(["icd9cm", "icd10cm", "cpt_hcpcs", "ndc", "drug_name"]);
@@ -47,6 +48,8 @@ export const SHAPE_CHECKED_ANALYSIS_KINDS = new Set([
 const ANALYSIS_KINDS = SHAPE_CHECKED_ANALYSIS_KINDS;
 const SURVIVAL_CI = new Set(["log_log", "linear"]);
 const SURVIVAL_ENDPOINTS = new Set(["claims_event", "death"]);
+const DEATH_SOURCES = new Set(["dstatus", "ssa_master_file", "linked_registry"]);
+const ADVANCE_TRIGGERS = new Set(["substitution", "addition_or_substitution"]);
 
 const LEDGER_SETTINGS = new Set(["inpatient", "ed", "outpatient", "pharmacy"]);
 const COST_FIELDS = new Set(["paytot", "netpay"]);
@@ -61,6 +64,11 @@ const SLUG = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
  *  control characters, quotes and backslashes are never legitimate in a
  *  clinical code and only ever appear in garbage or injection attempts. */
 const SAFE_CODE = /^[\x20-\x7E]+$/;
+/** A mortality linkage's table and column names go into generated code with no
+ *  quoting at all, so they are held to the same shape emitters/types.ts holds
+ *  the study tag to: identifier characters, plus at most one dot for a schema
+ *  or a SAS libref. */
+const LINKAGE_IDENT = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$/;
 
 class Problems {
   list: string[] = [];
@@ -164,6 +172,38 @@ function checkOutcomeDefinition(p: Problems, v: unknown, path: string): void {
   if (v.claimSeparationDays !== undefined) needNum(p, v, "claimSeparationDays", path, { min: 0 });
   needEnum(p, v, "setting", path, SETTINGS);
   needEnum(p, v, "diagnosisPosition", path, DX_POSITIONS);
+}
+
+/**
+ * A time-to-event endpoint's SHAPE, for all four time-to-event kinds.
+ *
+ * Shape, not policy: a mortality endpoint is well-formed and may still be
+ * refused (DSTATUS) or unbuilt for a given kind, and readiness is where that is
+ * decided with its reason attached. What this must catch is a linkage whose
+ * strings would be embedded verbatim in generated SQL and SAS — those reach the
+ * emitters as table and column names, so they are a code-injection surface and
+ * not merely a typo risk. Written ONCE because four kinds read the same union,
+ * and four hand-copied checks is how the fourth ends up looser than the first.
+ */
+function checkSurvivalEndpoint(p: Problems, v: unknown, path: string): void {
+  if (!isObj(v)) { p.push(path, `expected {kind, ...}, got ${typeOf(v)}`); return; }
+  if (!needEnum(p, v, "kind", path, SURVIVAL_ENDPOINTS)) return;
+  if (v.kind === "claims_event") {
+    checkOutcomeDefinition(p, v.outcomeDefinition, `${path}.outcomeDefinition`);
+    return;
+  }
+  needEnum(p, v, "source", path, DEATH_SOURCES);
+  if (v.linkage === undefined) return;
+  const lp = `${path}.linkage`;
+  if (!isObj(v.linkage)) { p.push(lp, `expected a MortalityLinkage object, got ${typeOf(v.linkage)}`); return; }
+  const lk = v.linkage;
+  for (const key of ["tableHandle", "deathDateColumn", "linkedFlagColumn"]) {
+    if (!needStr(p, lk, key, lp, { nonEmpty: true })) continue;
+    need(p, `${lp}.${key}`, LINKAGE_IDENT.test(lk[key] as string),
+      `must be a plain identifier (letters, digits, underscores, optionally one dot for a schema or libref) — it is embedded VERBATIM in generated SQL and SAS, got ${JSON.stringify(lk[key])}`);
+  }
+  needIso(p, lk, "ascertainedThrough", lp);
+  needSafeText(p, lk, "vintageLabel", lp, { nonEmpty: true, maxLen: 200 });
 }
 
 function checkPersonTimeRule(p: Problems, v: unknown, path: string): void {
@@ -417,8 +457,7 @@ function checkAnalysis(p: Problems, v: unknown, path: string): void {
       const ep = `${path}.endpoint`;
       if (!isObj(v.endpoint)) p.push(ep, `expected {kind, ...}, got ${typeOf(v.endpoint)}`);
       else {
-        needEnum(p, v.endpoint, "kind", ep, SURVIVAL_ENDPOINTS);
-        if (v.endpoint.kind === "claims_event") checkOutcomeDefinition(p, v.endpoint.outcomeDefinition, `${ep}.outcomeDefinition`);
+        checkSurvivalEndpoint(p, v.endpoint, ep);
       }
       checkWindow(p, v.washout, `${path}.washout`);
       checkPersonTimeRule(p, v.personTimeRule, `${path}.personTimeRule`);
@@ -433,8 +472,7 @@ function checkAnalysis(p: Problems, v: unknown, path: string): void {
       const epc = `${path}.endpoint`;
       if (!isObj(v.endpoint)) p.push(epc, `expected {kind, ...}, got ${typeOf(v.endpoint)}`);
       else {
-        needEnum(p, v.endpoint, "kind", epc, SURVIVAL_ENDPOINTS);
-        if (v.endpoint.kind === "claims_event") checkOutcomeDefinition(p, v.endpoint.outcomeDefinition, `${epc}.outcomeDefinition`);
+        checkSurvivalEndpoint(p, v.endpoint, epc);
       }
       checkWindow(p, v.washout, `${path}.washout`);
       checkPersonTimeRule(p, v.personTimeRule, `${path}.personTimeRule`);
@@ -448,8 +486,7 @@ function checkAnalysis(p: Problems, v: unknown, path: string): void {
       const epr = `${path}.endpoint`;
       if (!isObj(v.endpoint)) p.push(epr, `expected {kind, ...}, got ${typeOf(v.endpoint)}`);
       else {
-        needEnum(p, v.endpoint, "kind", epr, SURVIVAL_ENDPOINTS);
-        if (v.endpoint.kind === "claims_event") checkOutcomeDefinition(p, v.endpoint.outcomeDefinition, `${epr}.outcomeDefinition`);
+        checkSurvivalEndpoint(p, v.endpoint, epr);
       }
       if (!Array.isArray(v.competingEvents)) p.push(`${path}.competingEvents`, `expected an array, got ${typeOf(v.competingEvents)}`);
       else v.competingEvents.forEach((ce, j) => {
@@ -471,8 +508,7 @@ function checkAnalysis(p: Problems, v: unknown, path: string): void {
       const epf = `${path}.endpoint`;
       if (!isObj(v.endpoint)) p.push(epf, `expected {kind, ...}, got ${typeOf(v.endpoint)}`);
       else {
-        needEnum(p, v.endpoint, "kind", epf, SURVIVAL_ENDPOINTS);
-        if (v.endpoint.kind === "claims_event") checkOutcomeDefinition(p, v.endpoint.outcomeDefinition, `${epf}.outcomeDefinition`);
+        checkSurvivalEndpoint(p, v.endpoint, epf);
       }
       if (!Array.isArray(v.competingEvents)) p.push(`${path}.competingEvents`, `expected an array, got ${typeOf(v.competingEvents)}`);
       else v.competingEvents.forEach((ce, j) => {
@@ -575,8 +611,29 @@ function checkAnalysis(p: Problems, v: unknown, path: string): void {
       }
       checkWindow(p, v.window, `${path}.window`);
       needNum(p, v, "permissibleOverlapDays", path);
-      need(p, `${path}.lineRule`, v.lineRule === "new_line_on_switch",
-        `expected "new_line_on_switch" (the only line rule emitted), got ${JSON.stringify(v.lineRule)}`);
+      need(p, `${path}.lineRule`, v.lineRule === "new_line_on_switch" || v.lineRule === "declared_regimen",
+        `expected "new_line_on_switch" or "declared_regimen", got ${JSON.stringify(v.lineRule)}`);
+      /* THE FULL CONSTRUCTION's shape. Structure only: whether the three
+       * parameters are sane NUMBERS for a line definition is readiness's
+       * question, not this one's. */
+      if (v.lineConstruction !== undefined) {
+        const lp = `${path}.lineConstruction`;
+        if (!isObj(v.lineConstruction)) p.push(lp, `expected a LineConstruction object, got ${typeOf(v.lineConstruction)}`);
+        else {
+          const lc = v.lineConstruction;
+          needNum(p, lc, "combinationWindowDays", lp, { min: 0 });
+          needNum(p, lc, "gapDays", lp, { min: 1 });
+          needNum(p, lc, "maxLines", lp, { min: 1, max: MAX_CONSTRUCTED_LINES });
+          needEnum(p, lc, "advanceTrigger", lp, ADVANCE_TRIGGERS);
+          need(p, `${lp}.agentCodeListIds`, Array.isArray(lc.agentCodeListIds) && lc.agentCodeListIds.length > 0,
+            `expected a non-empty array of code-list ids, got ${typeOf(lc.agentCodeListIds)}`);
+          if (Array.isArray(lc.agentCodeListIds)) {
+            lc.agentCodeListIds.forEach((id: unknown, i: number) =>
+              need(p, `${lp}.agentCodeListIds[${i}]`, typeof id === "string" && id.length > 0,
+                `expected a non-empty string, got ${typeOf(id)}`));
+          }
+        }
+      }
       break;
     }
     case "standardization":

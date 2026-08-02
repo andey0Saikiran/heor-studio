@@ -34,12 +34,13 @@ import type {
   NegativeControlAnalysis,
   AdherenceAnalysis,
   TreatmentSwitchingAnalysis,
+  LineConstruction,
   SurvivalAnalysis,
   TrendSpec,
 } from "../spec/types";
 import type { StudySpec } from "../spec/types";
 import {
-  survivalOutcome, daysSupplyCleaningFor,
+  survivalOutcome, daysSupplyCleaningFor, mortalityLinkageOf,
   ICD10_TRANSITION_DATE, findCodeList, icdEraCounts, lookbackReach,
 } from "../spec/types";
 import { CONVENTIONAL_STRATA } from "./psstrat-core";
@@ -1475,6 +1476,25 @@ export interface SurvivalParity {
   logRankStatistic: "closed_form_mantel";
   logRankPValue: "sas_primary";
   kmAnchor: "lifetest_equals_closed_form_product_limit";
+  /** THE LINKAGE, when the endpoint is an external mortality linkage.
+   *
+   *  Present only on that arm, so a claims-endpoint survival analysis stamps
+   *  exactly the JSON it stamped before this wave — which is what lets the
+   *  snapshot gate prove the linked path is additive. Every field here changes
+   *  which members are AT RISK or WHEN follow-up stops, and a twin consuming a
+   *  different one produces a perfectly plausible curve over a different
+   *  denominator. */
+  mortalityLinkage?: {
+    tableHandle: string;
+    deathDateColumn: string;
+    linkedFlagColumn: string;
+    ascertainedThrough: string;
+    vintageLabel: string;
+    /** stamped as a value, not implied by presence: the risk set restriction is
+     *  the whole reason this arm is emittable at all */
+    riskSet: "linked_subset_only";
+    attritionRow: "ascertained_n_of_m";
+  };
 }
 
 /** Spec options the survival twins do NOT implement. */
@@ -1486,6 +1506,19 @@ export function survivalLimitations(an: SurvivalAnalysis, listSystem: CodeSystem
     if (settingNote) out.push(settingNote);
     if (od.minClaims > 1)
       out.push(`endpoint minClaims=${od.minClaims} is NOT yet enforced - any single qualifying claim counts as the event, so the survival time is the FIRST claim's date rather than the date a multi-claim definition would be satisfied`);
+  }
+  /* THE LINKED ARM's own limitations. They are about ASCERTAINMENT rather than
+   * about the estimator, which is why they cannot be folded into the notes
+   * above: nothing in the Kaplan-Meier machinery changes, and everything about
+   * who is countable does. */
+  const lk = mortalityLinkageOf(an);
+  if (lk) {
+    out.push(`the RISK SET is the LINKED SUBSET ONLY. Members outside the linkage are EXCLUDED from the denominator, not censored inside it, because a member who cannot be observed to die would be immortal by construction and would bias survival UPWARD. The linked-subset attrition row reports how many that is`);
+    out.push(`whether the LINKED SUBSET resembles the UNLINKED COMPLEMENT is not testable here and is not tested. If linkage success is related to age, geography, plan type or disease severity, the curve describes the linked members and generalizes to the whole cohort only by assumption`);
+    out.push(`follow-up is administratively censored at the ascertainment date ${lk.ascertainedThrough}. A death after it exists in the world and not in ${lk.tableHandle}, so it is treated as censoring - which is correct, and is also why a study whose follow-up runs well past that date is reporting mostly censored time`);
+    out.push(`CAUSE OF DEATH is not read. This is ALL-CAUSE mortality; a cause-specific endpoint would need the linkage's cause fields and a competing-risks treatment of the other causes, neither of which is built`);
+    out.push(`the linkage vintage is "${lk.vintageLabel}". Linkages are revised and re-released, so re-running this program against a later vintage can move the curve with no change to any claim`);
+    out.push(`the WASHOUT IS NOT APPLIED to this endpoint - a prevalent case of death does not exist. It is still stamped, because the same analysis on a claims endpoint would apply it and a silent difference between the two is worse than a stated one`);
   }
   if (an.personTimeRule.censorAt.includes("death")) out.push(DEATH_CENSOR_NOTE);
   if (spec && !dataCutLimit(spec)) out.push(NO_DATA_CUT_NOTE);
@@ -1515,6 +1548,7 @@ export function survivalParity(
     strata: string[]; referenceLevel: string | null; exposedLevel: string | null; logRank: boolean;
   },
 ): SurvivalParity {
+  const lk = mortalityLinkageOf(an);
   return {
     id: an.id,
     codeListId: survivalOutcome(an)?.codeListId ?? "",
@@ -1534,6 +1568,19 @@ export function survivalParity(
     logRankStatistic: "closed_form_mantel",
     logRankPValue: "sas_primary",
     kmAnchor: "lifetest_equals_closed_form_product_limit",
+    ...(lk
+      ? {
+          mortalityLinkage: {
+            tableHandle: lk.tableHandle,
+            deathDateColumn: lk.deathDateColumn,
+            linkedFlagColumn: lk.linkedFlagColumn,
+            ascertainedThrough: lk.ascertainedThrough,
+            vintageLabel: lk.vintageLabel,
+            riskSet: "linked_subset_only" as const,
+            attritionRow: "ascertained_n_of_m" as const,
+          },
+        }
+      : {}),
   };
 }
 
@@ -2219,13 +2266,61 @@ export interface SwitchingParity {
   dropZeroNegativeSupply: boolean;
   maxDaysSupplyCap: number;
   sasPrimary: "none";
+  /** THE FULL LINE CONSTRUCTION, present only under lineRule
+   *  "declared_regimen".
+   *
+   *  Absent on the two-line approximation so a spec using it stamps exactly the
+   *  JSON it stamped before this wave — the snapshot gate proves the new path
+   *  is additive rather than a rewrite. Every field is one of the three
+   *  parameters that move the line count more than anything else, plus the
+   *  bound the construction is unrolled to; a twin consuming a different one
+   *  reports a different line distribution while every count stays plausible. */
+  lineConstruction?: {
+    combinationWindowDays: number;
+    gapDays: number;
+    advanceTrigger: string;
+    /** joined, so a twin following a DIFFERENT agent set cannot match */
+    agentCodeListIds: string;
+    maxLines: number;
+    /** the denominator PPPM-by-line divides by. `fixed_window` is WRONG here by
+     *  construction (a line ends at next-line initiation, so follow-up is
+     *  unequal by design), which is why the basis is stamped rather than
+     *  assumed. */
+    costNormalization: "observed_member_months";
+    daysPerMonth: string;
+    excludeCapitatedMonths: boolean;
+    truncationReported: "yes";
+  };
 }
 
 export function switchingLimitations(an: TreatmentSwitchingAnalysis): string[] {
   const out: string[] = [];
-  out.push(`LINE OF THERAPY IS DEFINITIONAL. Only the rule "${an.lineRule}" is emitted - a new line at each switch. Protocols that advance a line on an add-on, after a gap, only within a drug class, or on documented clinical intent will produce DIFFERENT line numbers on the same patients, and none of them is more correct than another. Execution here proves the twins agree with each other, never that either agrees with your protocol`);
+  const lc = an.lineRule === "declared_regimen" ? an.lineConstruction : undefined;
+  if (lc) {
+    /* THE DECLARED-REGIMEN limitations REPLACE the two-line ones, because they
+     * are about a different construction. Leaving both in would tell a reader
+     * that only third and later lines are unbuilt while also telling them the
+     * program stops at line ${lc.maxLines}. */
+    out.push(`LINE OF THERAPY IS DEFINITIONAL, and under this rule THREE declared parameters decide it: a combination window of ${lc.combinationWindowDays} days, a gap of ${lc.gapDays} days, and an advance trigger of "${lc.advanceTrigger}". Change any one and the same patients carry different line numbers. None of the three has a defensible default and none is discoverable from claims - execution proves the twins implement the SAME rule, never that the rule is your protocol's`);
+    out.push(`REGIMEN GRANULARITY IS THE AGENT LIST. A line is named by which of the ${lc.agentCodeListIds.length} declared agent lists are active, so two molecules on ONE list are one agent and a switch between them is invisible here, while the same two on separate lists is a substitution. Put them on the list that matches your protocol`);
+    out.push(`SUBSTITUTION vs ADDITION is inferred from COVERAGE, not from intent: a new agent arriving while every regimen agent is still supplied is an addition, and one arriving after a regimen agent ran out is a substitution. A clinician who stopped an agent the patient still had supply of reads as an addition here, and nothing in claims can say otherwise`);
+    out.push(`construction STOPS at line ${lc.maxLines}. Patients who would have gone further are COUNTED in the truncation row rather than dropped, but their later lines are not characterized, so a mean line count read off this table is bounded above by ${lc.maxLines}`);
+    out.push(`DOSE, INTENT, ORAL-vs-INFUSED and treatment BREAKS FOR TOXICITY are all invisible. A planned holiday longer than the gap closes a line here and re-opens it as a new one with the same regimen - which is why the closed-by breakdown is emitted beside the counts`);
+    out.push(`PPPM BY LINE is all-cause and undiscounted, over the eligible member-months INSIDE each line's own span. It is not a disease-attributed cost and carries no CPI restatement - the resource_use module is where those options live`);
+  } else {
+    out.push(`LINE OF THERAPY IS DEFINITIONAL. Only the rule "${an.lineRule}" is emitted - a new line at each switch. Protocols that advance a line on an add-on, after a gap, only within a drug class, or on documented clinical intent will produce DIFFERENT line numbers on the same patients, and none of them is more correct than another. Execution here proves the twins agree with each other, never that either agrees with your protocol`);
+  }
   out.push(`the switch is defined on DISPENSINGS, not on prescriptions or on intent. A patient who was told to stop the index drug but had supply left is classified by that leftover supply, because it is the only signal in the data`);
-  out.push(`only the FIRST switch is characterized. Switching back, cycling between drugs, and third and later lines are not built - a patient who returns to the index drug still counts as having switched once`);
+  /* The SWITCH block above is unchanged under either rule, so this note about
+   * it stays either way — but its "third and later lines are not built" clause
+   * is false once the regimen construction runs, and a stale limitation is
+   * worse than none: it tells a reader the tool cannot do the thing it just
+   * did, so they stop reading the rest. */
+  out.push(
+    lc
+      ? `only the FIRST switch is characterized BY THE SWITCH BLOCK - the switch/add-on split, the sensitivity band and the time-to-switch all describe the first new drug only. The LINE block beside it is the full construction and does carry later lines; a patient who returns to the index drug still counts as having switched once`
+      : `only the FIRST switch is characterized. Switching back, cycling between drugs, and third and later lines are not built - a patient who returns to the index drug still counts as having switched once`,
+  );
   out.push(`NO drug-class logic. Every code list on the to-list is a distinct destination, so two brands of the same molecule count as a switch between them unless you put them on ONE code list`);
   out.push(`add-on patients are counted and reported but their combination period is not characterized: no time on combination, and no later resolution of it`);
   if (an.permissibleOverlapDays === 0)
@@ -2242,11 +2337,33 @@ export const SWITCHING_METHOD_NOTES = [
   `SAS-PRIMARY: nothing`,
 ];
 
+/** Method notes emitted ONLY when the full regimen construction runs. Kept
+ *  separate from SWITCHING_METHOD_NOTES so a spec using the two-line
+ *  approximation emits byte-identical text to before this wave. */
+export function lineConstructionMethodNotes(lc: LineConstruction): string[] {
+  return [
+    `A LINE IS A REGIMEN: the set of agents active together, not a single drug. Line 1 opens at the first dispensing of any declared agent; every agent whose first dispensing falls within ${lc.combinationWindowDays} days of that opening joins the SAME line, which is what keeps a planned doublet from reading as an immediate progression`,
+    `the line CLOSES at the earliest of an uncovered gap of ${lc.gapDays} days, a SUBSTITUTION (a new agent starting while a regimen agent has run out), and - under the declared trigger "${lc.advanceTrigger}" - an ADDITION (a new agent starting while every regimen agent is still covered)`,
+    `the NEXT line opens at the first dispensing AT OR AFTER the close, whichever reason closed it. One rule for both reasons, so a gap close and a substitution close cannot drift apart`,
+    `a line that never closes is OPEN AT THE WINDOW END, which is CENSORING and is reported as its own count. Folding it into "completed" would turn "still on this regimen when we stopped looking" into "finished this regimen"`,
+    `construction stops after ${lc.maxLines} lines and the number of patients TRUNCATED there is reported. A line distribution that silently drops its own tail understates late-line burden and looks exactly like a cohort that did not progress`,
+    `PPPM BY LINE divides by ELIGIBLE MEMBER-MONTHS inside each line's own span, never by the window length. Follow-up is unequal by construction here - a line ends at next-line initiation - so a fixed-window denominator would understate cost for exactly the patients who advanced fastest`,
+  ];
+}
+
 export function switchingParity(
   an: TreatmentSwitchingAnalysis,
-  consumed: { windowStart: number; windowEnd: number; windowDays: number },
+  consumed: {
+    windowStart: number; windowEnd: number; windowDays: number;
+    /** rendered days-per-month literal and capitation choice, when the line
+     *  construction runs. Passed in rather than re-derived so the stamp records
+     *  what the emitter ACTUALLY embedded. */
+    daysPerMonth?: string;
+    excludeCapitatedMonths?: boolean;
+  },
 ): SwitchingParity {
   const clean = daysSupplyCleaningFor(an);
+  const lc = an.lineRule === "declared_regimen" ? an.lineConstruction : undefined;
   return {
     id: an.id,
     fromCodeListId: an.fromCodeListId,
@@ -2263,6 +2380,21 @@ export function switchingParity(
     dropZeroNegativeSupply: clean.dropZeroNegative,
     maxDaysSupplyCap: clean.maxDaysSupplyCap,
     sasPrimary: "none",
+    ...(lc
+      ? {
+          lineConstruction: {
+            combinationWindowDays: lc.combinationWindowDays,
+            gapDays: lc.gapDays,
+            advanceTrigger: lc.advanceTrigger,
+            agentCodeListIds: [...lc.agentCodeListIds].join(","),
+            maxLines: lc.maxLines,
+            costNormalization: "observed_member_months" as const,
+            daysPerMonth: consumed.daysPerMonth ?? "",
+            excludeCapitatedMonths: consumed.excludeCapitatedMonths ?? true,
+            truncationReported: "yes" as const,
+          },
+        }
+      : {}),
   };
 }
 

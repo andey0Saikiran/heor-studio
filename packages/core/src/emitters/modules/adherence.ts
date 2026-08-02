@@ -45,7 +45,7 @@ import type { AdherenceAnalysis } from "../../spec/types";
 import type { GeneratedFile } from "../types";
 import type { AnalysisModule, SqlCtx, SasCtx, SqlModuleFile } from "./types";
 import { describeWindow, oneLine, q } from "../sql-base";
-import { cmt, header, levelCheck, INCLUDE_SETUP } from "../sas-base";
+import { cmt, sq, header, levelCheck, INCLUDE_SETUP } from "../sas-base";
 import { daysSupplyCleaningFor } from "../../spec/types";
 import { intervalSqlCtes, gapSqlCtes, intervalSasSteps, cleaningRules, cleaningKeepClause } from "../interval-core";
 import {
@@ -420,7 +420,14 @@ function sasAdherence(ctx: SasCtx, an: AdherenceAnalysis, num: string, suffix: s
     `  method='dispensings of this drug for cohort members, before any cleaning'; output;`,
     ...rules.flatMap((r, i) => [
       `  statistic='dropped_rule_${i + 1}'; ord=${ORD_FEEDER + 1 + i}; estimate=n_drop_${i};`,
-      `  method='${cmt(r.reason)}'; output;`,
+      /* sq(), not cmt(): this is a string LITERAL, not comment text. cmt()
+       * escapes the comment terminator and leaves apostrophes alone, so the
+       * zero-or-negative reason ("the program's own identity row") closed its
+       * literal early and left the rest of the line — `; output;` included —
+       * inside a quote that never shut. The SQL twin escapes the same string
+       * with q() and is executed, so it stayed correct and silent about this.
+       * Found by the quote-balance rule in verify/sas-lint.ts. */
+      `  method='${sq(r.reason)}'; output;`,
     ]),
     `  statistic='fills_measured'; ord=${ORD_FEEDER + 1 + rules.length}; estimate=n_fills_kept;`,
     `  if n_fills_kept = n_fills_raw then method='every dispensing was measurable; no fill was dropped';`,
