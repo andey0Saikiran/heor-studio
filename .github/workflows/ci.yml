@@ -1,0 +1,67 @@
+name: CI
+
+# Nothing previously gated a commit that broke verification — `npm run verify`
+# had only ever been run by hand. Correctness is this project's entire claim, so
+# every push runs the full gate.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # 22.12+ — Vite refuses to build on 22.11 (see packages/web)
+          node-version: "22.12"
+          cache: npm
+
+      # `npm ci` (not `install`) so the platform-specific native bindings in the
+      # lockfile — e.g. oxlint's — resolve cleanly.
+      - run: npm ci
+
+      # The repo claimed an AGPL/Apache split for months while shipping no
+      # license text at all. Fail the build rather than let that recur.
+      - name: License files present
+        run: |
+          for f in LICENSE packages/core/LICENSE packages/web/LICENSE packages/mcp/LICENSE; do
+            test -s "$f" || { echo "missing or empty: $f"; exit 1; }
+          done
+          echo "all license files present"
+
+      - name: Typecheck (core + web + mcp)
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Verify — executes the emitted SQL against hand-computed truth,
+          cross-checks the SAS and Snowflake twins, and runs the mutation tests
+          that prove the harness can fail
+        run: npm run verify -w @heor-studio/core
+
+      # Must run BEFORE the smoke test, which now also drives the built
+      # artifact under plain node — the thing the published package ships.
+      # The spine emitters feed every analysis kind, so a change there can move
+      # a number in a module that looks untouched. This gate emits every file
+      # for every gold spec under all three naming strategies and requires the
+      # digest to be unchanged. It did not exist when this workflow was written;
+      # it caught nothing on the adherence and switching work precisely because
+      # both were made additive on purpose.
+      - name: Byte-identity gate on the emitters
+        run: npx tsx packages/core/src/verify/snapshot.ts check
+
+      - name: Build the MCP server
+        run: npm run build -w @heor-studio/mcp
+
+      - name: MCP smoke (drives the server end to end, source AND built dist)
+        run: npm run mcp:smoke
+
+      - name: Web build
+        run: npm run build -w @heor-studio/web

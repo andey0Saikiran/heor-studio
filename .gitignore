@@ -31,9 +31,9 @@ packages/mcp/heor-corrections/
 # history 2026-07-29 before publication; kept privately outside the repo.
 docs/research/
 
-# CI workflow. Pushing it needs a token with the "workflow" scope; run
-#   gh auth refresh -h github.com -s workflow
-# once, then this tree pushes normally.
+# .github/workflows/ is tracked. Editing it needs a token carrying the
+# "workflow" scope; without it every push of this tree is rejected whole, not
+# just the workflow file. If that happens: gh auth refresh -h github.com -s workflow
 
 # Dev scratch used while hand-deriving a fixture. Never shipped.
 packages/core/src/verify/.scratch/
