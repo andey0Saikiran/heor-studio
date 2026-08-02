@@ -2,7 +2,7 @@
   "name": "heor-studio",
   "private": true,
   "version": "0.0.0",
-  "description": "HEOR Studio — protocol/SAP to verified, deterministic SAS + SQL for Merative MarketScan studies. Independent, open source; not affiliated with Merative.",
+  "description": "HEOR Studio \u2014 protocol/SAP to verified, deterministic SAS + SQL for Merative MarketScan studies. Independent, open source; not affiliated with Merative.",
   "type": "module",
   "engines": {
     "node": ">=22.12.0"
@@ -17,7 +17,8 @@
     "verify": "npm run verify -w @heor-studio/core",
     "verify:snapshot": "tsx packages/core/src/verify/snapshot.ts check",
     "mcp:smoke": "npm run smoke -w @heor-studio/mcp",
-    "lint": "oxlint"
+    "lint": "oxlint",
+    "sas:fixture": "npm run sas:fixture -w @heor-studio/core"
   },
   "devDependencies": {
     "@types/node": "^24.13.2",

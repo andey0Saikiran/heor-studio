@@ -406,8 +406,34 @@ function setupProgram(ctx: Ctx): GeneratedFile {
       `%let ascertain_end   = ${sasDate(aw.end)};`,
       ...aw.reasons.map((r) => `/*   driven by: ${cmt(r)} */`),
     ]; })(),
-    `%let start_year  = ${yearOf(spec.meta.studyPeriod.start)};`,
-    `%let end_year    = ${yearOf(spec.meta.studyPeriod.end)};`,
+    /* THE YEAR RANGE IS THE ASCERTAINMENT RANGE, NOT THE STUDY RANGE.
+     *
+     * These two macro variables drive every `%do yr = &start_year. %to
+     * &end_year.` pull loop, and they used to be read off spec.meta.studyPeriod
+     * while the WHERE clause three lines above filters on the ASCERTAINMENT
+     * window. On Gold Case A that meant the loop walked 2018 to 2020 and the
+     * filter asked for events through 2021-12-31, so the twin declared it needed
+     * the 2021 file and then never opened it.
+     *
+     * That is a wrong number, not a crash. A patient indexed late in 2020 with a
+     * 365-day follow-up horizon has their outcome window run into 2021; the
+     * outcome is in a file the loop skips; the patient is counted event-free.
+     * Incidence biases DOWN and survival biases UP, which is the flattering
+     * direction, which is the dangerous one.
+     *
+     * The SQL twin never had this bug: it filters one table on event_date, so it
+     * picks up the ascertainment tail for free. The twins therefore computed
+     * different cohorts, and nothing noticed, because the fingerprint scrapes the
+     * ascertainment bound out of BOTH texts and finds them identical. The
+     * disagreement was never between the twins. It was between two macro
+     * variables in the same file, and nothing compared them.
+     *
+     * Found by building a SAS fixture loader and asking which yearly data sets to
+     * create. The comment directly above this one warns about exactly this
+     * failure, which is a good argument for executing code rather than reading
+     * it. */
+    `%let start_year  = ${yearOf(ascertainmentWindow(spec).start ?? spec.meta.studyPeriod.start)};`,
+    `%let end_year    = ${yearOf(ascertainmentWindow(spec).end)};`,
     ``,
     `/* person-time constant for rate denominators (spec.meta.daysPerYear -`,
     `   an analyst choice; 365.25 default, 365 = the 365-day AE-rate convention) */`,

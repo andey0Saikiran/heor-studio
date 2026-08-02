@@ -903,5 +903,43 @@ export function verifySilenceGuards(): Check[] {
     }
   }
 
+  /* 6. THE PULL LOOP MUST COVER THE WINDOW THE PULL FILTERS ON.
+   *
+   * Every SAS event pull is a `%do yr = &start_year. %to &end_year.` over yearly
+   * data sets, with a WHERE clause bounded by the ASCERTAINMENT window. Those are
+   * two independent statements of the same span, and they used to disagree: the
+   * range came from spec.meta.studyPeriod, the filter from the ascertainment
+   * window, and the ascertainment window is WIDER by construction whenever the
+   * spec looks outside the study period. Gold Case A asked for events through
+   * 2021-12-31 from a loop that stopped at 2020.
+   *
+   * Nothing caught it, and the reason is worth writing down. The fingerprint
+   * scrapes the ascertainment bound out of each twin's own text and finds them
+   * identical, because they ARE identical: the SQL twin filters one table on
+   * event_date and gets the tail for free. The disagreement was never between the
+   * two languages. It was between two macro variables in one file.
+   *
+   * So this check does not compare twins. It compares a program against itself. */
+  {
+    const specs: Array<[string, StudySpec, typeof GOLD_A_OPTS]> = [["Gold A", GOLD_A_SPEC, GOLD_A_OPTS]];
+    for (const [label, spec, opts] of specs) {
+      const setup = emitSasFn(spec, opts).find((f) => f.path.includes("00_setup"))?.content ?? "";
+      const endYear = Number(/%let end_year\s*=\s*(\d{4})/.exec(setup)?.[1]);
+      const startYear = Number(/%let start_year\s*=\s*(\d{4})/.exec(setup)?.[1]);
+      const ascEnd = /%let ascertain_end\s*=\s*'\d{2}\w{3}(\d{4})'d/.exec(setup)?.[1];
+      const ascStart = /%let ascertain_start\s*=\s*'\d{2}\w{3}(\d{4})'d/.exec(setup)?.[1];
+      const endOk = !!ascEnd && endYear >= Number(ascEnd);
+      push(`guard: ${label} SAS pull loop reaches the last ascertainment year`, endOk,
+        endOk ? `end_year ${endYear} >= ascertain_end ${ascEnd}`
+              : `end_year ${endYear} < ascertain_end ${ascEnd}: every event in the tail is in a data set the loop never opens, and the patient is counted event-free`);
+      /* ascertain_start may be "." when a window is unbounded before index; then
+       * there is no lower year to reach and the check does not apply. */
+      const startOk = !ascStart || startYear <= Number(ascStart);
+      push(`guard: ${label} SAS pull loop reaches the first ascertainment year`, startOk,
+        startOk ? (ascStart ? `start_year ${startYear} <= ascertain_start ${ascStart}` : "ascertain_start unbounded, no lower year to reach")
+                : `start_year ${startYear} > ascertain_start ${ascStart}: baseline lookback would read data sets the loop never opens`);
+    }
+  }
+
   return out;
 }

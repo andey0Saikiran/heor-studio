@@ -16,6 +16,7 @@
   },
   "scripts": {
     "verify": "tsx src/verify/cli.ts",
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json",
+    "sas:fixture": "tsx src/verify/sas-fixture.ts"
   }
 }
