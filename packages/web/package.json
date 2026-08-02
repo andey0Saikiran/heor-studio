@@ -1,6 +1,7 @@
 {
   "name": "@heor-studio/web",
   "private": true,
+  "license": "AGPL-3.0-only",
   "version": "0.0.0",
   "description": "HEOR Studio web app — the browser wizard over @heor-studio/core.",
   "type": "module",
@@ -16,7 +17,6 @@
     "react-dom": "^19.2.7"
   },
   "devDependencies": {
-    "@rolldown/binding-darwin-arm64": "^1.1.5",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.3",
