@@ -43,10 +43,14 @@ places while only two had a load-time check.
 - Full typecheck / build / smoke / verify all green.
 
 ### Knowledge base (in `docs/` + `corrections/`)
-- **MarketScan BRD** — ~70 numbered business rules, confidence-tagged (`V-PRIMARY`/`V-PUBLIC`/`CONFIRM`/`CHOICE`).
-- **Domain rules** distilled from public methods sources.
 - **Coverage matrix** — all 70 analyses mapped (method, output, spec fields, verification).
-- **MCP plan**, **Learning protocol**, and the full research corpus.
+- **MCP plan** and **Learning protocol**.
+- Business rules and domain conventions live in the code itself, beside what they
+  govern: `packages/core/src/data/marketscan.ts` for table and column facts, and the
+  readiness gates in `packages/core/src/spec/types.ts` for what is refused and why.
+  Sources are public throughout: Merative and Truven user guides, OHDSI ETL
+  specifications, FDA Sentinel transform documentation, and peer-reviewed methods
+  literature. No licensed data dictionary is reproduced here.
 
 ### Protocol → spec (the LLM step)
 - `extract_spec`: protocol/SAP → structured `StudySpec` via Anthropic BYOK, forced `tool_choice`, normalized. (Extraction *pipeline* proven end-to-end to Anthropic's servers; live-quality run still pending a funded call.)

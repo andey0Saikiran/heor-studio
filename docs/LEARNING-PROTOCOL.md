@@ -78,7 +78,7 @@ Every accepted correction lands on a **durable, reviewable outcome**. Nothing de
 |---|---|---|
 | `correctness_bug` | the generated output is wrong | **failing gold case** reproducing it → emitter fix → gold case passes → commit |
 | `methodological_choice` | legitimately contestable method | **new spec option** with a sensible default; document both choices |
-| `site_preference` | licensee/environment-specific | **config surfaced in the spec** (a `[CHOICE]`/`[CONFIRM]` in the BRD) |
+| `site_preference` | licensee/environment-specific | **config surfaced in the spec**, never silently defaulted |
 | `data_vintage` | MarketScan vintage difference | confirm against the licensee's dictionary → config or documented note |
 | `terminology` | naming/label/wording | BRD or UI label update |
 | `misunderstanding` | output correct, but unclear | **UI/doc clarification** — the review surface failed, so improve it |
@@ -109,7 +109,7 @@ HTA and regulatory reviewers value, and it feeds the AI-methods disclosure a stu
 
 ### Example 1 — a methodological choice became an option
 - **Claim:** "the incidence rate uses 365.25; our deliverables use 365."
-- **Reason:** a common AE-rate convention defines the AE rate with a 365-day year.
+- **Reason:** a widely used adverse-event rate convention annualizes with a 365-day year.
 - **Classification:** `methodological_choice`.
 - **Resolution (`new_spec_option`):** added `spec.meta.daysPerYear` (default 365.25, analyst may set
   365), documented both; the value lives in the spec so results stay reproducible. **Closed.**

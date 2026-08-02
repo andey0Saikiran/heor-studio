@@ -410,7 +410,7 @@ function setupProgram(ctx: Ctx): GeneratedFile {
     `%let end_year    = ${yearOf(spec.meta.studyPeriod.end)};`,
     ``,
     `/* person-time constant for rate denominators (spec.meta.daysPerYear -`,
-    `   an analyst choice; 365.25 default, 365 = AE-rate convention AE convention) */`,
+    `   an analyst choice; 365.25 default, 365 = the 365-day AE-rate convention) */`,
     `%let days_per_year = ${ctx.daysPerYearLit};`,
     ``,
     `/*-------------------- index event period ------------------------------------*/`,

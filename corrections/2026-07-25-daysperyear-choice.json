@@ -3,14 +3,14 @@
   "createdAt": "2026-07-25",
   "target": { "kind": "spec_field", "ref": "spec.meta.daysPerYear", "specVersion": "1.0" },
   "claim": "The incidence rate annualizes with 365.25 days/year; our deliverables use 365.",
-  "reason": "A common AE-rate convention defines the adverse-event incidence rate with a 365-day year (cases x 365 x 1000 / person-days), and readers of those deliverables expect it.",
+  "reason": "A widely used adverse-event incidence rate convention annualizes with a 365-day year (cases x 365 x 1000 / person-days), and readers of those deliverables expect to see it.",
   "suggestedCorrect": "Let the analyst pick 365 or 365.25 per study; default is a choice, not a hard-code.",
   "reporter": { "role": "product owner" },
   "classification": "methodological_choice",
   "status": "accepted",
   "resolution": {
     "outcome": "new_spec_option",
-    "notes": "Added spec.meta.daysPerYear (default 365.25, internally consistent; analyst may set 365). Lives in the spec so results stay reproducible. Both documented in the emitter and the BRD.",
+    "notes": "Added spec.meta.daysPerYear (default 365.25, internally consistent; analyst may set 365). Lives in the spec so results stay reproducible. Documented in the emitter beside the constant.",
     "specField": "spec.meta.daysPerYear",
     "commit": "de8696c"
   }

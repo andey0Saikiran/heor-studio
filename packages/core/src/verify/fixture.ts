@@ -276,9 +276,9 @@ export const EXPECTED = {
   armY: [6, 7, 8, 9, 10],
   // descriptive epi — VERIFIED in PGlite against the emitted incidence SQL
   // (see verify/proto_incidence.ts). Person-time constant = 365.25 everywhere
-  // (internally consistent: rate = cases*1000/person_years). NOTE for the owner:
-  // a common AE-rate convention §4 uses 365 for the AE rate specifically — switching to 365
-  // gives rate 451.55 and CI (90.76, 1319.66); it is a single repo-wide constant.
+  // (internally consistent: rate = cases*1000/person_years). NOTE: some shops
+  // annualize the AE rate with 365 rather than 365.25 — switching to 365 gives
+  // rate 451.55 and CI (90.76, 1319.66); it is a single repo-wide constant.
   prevalentM: 2,
   baselinePrevalence: 0.2,
   atRiskDenominator: 8,

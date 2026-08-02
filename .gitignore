@@ -31,6 +31,15 @@ packages/mcp/heor-corrections/
 # history 2026-07-29 before publication; kept privately outside the repo.
 docs/research/
 
+# Same reason, second purge 2026-08-02. These two survived the first sweep because
+# it targeted docs/research/ only, and they sat public for four days. DOMAIN-RULES.md
+# named a sponsor's HEOR function and an internal consultancy handbook as its sources;
+# MARKETSCAN-BRD.md keyed its highest confidence tag to the licensed Merative data
+# dictionary. Domain facts belong in the code beside what they govern, sourced from
+# public documentation only. Do not recreate either path.
+docs/DOMAIN-RULES.md
+docs/MARKETSCAN-BRD.md
+
 # .github/workflows/ is tracked. Editing it needs a token carrying the
 # "workflow" scope; without it every push of this tree is rejected whole, not
 # just the workflow file. If that happens: gh auth refresh -h github.com -s workflow

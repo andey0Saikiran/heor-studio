@@ -1748,7 +1748,7 @@ export interface StudySpec {
     description?: string;
     /** Days per person-year for rate/person-year/CI arithmetic. The analyst's
      *  methodological choice — default 365.25 (mean Gregorian year, internally
-     *  consistent); some shops use 365 (e.g. a common AE-rate convention AE-rate convention).
+     *  consistent); some shops use 365 (the 365-day AE-rate convention).
      *  It changes reported rates, so it lives in the spec for reproducibility. */
     daysPerYear?: number;
     /** Provenance: how this spec was produced. */
