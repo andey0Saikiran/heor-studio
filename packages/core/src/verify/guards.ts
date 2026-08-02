@@ -834,5 +834,74 @@ export function verifySilenceGuards(): Check[] {
     push("guard: postgres scripts present under sql_postgres/", pg.length > 0, `${pg.length} files`);
   }
 
+  /* 5. THE GATES THAT USED TO FAIL OPEN.
+   *
+   * Each of these three specs passed readiness before this section existed, and
+   * each emitted a complete, correct-looking, parity-stamped answer to a question
+   * nobody asked. A refusal nothing exercises is a refusal nobody knows is gone,
+   * so every one is asserted to FIRE on the offending spec and to STAY SILENT on
+   * the legitimate neighbour. The second half matters as much as the first: a
+   * gate that refuses everything is not a gate.
+   */
+  {
+    const base = JSON.parse(JSON.stringify(GOLD_A_SPEC)) as StudySpec;
+    const fires = (s: StudySpec, needle: RegExp) =>
+      specReadiness(s).problems.some((p) => needle.test(p));
+
+    /* 5a. Overall survival spelled as a hospice claim. THE hole: the death gate
+     * is keyed on endpoint TYPE, and this spelling is type "claims_event". */
+    {
+      const s = JSON.parse(JSON.stringify(base)) as StudySpec;
+      s.codeLists.push({
+        id: "hospice_proxy", label: "Supportive care", system: "icd10cm",
+        codes: [{ code: "Z51.5", description: "Encounter for palliative care", verified: true, source: "human" }],
+      } as never);
+      s.analyses.push({
+        kind: "survival", id: "os_proxy", label: "Time to supportive care", enabled: true,
+        endpoint: { kind: "claims_event", outcomeDefinition: { codeListId: "hospice_proxy", minClaims: 1, setting: "any", diagnosisPosition: "any" } },
+        personTimeRule: { start: "index", censorAt: ["outcome", "disenrollment", "study_end"] },
+        horizonDays: [365], ciMethod: "greenwood",
+      } as never);
+      push("guard: a hospice code list used as a survival endpoint is refused as an undeclared mortality proxy",
+        fires(s, /MORTALITY PROXY/), "Z51.5 reached the content-keyed gate");
+
+      /* The same list, declared. Hospice UTILISATION is a real outcome. */
+      const ok = JSON.parse(JSON.stringify(s)) as StudySpec;
+      const an = ok.analyses[ok.analyses.length - 1] as { endpoint: { outcomeDefinition: { mortalityProxy?: string } } };
+      an.endpoint.outcomeDefinition.mortalityProxy = "utilisation_not_death";
+      push("guard: the same list declared as utilisation, not death, proceeds",
+        !fires(ok, /MORTALITY PROXY/), "declaring the answer clears the gate");
+    }
+
+    /* 5b. strataIds resolved to nothing and was read by no emitter. */
+    {
+      const s = JSON.parse(JSON.stringify(base)) as StudySpec;
+      s.analyses.push({
+        kind: "standardization", id: "dsr_agesex", label: "DSR by age and sex", enabled: true,
+        base: "point_prevalence",
+        outcomeDefinition: { codeListId: base.codeLists[0].id, minClaims: 1, setting: "any", diagnosisPosition: "any" },
+        standardization: {
+          method: "direct", strataIds: ["s_age", "s_sex"],
+          referencePopulation: { kind: "named", name: "us_2000" }, ciMethod: "fay_feuer",
+        },
+      } as never);
+      push("guard: standardizing by age AND sex is refused rather than emitting an age-only rate labelled DSR",
+        fires(s, /resolve to nothing and are read by no emitter/), "age+sex refused");
+    }
+
+    /* 5c. personTimeRule.start offered three origins and every emitter used one. */
+    {
+      const s = JSON.parse(JSON.stringify(base)) as StudySpec;
+      let touched = false;
+      for (const a of s.analyses) {
+        const ptr = (a as { personTimeRule?: { start: string } }).personTimeRule;
+        if (ptr) { ptr.start = "enrollment_start"; touched = true; break; }
+      }
+      push("guard: a person-time clock origin no emitter honours is refused, not silently substituted",
+        touched && fires(s, /starts the person-time clock at the index date/),
+        touched ? "enrollment_start refused" : "no analysis carried a personTimeRule to mutate");
+    }
+  }
+
   return out;
 }

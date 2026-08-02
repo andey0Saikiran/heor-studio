@@ -69,9 +69,52 @@ async function main() {
     for (const i of invariantsFailed) console.log(`  - ${i.name}: ${i.detail}`);
   }
 
+  /* THE PUBLISHED NUMBER MUST BE THIS NUMBER.
+   *
+   * Three times now the check count in the README has drifted from the count the
+   * suite reports: it has read 751, 1377, 1554, 2342 and 2526 while the suite
+   * said something else, and once all three of the README, docs/STATUS.md and the
+   * GitHub repo description disagreed with each other simultaneously. Every fix
+   * was a human retyping a number beside a thing that computes it, which is the
+   * failure this repo keeps rediscovering in other people's code.
+   *
+   * So the front page is now scraped and compared. This lives at the END of the
+   * CLI rather than inside the suite because a check that asserts the suite's own
+   * total cannot run inside the suite: the total is not known until the last group
+   * reports, which is exactly why nothing checked it before.
+   *
+   * Adding a check now fails the build until the README is updated. That is the
+   * intended cost. A number nobody can reproduce from the repo is the one kind of
+   * claim this project exists to refuse. */
+  const publishedProblems: string[] = [];
+  {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const url = await import("node:url");
+    const root = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), "../../../..");
+    const total = suite.checks.length;
+    for (const rel of ["README.md", "docs/STATUS.md"]) {
+      const file = path.join(root, rel);
+      if (!fs.existsSync(file)) continue;
+      const text = fs.readFileSync(file, "utf8");
+      /* Only counts that CLAIM to be this suite's: a number immediately followed
+       * by "checks". A year or a code count is not swept up. */
+      const claims = [...text.matchAll(/([0-9][0-9,]{2,})\s+(?:harness\s+)?checks/gi)]
+        .map((m) => Number(m[1].replace(/,/g, "")));
+      for (const c of new Set(claims))
+        if (c !== total) publishedProblems.push(`${rel} claims ${c} checks; the suite reports ${total}`);
+    }
+  }
+  if (publishedProblems.length > 0) {
+    console.log("\nPUBLISHED NUMBERS THAT DISAGREE WITH THIS RUN:");
+    for (const p of publishedProblems) console.log(`  - ${p}`);
+  }
+
   /* Derived, not assembled. Every failure channel is represented, and adding a
    * group cannot leave it out of the verdict. */
-  const ok = failed.length === 0 && invariantsFailed.length === 0 && execFailed.length === 0;
+  const ok =
+    failed.length === 0 && invariantsFailed.length === 0 && execFailed.length === 0 &&
+    publishedProblems.length === 0;
   console.log(`\nVerification: ${ok ? "PASSED" : "FAILED"}`);
   process.exit(ok ? 0 : 1);
 }

@@ -136,6 +136,12 @@ export interface OutcomeDefinition {
   claimSeparationDays?: number; // required when minClaims >= 2
   setting: CareSetting;
   diagnosisPosition: "any" | "primary"; // DX1/principal vs any DXn
+  /** Set ONLY to answer the mortality-proxy check (MORTALITY_PROXY_UNDECLARED)
+   *  when a hospice or palliative-care code list is genuinely being used as a
+   *  utilisation outcome rather than as a stand-in for death. It exists so the
+   *  answer is recorded in the spec, where a reviewer sees it, instead of being
+   *  a decision someone made silently while writing the code list. */
+  mortalityProxy?: "utilisation_not_death";
 }
 
 export type CaseStatus = "incident" | "prevalent";
@@ -573,6 +579,43 @@ export interface SurvivalAnalysis extends AnalysisCommon {
  * A refusal earns its authority by being right. One that contradicts itself
  * spends that authority instead.
  */
+/**
+ * Codes that mean "this person is dying" rather than "this person had an event".
+ *
+ * WHY THIS EXISTS. MORTALITY_REFUSAL is keyed on the TYPE of the endpoint, and
+ * the comment beside it argues that a typed union means the refusal "cannot be
+ * evaded by rephrasing the analysis label". That is true of the label and false
+ * of the encoding. The claims-proxy death definitions this literature actually
+ * uses are hospice enrolment, discharge-status composites and coverage
+ * termination, and every one of them encodes perfectly naturally as an ordinary
+ * observable claim:
+ *
+ *     endpoint: { kind: "claims_event", outcomeDefinition: { codeListId: "hospice" } }
+ *
+ * That fires no death gate, passes readiness, and emits a complete,
+ * parity-stamped, publication-shaped overall-survival curve. The gate refuses
+ * the honest spelling of overall survival and approves the dishonest one.
+ *
+ * So the check has to be content-keyed, not type-keyed. It does NOT refuse the
+ * analysis: hospice utilisation is a legitimate outcome and a real HEOR question.
+ * It refuses SILENCE. Either say this is a mortality proxy and state how death
+ * was ascertained, or say it is not.
+ */
+export const MORTALITY_PROXY_CODES: ReadonlyArray<{ pattern: RegExp; what: string }> = [
+  { pattern: /^Z51\.?5/i, what: "Z51.5, encounter for palliative care" },
+  { pattern: /^V66\.?7$/i, what: "V66.7, encounter for palliative care (ICD-9)" },
+  { pattern: /^(G9473|G9474|G9475|G9476|G9477|G9478|G9479)$/i, what: "a hospice care HCPCS code" },
+  { pattern: /^(Q5001|Q5002|Q5003|Q5004|Q5005|Q5006|Q5007|Q5008|Q5009|Q5010)$/i, what: "a hospice place-of-service HCPCS code" },
+  { pattern: /^(T2042|T2043|T2044|T2045|T2046)$/i, what: "a hospice service HCPCS code" },
+  { pattern: /^(0651|0652|0655|0656|0657|0658|0659)$/, what: "a hospice revenue code" },
+];
+
+/** Code-list labels that read as a death proxy even when the codes do not. */
+export const MORTALITY_PROXY_LABEL = /\b(hospice|palliative|terminal care|end.of.life|death|died|mortality|decedent|expired)\b/i;
+
+export const MORTALITY_PROXY_UNDECLARED =
+  `this outcome reads as a MORTALITY PROXY, and a mortality proxy used as a time-to-event endpoint is overall survival wearing a different name. Overall survival on MarketScan is refused for a reason that does not stop applying because the endpoint was spelled as a claim: hospice enrolment ascertains only deaths preceded by hospice, misses every sudden death entirely, and its capture varies by payer, region and calendar year. If this IS a mortality endpoint, declare it as one so the ascertainment is stated and reviewable. If it is NOT (hospice UTILISATION is a legitimate outcome in its own right), set mortalityProxy: "utilisation_not_death" on the outcome definition to say so, and the analysis proceeds.`;
+
 export const MORTALITY_REFUSAL =
   `overall survival on DSTATUS is REFUSED, not approximated. MarketScan's only native death signal is DSTATUS, which records IN-HOSPITAL death only and is masked from data year 2016 — so this analysis would silently become "time to in-hospital death before 2016, with every other death censored". Censoring by death is exactly the informative censoring Kaplan-Meier and Cox both assume away, and it biases survival UPWARD. Use a claims_event endpoint (an observable diagnosis or procedure), or declare an external mortality linkage — see below.`;
 
@@ -1857,6 +1900,33 @@ export function unreviewedCriteria(spec: StudySpec): Criterion[] {
 }
 
 /** A spec is "emit-ready" when every criterion is reviewed and mapped. */
+/**
+ * Does this outcome's code list read as a stand-in for death?
+ *
+ * Returns a human sentence naming WHAT was recognised, or undefined. Both the
+ * codes and the label are checked, because either alone leaks: a list labelled
+ * "Hospice" whose codes have not been looked up yet is still a death proxy, and
+ * a list innocuously labelled "supportive care" carrying Z51.5 is too.
+ *
+ * Deliberately silent when the analyst has already answered, since the point is
+ * to force the answer to exist, not to block the analysis.
+ */
+export function mortalityProxyFinding(
+  spec: StudySpec,
+  od: OutcomeDefinition,
+): string | undefined {
+  if (od.mortalityProxy === "utilisation_not_death") return undefined;
+  const list = findCodeList(spec, od.codeListId);
+  if (!list) return undefined;
+  for (const e of list.codes) {
+    const hit = MORTALITY_PROXY_CODES.find((m) => m.pattern.test(String(e.code).trim()));
+    if (hit) return `code list "${list.label}" contains ${hit.what}, so`;
+  }
+  if (MORTALITY_PROXY_LABEL.test(list.label))
+    return `code list "${list.label}" is named for death or end-of-life care, so`;
+  return undefined;
+}
+
 export function specReadiness(spec: StudySpec): { ready: boolean; problems: string[] } {
   const problems: string[] = [];
   const unrev = unreviewedCriteria(spec);
@@ -1872,6 +1942,29 @@ export function specReadiness(spec: StudySpec): { ready: boolean; problems: stri
   if (!findCodeList(spec, spec.indexEvent.codeListId))
     problems.push(`Index event references missing code list "${spec.indexEvent.codeListId}"`);
   problems.push(...validateAnalyses(spec));
+
+  /* PersonTimeRule.start WAS ACCEPTED AND IGNORED, exactly like strataIds.
+   *
+   * The type offers three clock origins and every emitter starts person-time at
+   * the index date unconditionally. So a spec declaring enrollment_start, which
+   * means "count the washout period as time at risk", passed readiness and
+   * emitted an index-origin denominator. Person-time is the DENOMINATOR of every
+   * rate this tool reports, so a silently substituted clock does not produce a
+   * slightly different number, it produces a different measure.
+   *
+   * Checked here rather than per-kind because personTimeRule appears on eight
+   * analysis types, and a per-kind check is one more hand-maintained list beside
+   * the thing it describes. This walk cannot miss a kind that adds the field
+   * later. */
+  for (const a of spec.analyses) {
+    if (!a.enabled) continue;
+    const ptr = (a as { personTimeRule?: PersonTimeRule }).personTimeRule;
+    if (ptr && ptr.start !== "index")
+      problems.push(
+        `Analysis "${a.id}": personTimeRule.start is "${ptr.start}", and every emitter starts the person-time clock at the index date. Accepting this would emit an index-origin denominator under a label claiming otherwise, and person-time is the denominator of the rate. Set it to "index", or move the cohort entry point so that index IS the origin you want.`,
+      );
+  }
+
   return { ready: problems.length === 0, problems };
 }
 
@@ -2087,6 +2180,24 @@ export function validateAnalyses(spec: StudySpec): string[] {
         requireCodeList(a.outcomeDefinition.codeListId, `${w} outcome`);
         if (a.base === "incidence_rate" && !a.personTimeRule) problems.push(`${w}: rate standardization requires personTimeRule.`);
         if (a.standardization.strataIds.length === 0) problems.push(`${w}: standardization needs at least one stratum.`);
+        /* strataIds WAS ACCEPTED AND IGNORED. Readiness required it non-empty
+         * and then no emitter read it: the direct-standardization twins build
+         * their cells from `ageBands` alone. A spec asking to standardize by age
+         * AND sex passed every gate and emitted an age-only rate, correctly
+         * computed, labelled DSR, and answering a different question.
+         *
+         * That is the failure mode this project exists to refuse, sitting inside
+         * the project. A field the analyst filled in, that changed nothing, and
+         * that nothing said had changed nothing. Refuse it until the cells are
+         * genuinely multi-dimensional. */
+        {
+          const ids = a.standardization.strataIds;
+          const nonAge = ids.filter((id) => !/age/i.test(id));
+          if (ids.length > 1 || nonAge.length > 0)
+            problems.push(
+              `${w}: direct standardization builds its cells from standardization.ageBands ALONE. StandardizationAnalysis carries no stratifier list, so strataIds ${JSON.stringify(ids)} resolve to nothing and are read by no emitter: this spec would pass every gate and emit an AGE-standardized rate, correctly computed, labelled DSR, answering a different question from the one asked. Declare a single age stratum here and standardize within each level of any other axis by stratifying the analysis itself.`,
+            );
+        }
         if (a.standardization.referencePopulation.kind === "custom") {
           const sum = a.standardization.referencePopulation.weights.reduce((n, x) => n + x.weight, 0);
           if (sum <= 0) problems.push(`${w}: custom standard-population weights must sum > 0.`);
@@ -2369,6 +2480,12 @@ export function validateAnalyses(spec: StudySpec): string[] {
           if (a.endpoint.outcomeDefinition.minClaims < 1) problems.push(`${w}: minClaims must be >= 1.`);
           if (a.endpoint.outcomeDefinition.minClaims >= 2 && a.endpoint.outcomeDefinition.claimSeparationDays == null)
             problems.push(`${w}: minClaims>=2 requires claimSeparationDays.`);
+          /* THE OTHER HALF OF THE MORTALITY REFUSAL. The gate above is keyed on
+           * the endpoint TYPE, which the honest spelling of overall survival
+           * trips and the dishonest one walks straight past. This one is keyed
+           * on CONTENT, and it is the arm that actually closes the hole. */
+          const proxy = mortalityProxyFinding(spec, a.endpoint.outcomeDefinition);
+          if (proxy) problems.push(`${w}: ${proxy} ${MORTALITY_PROXY_UNDECLARED}`);
         }
         if (a.horizonDays.length === 0) problems.push(`${w}: horizonDays[] is empty — no survival probability would be reported.`);
         if (a.horizonDays.some((h) => !(h > 0))) problems.push(`${w}: every horizonDays entry must be > 0.`);
