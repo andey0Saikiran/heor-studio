@@ -18,7 +18,8 @@
     "verify:snapshot": "tsx packages/core/src/verify/snapshot.ts check",
     "mcp:smoke": "npm run smoke -w @heor-studio/mcp",
     "lint": "oxlint",
-    "sas:fixture": "npm run sas:fixture -w @heor-studio/core"
+    "sas:fixture": "npm run sas:fixture -w @heor-studio/core",
+    "deploy": "npm run deploy -w @heor-studio/web"
   },
   "devDependencies": {
     "@types/node": "^24.13.2",

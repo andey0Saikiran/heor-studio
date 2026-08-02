@@ -1,0 +1,22 @@
+{
+  // Static-asset deploy of the built spec-review UI to Cloudflare Workers.
+  //
+  // There is no server side. The emitters are deterministic and run in the
+  // browser, PGlite is a wasm Postgres that runs in the browser, and the only
+  // network call the app can make is the analyst's own key to Anthropic. So this
+  // is a pure asset upload, and nothing about a deployed copy is more privileged
+  // than a local one. That is the point: an analyst can read the source, run the
+  // same verification here that CI runs, and never send a protocol anywhere.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "heor-studio",
+  // No Worker script. Assets-only deploys still need a compatibility date.
+  "compatibility_date": "2026-08-02",
+  "assets": {
+    "directory": "./dist",
+    // Single-page app: React Router owns the paths, so an unknown route must be
+    // served index.html rather than a 404, or a deep link into the app 404s on
+    // first load and works on every navigation after it.
+    "not_found_handling": "single-page-application"
+  },
+  "observability": { "enabled": true }
+}

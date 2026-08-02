@@ -138,6 +138,28 @@ alongside:
 
 ---
 
+## Use it from Claude, or any MCP host
+
+```bash
+npx -y @heor-studio/mcp
+```
+
+Seven deterministic tools: `search_codes`, `validate_spec`, `generate_code`,
+`get_artifact`, `run_verification`, `export_bundle`, `report_correction`. No API
+key needed; the host's own model drives them. Set `ANTHROPIC_API_KEY` and an
+eighth tool, `extract_spec`, appears, which reads a protocol into a spec. Nothing
+leaves your machine on the keyless path.
+
+In Claude Desktop, add to `claude_desktop_config.json`:
+
+```json
+{"mcpServers":{"heor-studio":{"command":"npx","args":["-y","@heor-studio/mcp"]}}}
+```
+
+`generate_code` refuses to run without an explicit sign-off argument and without
+every code list marked verified, so a host model cannot talk its way to an
+artifact.
+
 ## Quick start
 
 ```bash

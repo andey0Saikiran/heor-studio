@@ -8,12 +8,15 @@
     "heor-studio-mcp": "dist/index.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "LICENSE",
+    "README.md"
   ],
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsup",
-    "smoke": "tsx test/smoke.ts"
+    "smoke": "tsx test/smoke.ts",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.4",
@@ -24,5 +27,35 @@
   "devDependencies": {
     "@heor-studio/core": "*",
     "tsup": "^8.5.0"
+  },
+  "homepage": "https://github.com/andey0Saikiran/heor-studio#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/andey0Saikiran/heor-studio.git",
+    "directory": "packages/mcp"
+  },
+  "bugs": {
+    "url": "https://github.com/andey0Saikiran/heor-studio/issues"
+  },
+  "author": "Saikiran Andey",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "marketscan",
+    "claims-data",
+    "health-economics",
+    "real-world-evidence",
+    "heor",
+    "sas",
+    "sql",
+    "code-generation",
+    "epidemiology",
+    "pharmacoepidemiology"
+  ],
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
