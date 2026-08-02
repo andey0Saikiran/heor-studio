@@ -46,3 +46,4 @@ docs/MARKETSCAN-BRD.md
 
 # Dev scratch used while hand-deriving a fixture. Never shipped.
 packages/core/src/verify/.scratch/
+purge-history.sh
