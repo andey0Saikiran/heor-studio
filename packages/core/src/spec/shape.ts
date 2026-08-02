@@ -42,7 +42,7 @@ const DEMO_AXES = new Set(["age_band", "sex", "region", "plan_type", "year"]);
 export const SHAPE_CHECKED_ANALYSIS_KINDS = new Set([
   "attrition", "table1", "point_prevalence", "period_prevalence", "cumulative_incidence",
   "incidence_rate", "standardization", "calendar_trend", "resource_use",
-  "comorbidity_index", "regression", "survival", "cox", "competing_risks", "fine_gray", "propensity_score", "iptw_outcome", "g_formula", "adherence", "treatment_switching", "statistical_engine", "future_stub",
+  "comorbidity_index", "regression", "survival", "cox", "competing_risks", "fine_gray", "propensity_score", "iptw_outcome", "g_formula", "negative_control", "adherence", "treatment_switching", "statistical_engine", "future_stub",
 ]);
 const ANALYSIS_KINDS = SHAPE_CHECKED_ANALYSIS_KINDS;
 const SURVIVAL_CI = new Set(["log_log", "linear"]);
@@ -192,6 +192,32 @@ function checkStratifiers(p: Problems, o: Record<string, unknown>, path: string)
       else s.ageBandLowerBounds.forEach((b, j) => need(p, `${sp}.ageBandLowerBounds[${j}]`, isNum(b), `expected a finite number, got ${typeOf(b)}`));
     }
   });
+}
+
+/** DECLARED COARSENING. Optional everywhere it appears, and therefore easy to
+ *  leave unchecked — which is how untrusted JSON reaches an emitter that writes
+ *  a cut point straight into a generated CASE predicate. Semantics (ordering,
+ *  duplicates, whether the covariate is continuous at all) are readiness's job;
+ *  this only asks whether it is the right SHAPE. */
+function checkBandings(p: Problems, v: unknown, path: string): void {
+  if (v === undefined) return;
+  if (!Array.isArray(v)) { p.push(path, `expected an array of CovariateBanding objects, got ${typeOf(v)}`); return; }
+  if (v.length > 25) { p.push(path, `too many bandings (${v.length} > 25)`); return; }
+  v.forEach((b, i) => {
+    const bp = `${path}[${i}]`;
+    if (!isObj(b)) { p.push(bp, `expected a CovariateBanding object, got ${typeOf(b)}`); return; }
+    needStr(p, b, "baselineId", bp, { nonEmpty: true });
+    if (!Array.isArray(b.cutPoints)) { p.push(`${bp}.cutPoints`, `expected an array of numbers, got ${typeOf(b.cutPoints)}`); return; }
+    if (b.cutPoints.length > 50) { p.push(`${bp}.cutPoints`, `too many cut points (${b.cutPoints.length} > 50)`); return; }
+    b.cutPoints.forEach((c, j) =>
+      need(p, `${bp}.cutPoints[${j}]`, isNum(c), `expected a finite number, got ${typeOf(c)} — cut points are written verbatim into generated CASE predicates`));
+  });
+}
+
+function checkEValue(p: Problems, v: unknown, path: string): void {
+  if (v === undefined) return;
+  if (!isObj(v)) { p.push(path, `expected an EValueRequest object, got ${typeOf(v)}`); return; }
+  if (v.includeLimit !== undefined) needBool(p, v, "includeLimit", path);
 }
 
 function checkDatePair(p: Problems, v: unknown, path: string): void {
@@ -468,6 +494,7 @@ function checkAnalysis(p: Problems, v: unknown, path: string): void {
         if (!Array.isArray(arr)) p.push(`${path}.${key}`, `expected an array of baseline ids, got ${typeOf(arr)}`);
         else arr.forEach((x, j) => need(p, `${path}.${key}[${j}]`, isStr(x), `expected a baseline id string, got ${typeOf(x)}`));
       }
+      checkBandings(p, v.bandings, `${path}.bandings`);
       break;
     }
     case "iptw_outcome": {
@@ -481,6 +508,8 @@ function checkAnalysis(p: Problems, v: unknown, path: string): void {
       checkWindow(p, v.washout, `${path}.washout`);
       if (!Array.isArray(v.psCovariateIds)) p.push(`${path}.psCovariateIds`, `expected an array of baseline ids, got ${typeOf(v.psCovariateIds)}`);
       else v.psCovariateIds.forEach((x, j) => need(p, `${path}.psCovariateIds[${j}]`, isStr(x), `expected a baseline id string, got ${typeOf(x)}`));
+      checkBandings(p, v.bandings, `${path}.bandings`);
+      checkEValue(p, v.eValue, `${path}.eValue`);
       break;
     }
     case "g_formula": {
@@ -490,6 +519,33 @@ function checkAnalysis(p: Problems, v: unknown, path: string): void {
       checkWindow(p, v.washout, `${path}.washout`);
       if (!Array.isArray(v.covariateIds)) p.push(`${path}.covariateIds`, `expected an array of baseline ids, got ${typeOf(v.covariateIds)}`);
       else v.covariateIds.forEach((x, j) => need(p, `${path}.covariateIds[${j}]`, isStr(x), `expected a baseline id string, got ${typeOf(x)}`));
+      checkBandings(p, v.bandings, `${path}.bandings`);
+      checkEValue(p, v.eValue, `${path}.eValue`);
+      break;
+    }
+    case "negative_control": {
+      needStr(p, v, "groupVarId", path, { nonEmpty: true });
+      needNum(p, v, "horizonDays", path);
+      /* The threshold decides every verdict this analysis prints, so an
+       * ill-typed one must not reach the emitters: it is written into a
+       * generated comparison as a numeric literal. */
+      needNum(p, v, "biasThreshold", path);
+      if (!Array.isArray(v.covariateIds)) p.push(`${path}.covariateIds`, `expected an array of baseline ids, got ${typeOf(v.covariateIds)}`);
+      else v.covariateIds.forEach((x, j) => need(p, `${path}.covariateIds[${j}]`, isStr(x), `expected a baseline id string, got ${typeOf(x)}`));
+      if (!Array.isArray(v.controls)) p.push(`${path}.controls`, `expected an array of negative-control outcomes, got ${typeOf(v.controls)}`);
+      else v.controls.forEach((c, j) => {
+        const cp = `${path}.controls[${j}]`;
+        if (!isObj(c)) { p.push(cp, `expected a control object, got ${typeOf(c)}`); return; }
+        needStr(p, c, "id", cp, { nonEmpty: true });
+        need(p, `${cp}.id`, isStr(c.id) && SLUG.test(c.id), "expected a slug id — control ids become result-table labels and SAS table suffixes");
+        needStr(p, c, "label", cp);
+        /* The rationale is printed verbatim into a SQL "--" line and a SAS
+         * block comment, so a newline or a comment terminator in it turns the
+         * rest of the header into live code. */
+        needSafeText(p, c, "rationale", cp, { nonEmpty: true, maxLen: 600 });
+        checkOutcomeDefinition(p, c.outcomeDefinition, `${cp}.outcomeDefinition`);
+      });
+      checkBandings(p, v.bandings, `${path}.bandings`);
       break;
     }
     case "adherence": {

@@ -200,6 +200,119 @@ function sasWindowOffset(expr: string | undefined): string {
  *  for the pattern to be wrong in.
  * ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ *
+ *  DECLARED COARSENING and E-VALUES — shared scrapers
+ *
+ *  Both features are OPTIONAL, so the keys below are emitted for every
+ *  analysis of a coarsenable kind and read "none"/"no" when the option was not
+ *  asked for. That is deliberate: a key that appeared only when the feature was
+ *  on would be absent in one twin and present in the other the moment one side
+ *  stopped emitting it, and `MISSING vs no` is a weaker signal than `no vs yes`.
+ * ------------------------------------------------------------------ */
+
+/** The cut points a SQL band CASE actually compares against, in order.
+ *
+ *  Anchored on the age expression itself (`... AS DOUBLE PRECISION) < 50 THEN`)
+ *  rather than on the band LABEL beside it. A label is a string the emitter
+ *  writes twice; the comparison is what decides which band a subject lands in,
+ *  and scraping the label would pass a program whose label said "<50" while its
+ *  predicate said 55. */
+function sqlBandCuts(sql: string): string {
+  const out: string[] = [];
+  for (const m of sql.matchAll(/AS DOUBLE PRECISION\)\s*<\s*(-?[\d.]+)\s+THEN\s+'/g)) out.push(m[1]);
+  return out.length > 0 ? out.join(",") : "none";
+}
+
+/** SAS twin: the band assignment compares the ONE named value variable. */
+function sasBandCuts(sas: string): string {
+  const out: string[] = [];
+  for (const m of sas.matchAll(/_band_val\s*<\s*(-?[\d.]+)\s+then\s+_c\d+\s*=\s*'/gi)) out.push(m[1]);
+  return out.length > 0 ? out.join(",") : "none";
+}
+
+/** Coarsening keys both languages must agree on. */
+function putBandingKeys(fp: Fingerprint, language: "sql" | "sas", text: string): void {
+  put(fp, "banding_cut_points", language === "sql" ? sqlBandCuts(text) : sasBandCuts(text));
+  /* MISSING IS ITS OWN BAND. Folding it into a numeric one invents a covariate
+   * value, and the direction of the invention depends on which arm of the CASE
+   * a NULL falls through to — which is why this is checked and not assumed. */
+  put(fp, "banding_missing_is_own_band",
+    language === "sql"
+      ? (/IS NULL THEN 'Unknown'/.test(text) ? "yes" : /AS DOUBLE PRECISION\)\s*</.test(text) ? "no" : "none")
+      : (/_band_val\s*=\s*\.\s*then\s+_c\d+\s*=\s*'Unknown'/i.test(text) ? "yes" : /_band_val\s*</i.test(text) ? "no" : "none"));
+  put(fp, "band_occupancy_by_arm",
+    /'band_1_treated'/.test(text) && /'band_1_control'/.test(text) ? "yes" : "no");
+  put(fp, "coarsening_caution_emitted",
+    /CONFOUNDING WITHIN A BAND IS UNCONTROLLED/.test(text) ? "yes" : "no");
+}
+
+/** E-value keys. The formula is the whole feature, so both branches of it are
+ *  scraped separately: a program that kept the RR >= 1 arm and lost the
+ *  reciprocal one is silently wrong for every protective effect. */
+function putEValueKeys(fp: Fingerprint, language: "sql" | "sas", text: string): void {
+  if (language === "sql") {
+    put(fp, "evalue_point_formula", /THEN rr \+ SQRT\(rr \* \(rr - 1\)\)/.test(text) ? "yes" : /risk_ratio_e_value/.test(text) ? "no" : "none");
+    put(fp, "evalue_reciprocal_formula",
+      /ELSE 1\.0 \/ rr \+ SQRT\(\(1\.0 \/ rr\) \* \(1\.0 \/ rr - 1\)\)/.test(text) ? "yes" : /risk_ratio_e_value/.test(text) ? "no" : "none");
+  } else {
+    put(fp, "evalue_point_formula", /ifn\(_rr >= 1, _rr \+ sqrt\(_rr \* \(_rr - 1\)\)/i.test(text) ? "yes" : /risk_ratio_e_value/i.test(text) ? "no" : "none");
+    put(fp, "evalue_reciprocal_formula",
+      /1 \/ _rr \+ sqrt\(\(1 \/ _rr\) \* \(1 \/ _rr - 1\)\)/i.test(text) ? "yes" : /risk_ratio_e_value/i.test(text) ? "no" : "none");
+  }
+  put(fp, "evalue_include_limit", /'limit_e_value'/.test(text) ? "yes" : /risk_ratio_e_value/i.test(text) ? "no" : "none");
+  /* A limit E-value of 1 printed bare reads as a small number on the same scale
+   * as the point value beside it. The program must say what the 1 means. */
+  put(fp, "evalue_crossing_is_explained",
+    /COMPATIBLE WITH NO EFFECT/.test(text) ? "yes" : /'limit_e_value'/.test(text) ? "no" : "none");
+}
+
+/**
+ * PROPENSITY-SCORE STRATIFICATION keys.
+ *
+ * Three of these exist because of a specific way the recipe goes wrong:
+ *
+ *  - NTILE. The saturated score is CONSTANT within a covariate cell, so
+ *    NTILE(K) cuts through tied groups and which subject lands on each side
+ *    depends on row arrival order. That is the same order-dependence that got
+ *    greedy matching refused, and it is invisible in the output.
+ *  - A ONE-ARM STRATUM CONTRIBUTING ZERO. Zero is a real effect estimate. It
+ *    would be pooled as though it had been measured, and it would also enlarge
+ *    the denominator — so the pooled number moves twice.
+ *  - K REPORTED RATHER THAN FORMED. A program that printed "quintiles" while
+ *    forming three would be describing something it did not build.
+ */
+function putStrataKeys(fp: Fingerprint, language: "sql" | "sas", text: string): void {
+  const present = language === "sql" ? /'strata_formed'/.test(text) : /'strata_formed'/i.test(text);
+  if (!present) {
+    put(fp, "strata_requested", "none");
+    put(fp, "strata_boundary_rule", "none");
+    put(fp, "one_arm_stratum_contribution", "none");
+    put(fp, "pooled_excludes_one_arm", "none");
+    return;
+  }
+  if (language === "sql") {
+    put(fp, "strata_requested", grab(text, [/FLOOR\(v\.n_below \* (\d+)\.0 \/ NULLIF\(t\.n_all, 0\)\)/]));
+    put(fp, "strata_boundary_rule",
+      /\bNTILE\s*\(/i.test(text) ? "ntile"
+      : /FLOOR\(v\.n_below \* [\d.]+ \/ NULLIF\(t\.n_all, 0\)\) \+ 1/.test(text) ? "distinct_score_share"
+      : "OTHER");
+    put(fp, "one_arm_stratum_contribution",
+      /ELSE NULL END AS diff/.test(text) ? "null" : /ELSE 0 END AS diff/.test(text) ? "zero" : "OTHER");
+    put(fp, "pooled_excludes_one_arm",
+      /SUM\(CASE WHEN diff IS NOT NULL THEN n_stratum ELSE 0 END\) AS n_pooled/.test(text) ? "yes" : "no");
+  } else {
+    put(fp, "strata_requested", grab(text, [/floor\(n_below \* (\d+) \//i]));
+    put(fp, "strata_boundary_rule",
+      /proc rank\b/i.test(text) || /\bgroups\s*=/i.test(text) ? "ntile"
+      : /floor\(n_below \* \d+ \/ [^)]*\) \+ 1/i.test(text) ? "distinct_score_share"
+      : "OTHER");
+    put(fp, "one_arm_stratum_contribution",
+      /else diff = \.;/i.test(text) ? "null" : /else diff = 0;/i.test(text) ? "zero" : "OTHER");
+    put(fp, "pooled_excludes_one_arm",
+      /sum\(ifn\(diff ne \., n_stratum, 0\)\) as n_pooled/i.test(text) ? "yes" : "no");
+  }
+}
+
 /** Distinct claim columns a pattern names, sorted — e.g. "dx1,pdx".
  *  Sorted lexicographically to match the parity stamp's own flatten(). */
 function claimColumns(text: string, re: RegExp): string {
@@ -745,6 +858,48 @@ function sqlFingerprint(kind: string, raw: string): Fingerprint {
       put(fp, "reports_balance_before_and_after",
         /'smd_unweighted'/i.test(sql) && /'smd_weighted'/i.test(sql) ? "yes" : "no");
       put(fp, "balance_terms", [...sql.matchAll(/CAST\('balance' AS VARCHAR\) AS component, CAST\('([^']*)' AS VARCHAR\) AS term,\n\s*CAST\('smd_unweighted'/g)].map((m) => m[1]).join(","));
+      putBandingKeys(fp, "sql", sql);
+      putStrataKeys(fp, "sql", sql);
+      break;
+    }
+    case "negative_control": {
+      put(fp, "treated_level", grab(sql, [/WHEN (?:nl\.pattern|c\.index_code) = '([^']+)' THEN 1 ELSE 0 END AS treated/i]));
+      put(fp, "arm_levels", (sql.match(/IN \('([^']+)', '([^']+)'\)\s*$/im) ?? []).slice(1).join(","));
+      put(fp, "horizon_days", grab(sql, [
+        /a\.event_date <= DATEADD\(\s*day\s*,\s*(\d+)\s*,/i,
+        /a\.event_date <= \(c\.index_date \+ (\d+)\)/i,
+      ]));
+      /* THE DECLARED THRESHOLD. It is the only number here that decides an
+       * answer, and it is scraped from the COMPARISON rather than from the row
+       * that prints it — a program could print 1.25 and compare against 2. */
+      put(fp, "bias_threshold", grab(sql, [/ < 1\.0 \/ ([\d.]+) OR /]));
+      /* [1/t, t] must be SYMMETRIC ON THE RATIO SCALE. Two different numbers in
+       * the two halves would make a breach test that is easier to fail in one
+       * direction than the other, which is not what the spec field describes —
+       * so both are read out of the comparison and compared to each other. */
+      {
+        const m = /IS NULL THEN 0 WHEN [^\n]*?<\s*1\.0 \/ ([\d.]+) OR [^\n]*?>\s*([\d.]+) THEN 1/.exec(sql);
+        put(fp, "bias_interval_is_symmetric",
+          m ? (m[1] === m[2] ? "yes" : "no") : (/breaches_threshold/.test(sql) ? "no" : "none"));
+      }
+      put(fp, "control_ids", [...sql.matchAll(
+        /CAST\('control' AS VARCHAR\) AS component, CAST\('([^']*)' AS VARCHAR\) AS term,\s*\n\s*CAST\('adjusted_risk_ratio'/g)].map((m) => m[1]).join(","));
+      /* THE SAME PIPELINE. A control adjusted more cheaply than the primary
+       * analysis tests a different claim, and a null result would then be
+       * reassurance about an analysis nobody ran. */
+      put(fp, "score_is_cell_fraction", /SUM\(treated\) \* 1\.0 \/ COUNT\(\*\) AS ps/i.test(sql) ? "yes" : "no");
+      put(fp, "same_pipeline_ate_weights",
+        /THEN 1\.0 \/ NULLIF\(c\.ps, 0\) ELSE/i.test(sql) && /ELSE 1\.0 \/ NULLIF\(1 - c\.ps, 0\) END AS w_raw/i.test(sql) ? "yes" : "no");
+      put(fp, "estimator_is_hajek_ratio", /SUM\(w \* y0\) \/ NULLIF\(SUM\(w\), 0\) AS mu/i.test(sql) ? "yes" : "no");
+      /* THE RATIONALE. A control without one is an arbitrary outcome, and
+       * nothing else in the table can tell the difference. */
+      put(fp, "rationale_emitted",
+        /'rationale'/.test(sql) && /WHY THE EXPOSURE CANNOT CAUSE THIS/.test(sql) ? "yes" : "no");
+      /* NO interval on a control estimate: the declared threshold is the test,
+       * and an interval invites reading low power as reassurance. */
+      put(fp, "control_interval_emitted", /\bci_low\b/i.test(sql) ? "yes" : "no");
+      put(fp, "verdict_counts_breaches", /'controls_breaching'/.test(sql) ? "yes" : "no");
+      putBandingKeys(fp, "sql", sql);
       break;
     }
     case "iptw_outcome": {
@@ -761,8 +916,12 @@ function sqlFingerprint(kind: string, raw: string): Fingerprint {
        * population is decided. A bare "does 'atrisk' appear anywhere" test is
        * satisfied by the washout chain that BUILDS it, so it stayed green when
        * the subject set was switched to the whole cohort. */
+      /* `subj0?` because a DECLARED COARSENING splits the subject build in two
+       * (axis columns first, cell second) — the FROM that decides the score
+       * population is then on subj0, and a pattern that only knew `subj AS (`
+       * would read ABSENT and report the coarsening itself as drift. */
       put(fp, "score_population",
-        (/subj AS \([\s\S]{0,900}?\n\s*FROM (\w+) c\b/i.exec(sql) ?? [])[1] ?? "ABSENT");
+        (/subj0? AS \([\s\S]{0,1600}?\n\s*FROM (\w+) c\b/i.exec(sql) ?? [])[1] ?? "ABSENT");
       /* HAJEK, not Horvitz-Thompson. SUM(wY)/n instead of SUM(wY)/SUM(w) can
        * produce a "risk" above 1 and is a different estimator. */
       put(fp, "estimator_is_hajek_ratio",
@@ -780,6 +939,8 @@ function sqlFingerprint(kind: string, raw: string): Fingerprint {
       put(fp, "rd_interval_unclamped",
         /GREATEST\(-1[.,]/i.test(sql) || /LEAST\(1\.0, mu1 - mu0/i.test(sql) ? "no" : "yes");
       put(fp, "range_diagnostic_emitted", /'rd_interval_within_range'/i.test(sql) ? "yes" : "no");
+      putBandingKeys(fp, "sql", sql);
+      putEValueKeys(fp, "sql", sql);
       break;
     }
     case "g_formula": {
@@ -815,6 +976,8 @@ function sqlFingerprint(kind: string, raw: string): Fingerprint {
        * whose test is `0` still appears in the table and still says nothing. */
       put(fp, "zero_variance_flagged",
         /'zero_variance_arm'/i.test(sql) && /CASE WHEN v\.v1 <= 0 OR v\.v0 <= 0/i.test(sql) ? "yes" : "no");
+      putBandingKeys(fp, "sql", sql);
+      putEValueKeys(fp, "sql", sql);
       break;
     }
     case "comorbidity_index": {
@@ -1343,6 +1506,30 @@ function sasFingerprint(kind: string, rawSas: string, setup: string): Fingerprin
       put(fp, "ps_anchor_present",
         /proc logistic data=work\.\w+ noprint descending;/i.test(sas) &&
         /ps_anchor_verdict = 'PASS: saturated closed form = PROC LOGISTIC fitted probability'/i.test(sas) ? "yes" : "no");
+      putBandingKeys(fp, "sas", sas);
+      putStrataKeys(fp, "sas", sas);
+      break;
+    }
+    case "negative_control": {
+      put(fp, "treated_level", grab(sas, [/treated = \(arm = "([^"]+)"\)/i]));
+      put(fp, "arm_levels", (sas.match(/arm not in \("([^"]+)", "([^"]+)"\)/i) ?? []).slice(1).join(","));
+      put(fp, "horizon_days", grab(sas, [/e\.svcdate <= a\.index_date \+ (\d+)/i]));
+      put(fp, "bias_threshold", grab(sas, [/_rr < 1 \/ ([\d.]+) or _rr > [\d.]+/i]));
+      {
+        const m = /_rr < 1 \/ ([\d.]+) or _rr > ([\d.]+)/i.exec(sas);
+        put(fp, "bias_interval_is_symmetric",
+          m ? (m[1] === m[2] ? "yes" : "no") : (/breaches_threshold/i.test(sas) ? "no" : "none"));
+      }
+      put(fp, "control_ids", [...sas.matchAll(/component = 'control'; term = "([^"]*)"/g)].map((m) => m[1]).join(","));
+      put(fp, "score_is_cell_fraction", /sum\(treated\) \/ count\(\*\) as ps/i.test(sas) ? "yes" : "no");
+      put(fp, "same_pipeline_ate_weights",
+        /then w_raw = 1 \/ ps;/i.test(sas) && /then w_raw = 1 \/ \(1 - ps\);/i.test(sas) ? "yes" : "no");
+      put(fp, "estimator_is_hajek_ratio", /sum\(w \* y0\) \/ sum\(w\) as mu/i.test(sas) ? "yes" : "no");
+      put(fp, "rationale_emitted",
+        /statistic='rationale'/i.test(sas) && /WHY THE EXPOSURE CANNOT CAUSE THIS/.test(sas) ? "yes" : "no");
+      put(fp, "control_interval_emitted", /\bci_low\b/i.test(sas) ? "yes" : "no");
+      put(fp, "verdict_counts_breaches", /'controls_breaching'/i.test(sas) ? "yes" : "no");
+      putBandingKeys(fp, "sas", sas);
       break;
     }
     case "iptw_outcome": {
@@ -1367,6 +1554,8 @@ function sasFingerprint(kind: string, rawSas: string, setup: string): Fingerprin
       put(fp, "iptw_anchor_present",
         /weighted_anchor_verdict = 'PASS: weighted saturated fit = Hajek weighted arm means'/i.test(sas) &&
         /lsmeans treated;/i.test(sas) ? "yes" : "no");
+      putBandingKeys(fp, "sas", sas);
+      putEValueKeys(fp, "sas", sas);
       break;
     }
     case "g_formula": {
@@ -1388,6 +1577,8 @@ function sasFingerprint(kind: string, rawSas: string, setup: string): Fingerprin
       put(fp, "identity_row_emitted", /'aipw_minus_g_formula'/i.test(sas) ? "yes" : "no");
       put(fp, "zero_variance_flagged",
         /'zero_variance_arm'/i.test(sas) && /if v1 <= 0 or v0 <= 0 then method='AN ARM HAS ZERO/i.test(sas) ? "yes" : "no");
+      putBandingKeys(fp, "sas", sas);
+      putEValueKeys(fp, "sas", sas);
       break;
     }
     case "comorbidity_index": {
@@ -1643,6 +1834,40 @@ function evalOffset(expr: string | undefined): string {
  */
 export const STAMP_SHARED_KEYS: ReadonlySet<string> = new Set(["setting_filter"]);
 
+/** The cut points the stamp says were consumed, in the order the code compares
+ *  them. Absent from the stamp means the analysis declared no coarsening, and
+ *  the code must then contain no band predicate at all. */
+function putBandingExpectations(exp: Fingerprint, stamp: Record<string, unknown>): void {
+  const b = stamp.bandings as Array<{ cutPoints: number[] }> | undefined;
+  if (!Array.isArray(b) || b.length === 0) {
+    exp.banding_cut_points = "none";
+    exp.band_occupancy_by_arm = "no";
+    exp.coarsening_caution_emitted = "no";
+    return;
+  }
+  exp.banding_cut_points = b.flatMap((x) => x.cutPoints.map(String)).join(",");
+  exp.banding_missing_is_own_band = "yes";
+  exp.band_occupancy_by_arm = "yes";
+  exp.coarsening_caution_emitted = "yes";
+}
+
+/** Whether an E-value was requested, and whether the limit one came with it. */
+function putEValueExpectations(exp: Fingerprint, stamp: Record<string, unknown>): void {
+  const e = stamp.eValue as { includeLimit?: unknown } | undefined;
+  if (!e) {
+    exp.evalue_point_formula = "none";
+    exp.evalue_reciprocal_formula = "none";
+    exp.evalue_include_limit = "none";
+    return;
+  }
+  exp.evalue_point_formula = "yes";
+  /* BOTH branches, always. A program that kept the RR >= 1 arm and dropped the
+   * reciprocal one is silently wrong for every protective effect, and nothing
+   * about its output would look unusual. */
+  exp.evalue_reciprocal_formula = "yes";
+  exp.evalue_include_limit = e.includeLimit === false ? "no" : "yes";
+}
+
 export function expectedFromStamp(kind: string, stamp: Record<string, unknown>): Fingerprint {
   const exp: Fingerprint = {};
   const num = (v: unknown): string | undefined =>
@@ -1828,12 +2053,16 @@ export function expectedFromStamp(kind: string, stamp: Record<string, unknown>):
       exp.horizon_days = String(stamp.horizonDays ?? "");
       exp.restricted_to_cells_with_both_arms = String(stamp.population ?? "") === "cells_with_both_arms" ? "yes" : "no";
       exp.variance_includes_covariance = String(stamp.variance ?? "") === "influence_function_with_covariance" ? "yes" : "no";
+      putBandingExpectations(exp, stamp);
+      putEValueExpectations(exp, stamp);
       break;
     }
     case "iptw_outcome": {
       exp.treated_level = String(stamp.treatedLevel ?? "");
       exp.horizon_days = String(stamp.horizonDays ?? "");
       exp.score_population = String(stamp.scorePopulation ?? "") === "at_risk_after_washout" ? "atrisk" : "OTHER";
+      putBandingExpectations(exp, stamp);
+      putEValueExpectations(exp, stamp);
       break;
     }
     case "propensity_score": {
@@ -1844,6 +2073,35 @@ export function expectedFromStamp(kind: string, stamp: Record<string, unknown>):
       exp.treated_weight = String(stamp.estimand ?? "");
       exp.control_weight = String(stamp.estimand ?? "");
       exp.stabilized = stamp.stabilized ? "yes" : "no";
+      putBandingExpectations(exp, stamp);
+      /* Stratification. K is the number the program ASKED for; how many were
+       * formed is data-dependent and is emitted by the program, not stamped. */
+      if (typeof stamp.strataRequested === "number") {
+        exp.strata_requested = String(stamp.strataRequested);
+        exp.strata_boundary_rule =
+          String(stamp.strataBoundaries ?? "") === "between_distinct_scores" ? "distinct_score_share" : "OTHER";
+        exp.one_arm_stratum_contribution =
+          String(stamp.strataOneArmContribution ?? "") === "null_excluded_from_pool" ? "null" : "OTHER";
+        exp.pooled_excludes_one_arm = "yes";
+      }
+      break;
+    }
+    case "negative_control": {
+      exp.treated_level = String(stamp.treatedLevel ?? "");
+      exp.arm_levels = [stamp.referenceLevel, stamp.treatedLevel].filter(Boolean).join(",");
+      exp.horizon_days = String(stamp.horizonDays ?? "");
+      /* THE THRESHOLD. Stamped because it decides every verdict, cross-checked
+       * because a program could print one number and compare against another. */
+      exp.bias_threshold = String(stamp.biasThreshold ?? "");
+      exp.bias_interval_is_symmetric = "yes";
+      if (Array.isArray(stamp.controls))
+        exp.control_ids = (stamp.controls as Array<{ id: string }>).map((c) => c.id).join(",");
+      exp.same_pipeline_ate_weights =
+        String(stamp.adjustment ?? "") === "saturated_score_iptw" && String(stamp.estimand ?? "") === "ate" ? "yes" : "no";
+      exp.control_interval_emitted =
+        String(stamp.interval ?? "") === "none_declared_threshold_is_the_test" ? "no" : "yes";
+      exp.rationale_emitted = "yes";
+      putBandingExpectations(exp, stamp);
       break;
     }
     case "comorbidity_index": {
@@ -2105,20 +2363,55 @@ const EXPECTED_CONSTANTS: Record<string, Record<"sql" | "sas", ConstantProfileSp
     sas: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
   },
   g_formula: {
-    /* z = 2: the two bounds of the AIPW risk-difference interval. The
-     * g-formula rows carry point estimates only — their interval is the AIPW
-     * one, since under double saturation the two estimators are the same
-     * quantity and emitting a second interval would imply otherwise. */
-    sql: { z: 2, z2_half: 0, z2: 0, z2_quarter: 0 },
-    sas: { z: 2, z2_half: 0, z2: 0, z2_quarter: 0 },
+    /* TWO whole profiles, because requesting an E-value genuinely adds an
+     * interval this module otherwise does not compute.
+     *
+     *   z = 2  the two bounds of the AIPW risk-difference interval. The
+     *          g-formula rows carry point estimates only — their interval is
+     *          the AIPW one, since under double saturation the two estimators
+     *          are the same quantity and a second interval would imply
+     *          otherwise.
+     *   z = 4  the two above, plus the two bounds of the RATIO interval the
+     *          limit E-value needs. It is derived from the SAME
+     *          influence-function variances (including the covariance), not
+     *          from a second variance estimate. */
+    sql: [
+      { z: 2, z2_half: 0, z2: 0, z2_quarter: 0 },
+      { z: 4, z2_half: 0, z2: 0, z2_quarter: 0 },
+    ],
+    sas: [
+      { z: 2, z2_half: 0, z2: 0, z2_quarter: 0 },
+      { z: 4, z2_half: 0, z2: 0, z2_quarter: 0 },
+    ],
   },
   iptw_outcome: {
     /* z = 10 in each twin: two bounds each on the risk difference, the risk
      * ratio and the odds ratio, plus the two the odds-ratio delta method needs
      * spelled out. NO z^2 — this module estimates no proportion by the Wilson
-     * form and runs no chi-square test. */
-    sql: { z: 10, z2_half: 0, z2: 0, z2_quarter: 0 },
-    sas: { z: 10, z2_half: 0, z2: 0, z2_quarter: 0 },
+     * form and runs no chi-square test.
+     *
+     * z = 12 when an E-value is requested: the ratio interval is recomputed in
+     * its own block so the point value and the limit value bound the SAME
+     * number, rather than one of them being read off a row. */
+    sql: [
+      { z: 10, z2_half: 0, z2: 0, z2_quarter: 0 },
+      { z: 12, z2_half: 0, z2: 0, z2_quarter: 0 },
+    ],
+    sas: [
+      { z: 10, z2_half: 0, z2: 0, z2_quarter: 0 },
+      { z: 12, z2_half: 0, z2: 0, z2_quarter: 0 },
+    ],
+  },
+  negative_control: {
+    /* NO z, in either twin. No confidence interval is computed on a control
+     * estimate at all: the DECLARED threshold is the test, and it was declared
+     * in advance for exactly that reason. An interval here would invite "not
+     * significant, therefore fine", which on a rare control outcome is a
+     * statement about power — the direction in which a negative-control suite
+     * is most often over-trusted. A z appearing here later means somebody
+     * added one, and it should be argued for first. */
+    sql: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
+    sas: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
   },
   propensity_score: {
     /* NO z and NO z^2, in either twin. This module emits no confidence

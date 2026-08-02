@@ -585,23 +585,24 @@ export function verifySilenceGuards(): Check[] {
       !!opt && opt.includes("assignment problem"),
       opt?.slice(0, 120) ?? "accepted optimal matching",
     );
-    /* Stratification is UNBUILT, not wrong — and the message has to say which,
-     * because "not emitted" reads identically for a refusal and for a gap. */
+    /* Stratification is BUILT now (emitters/psstrat-core.ts), so the guard that
+     * pinned its "unbuilt" message would be pinning a message that must no
+     * longer exist. It is replaced by the two properties that made it
+     * buildable, both asserted at readiness. */
     const strat = probeFor({ method: "stratification" });
     push(
-      "guard: PS stratification is named UNBUILT rather than refused",
-      !!strat && strat.includes("not a refusal"),
-      strat?.slice(0, 120) ?? "accepted stratification",
+      "guard: PS stratification is ACCEPTED now that it is built",
+      !strat,
+      strat?.slice(0, 140) ?? "no problems",
     );
-    /* An unbuilt feature should hand over what was learned building toward it.
-     * The NTILE trap is the whole reason this is harder than it looks: the
-     * conventional recipe is order-dependent on a saturated score, so anyone
-     * who reaches for stratification elsewhere needs to know before they use
-     * NTILE and get an estimate that moves with row order. */
+    /* Its one refusal is structural, not methodological: this analysis declares
+     * no outcome, so with no balance covariate there is nothing to pool and the
+     * program would report strata that estimate nothing. */
+    const stratNoBal = probeFor({ method: "stratification", balanceCovariateIds: [] });
     push(
-      "guard: and the message warns that NTILE is order-dependent on a saturated score",
-      !!strat && /NTILE/.test(strat) && /row order/.test(strat),
-      strat?.slice(120, 300) ?? "no message",
+      "guard: stratification with NO balance covariate is refused, naming the missing contrast",
+      !!stratNoBal && stratNoBal.includes("declares no OUTCOME") && stratNoBal.includes("nothing to pool"),
+      stratNoBal?.slice(0, 150) ?? "accepted stratification with nothing to contrast",
     );
 
     const cont = probeFor({ psCovariateIds: ["b_age"] });
@@ -610,11 +611,141 @@ export function verifySilenceGuards(): Check[] {
       !!cont && cont.includes("SATURATED") && cont.includes("iteratively reweighted least squares"),
       cont?.slice(0, 140) ?? "accepted a continuous covariate",
     );
+    /* THE REMEDY THE REFUSAL NOW HAS. Naming a fix that does not exist is worse
+     * than naming none, so the message has to point at the field that answers
+     * it — and that field has to actually work, which is the next guard. */
+    push(
+      "guard: and the refusal points at the DECLARED BANDING that answers it",
+      !!cont && /bandings: \[\{ baselineId: "b_age", cutPoints/.test(cont),
+      cont?.slice(-200) ?? "no remedy named",
+    );
+
+    /* DECLARED COARSENING — the five malformed bandings, each of which produces
+     * a cell definition that is wrong in a way no number downstream reveals. */
+    const banded = (b: unknown, over: Record<string, unknown> = {}) =>
+      probeFor({ psCovariateIds: ["b_age"], bandings: b, ...over });
+    push(
+      "guard: a banded continuous covariate is ACCEPTED",
+      !banded([{ baselineId: "b_age", cutPoints: [45, 65] }]),
+      banded([{ baselineId: "b_age", cutPoints: [45, 65] }]) ?? "no problems",
+    );
+    const ghost = banded([{ baselineId: "b_nonexistent", cutPoints: [45] }]);
+    push(
+      "guard: a banding naming a baseline that does not exist is refused",
+      !!ghost && ghost.includes("does not exist") && ghost.includes("nothing here to coarsen"),
+      ghost?.slice(0, 140) ?? "accepted a banding on a phantom covariate",
+    );
+    const onCat = probeFor({ psCovariateIds: ["b_region"], bandings: [{ baselineId: "b_region", cutPoints: [2] }] });
+    push(
+      "guard: a banding on an ALREADY-CATEGORICAL covariate is refused, naming the absent order",
+      !!onCat && onCat.includes("already CATEGORICAL") && onCat.includes("impose an ORDER"),
+      onCat?.slice(0, 150) ?? "accepted banding a categorical covariate",
+    );
+    const empty = banded([{ baselineId: "b_age", cutPoints: [] }]);
+    push(
+      "guard: an EMPTY cutPoints array is refused — one band holding everybody adjusts for nothing",
+      !!empty && empty.includes("EMPTY cutPoints"),
+      empty?.slice(0, 140) ?? "accepted an empty banding",
+    );
+    const dup = banded([{ baselineId: "b_age", cutPoints: [45, 45] }]);
+    push(
+      "guard: DUPLICATE cut points are refused, naming the empty band they create",
+      !!dup && dup.includes("repeats the cut point") && dup.includes("EMPTY band"),
+      dup?.slice(0, 140) ?? "accepted duplicate cut points",
+    );
+    const unsorted = banded([{ baselineId: "b_age", cutPoints: [65, 45] }]);
+    push(
+      "guard: UNSORTED cut points are refused, naming the unreachable band",
+      !!unsorted && unsorted.includes("out of order") && unsorted.includes("can never be reached"),
+      unsorted?.slice(0, 150) ?? "accepted descending cut points",
+    );
+    /* A banding on a covariate the spine derives no value for would be a cell
+     * axis the emitters have to invent — the exact shape of failure the
+     * registry's load-time throws exist to prevent, one layer up. */
+    const unbandable = probeFor({
+      psCovariateIds: ["b_cci"],
+      bandings: [{ baselineId: "b_cci", cutPoints: [1, 3] }],
+    });
+    push(
+      "guard: a banding on a covariate the spine derives no value for is refused",
+      !!unbandable && unbandable.includes("Only \"age\" can be banded today"),
+      unbandable?.slice(0, 150) ?? "accepted a banding the emitters could not build",
+    );
+    /* A banding that is declared and never used would be a stamped choice that
+     * moved nothing — indistinguishable, from the output, from one that did. */
+    const unused = probeFor({ psCovariateIds: ["b_region"], bandings: [{ baselineId: "b_age", cutPoints: [45] }] });
+    push(
+      "guard: a banding on a covariate the analysis does not adjust for is refused",
+      !!unused && unused.includes("declared and never used"),
+      unused?.slice(0, 140) ?? "accepted an unused banding",
+    );
 
     push(
       "guard: a well-formed IPTW analysis is NOT refused",
       !probeFor({}),
       probeFor({}) ?? "no problems",
+    );
+  }
+
+  /* 3f-octies. NEGATIVE CONTROLS. Every refusal here protects the one thing a
+   * negative-control suite is for: a claim about residual confounding that a
+   * reader can check. An empty suite, a control nobody argued for, or a
+   * threshold chosen afterwards all produce a suite that passes vacuously. */
+  {
+    const base: StudySpec = JSON.parse(JSON.stringify(GOLD_A_SPEC));
+    const control = (over: Record<string, unknown> = {}) => ({
+      id: "nc_a", label: "control A",
+      outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "outpatient", diagnosisPosition: "any" },
+      rationale: "The exposure has no pharmacologic pathway to this outcome.",
+      ...over,
+    });
+    const ncAnalysis = (over: Record<string, unknown>) => ({
+      id: "guard_nc", label: "guard nc", kind: "negative_control", enabled: true,
+      groupVarId: "g_arm", covariateIds: ["b_region"],
+      controls: [control()],
+      horizonDays: 365, biasThreshold: 1.25,
+      ...over,
+    });
+    const probeNc = (over: Record<string, unknown>) => {
+      const sp: StudySpec = JSON.parse(JSON.stringify(base));
+      sp.analyses.push(ncAnalysis(over) as never);
+      return specReadiness(sp).problems.find((p) => p.includes("guard_nc"));
+    };
+
+    push(
+      "guard: a well-formed negative-control suite is NOT refused",
+      !probeNc({}),
+      probeNc({}) ?? "no problems",
+    );
+    const noRat = probeNc({ controls: [control({ rationale: "" })] });
+    push(
+      "guard: a control with NO rationale is refused — nothing else can tell it from an arbitrary outcome",
+      !!noRat && noRat.includes("no rationale") && noRat.includes("cannot tell the difference"),
+      noRat?.slice(0, 150) ?? "accepted a control nobody argued for",
+    );
+    const emptySuite = probeNc({ controls: [] });
+    push(
+      "guard: an EMPTY control suite is refused, because it passes vacuously",
+      !!emptySuite && emptySuite.includes("passes vacuously"),
+      emptySuite?.slice(0, 140) ?? "accepted an empty suite",
+    );
+    const badT = probeNc({ biasThreshold: 1 });
+    push(
+      "guard: a threshold at or below 1 is refused — no estimate could sit inside [1/t, t]",
+      !!badT && badT.includes("must be greater than 1"),
+      badT?.slice(0, 140) ?? "accepted a degenerate threshold",
+    );
+    const crude = probeNc({ covariateIds: [] });
+    push(
+      "guard: an UNADJUSTED control suite is refused — it would test a different claim",
+      !!crude && crude.includes("estimated CRUDE") && crude.includes("an analysis nobody ran"),
+      crude?.slice(0, 150) ?? "accepted crude controls",
+    );
+    const contNc = probeNc({ covariateIds: ["b_age"] });
+    push(
+      "guard: the SAME saturation gate applies to the control adjustment",
+      !!contNc && contNc.includes("same SATURATED closed-form score as the primary analysis"),
+      contNc?.slice(0, 150) ?? "accepted a continuous control covariate",
     );
   }
 

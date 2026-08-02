@@ -50,13 +50,36 @@ import { describeWindow, oneLine, q, windowConds } from "../sql-base";
 import { cmt, header, levelCheck, sq, windowConds as sasWindowConds, INCLUDE_SETUP } from "../sas-base";
 import { psSqlCtes, psSasSteps, hajekSqlCtes, hajekSasSteps, hajekSasAnchor } from "../ps-core";
 import {
+  axisStamp,
+  bandOccupancySasSteps,
+  bandOccupancySqlCte,
+  bandSlots,
+  bandingStamp,
+  cellAssignSas,
+  cellExprSql,
+  coarseningNotes,
+  cutLit,
+  oneArmBandCountSas,
+  oneArmBandCountSql,
+  resolveCellAxes,
+  sasBandedValueStep,
+  type CellAxis,
+} from "../banding-core";
+import {
+  eValueSas,
+  eValueSql,
+  nearestNullLimitSas,
+  nearestNullLimitSql,
+  EVALUE_METHOD_NOTES,
+  EVALUE_POINT_METHOD,
+} from "../evalue-core";
+import {
   outcomeSettingPlan,
   parityStamp,
   iptwOutcomeLimitations,
   iptwOutcomeParity,
+  stratLabel,
   IPTW_OUTCOME_METHOD_NOTES,
-  REGION_LABELS,
-  SEX_LABELS,
 } from "../parity";
 
 const MEASURE = "iptw_outcome";
@@ -65,55 +88,23 @@ const ORD_DESIGN = 10;
 const ORD_EFFECT = 20;
 const ORD_UNADJ = 30;
 const ORD_DIAG = 40;
-
-type CellAxis = "sex" | "region" | "plan_type" | "year";
+const ORD_COARSEN = 500;
+const ORD_EVALUE = 600;
 
 function plan(ctx: SqlCtx | SasCtx, an: IptwOutcomeAnalysis) {
   const spec = ctx.spec;
   const gv = spec.groupVars.find((g) => g.id === an.groupVarId);
   const referenceLevel = gv?.referenceLevel ?? gv?.levels[0] ?? "";
   const treatedLevel = gv?.levels.find((l) => l !== referenceLevel) ?? "";
-  const cellAxes: Array<{ id: string; label: string; axis: CellAxis }> = [];
-  for (const id of an.psCovariateIds) {
-    const b = spec.baseline.find((x) => x.id === id);
-    if (b && (b.kind === "sex" || b.kind === "region" || b.kind === "plan_type" || b.kind === "year"))
-      cellAxes.push({ id, label: b.label, axis: b.kind });
-  }
+  const cellAxes: CellAxis[] = resolveCellAxes(spec.baseline, an.psCovariateIds, an.bandings);
   return {
     gv, referenceLevel, treatedLevel, cellAxes,
+    slots: bandSlots(cellAxes),
+    bandings: bandingStamp(an.bandings, spec.baseline),
+    eValue: an.eValue ? { includeLimit: an.eValue.includeLimit !== false } : undefined,
     emittable: Boolean(gv && referenceLevel && treatedLevel && cellAxes.length > 0 && !an.doublyRobust),
     comparison: `${treatedLevel} vs ${referenceLevel}`,
   };
-}
-
-function cellExprSql(axis: CellAxis, ctx: SqlCtx): string {
-  switch (axis) {
-    case "sex":
-      return `CASE CAST(dm.sex AS VARCHAR) ${Object.entries(SEX_LABELS).map(([k, v]) => `WHEN '${k}' THEN '${v}'`).join(" ")} ELSE 'Unknown' END`;
-    case "region":
-      return `CASE CAST(dm.region AS VARCHAR) ${Object.entries(REGION_LABELS).map(([k, v]) => `WHEN '${k}' THEN '${v}'`).join(" ")} ELSE 'Unknown' END`;
-    case "plan_type":
-      return `COALESCE(CAST(dm.plantyp AS VARCHAR), 'Unknown')`;
-    case "year":
-      return `CAST(${ctx.d.year("c.index_date")} AS VARCHAR)`;
-  }
-}
-
-function cellAssignSas(axis: CellAxis, v: string): string[] {
-  switch (axis) {
-    case "sex": {
-      const arms = Object.entries(SEX_LABELS).map(([k, lab], j) => `${j === 0 ? "if" : "else if"} sex = '${k}' then ${v} = '${lab}';`);
-      return [...arms, `else ${v} = 'Unknown';`];
-    }
-    case "region": {
-      const arms = Object.entries(REGION_LABELS).map(([k, lab], j) => `${j === 0 ? "if" : "else if"} region = '${k}' then ${v} = '${lab}';`);
-      return [...arms, `else ${v} = 'Unknown';`];
-    }
-    case "plan_type":
-      return [`${v} = strip(vvalue(plantyp));`, `if ${v} in ('', '.') then ${v} = 'Unknown';`];
-    case "year":
-      return [`${v} = strip(put(year(index_date), 4.));`];
-  }
 }
 
 /* ================================================================== *
@@ -131,7 +122,7 @@ function sqlIptwOutcome(ctx: SqlCtx, an: IptwOutcomeAnalysis, suffix: string): S
 
   L.push(`-- ${parityStamp("iptw_outcome", iptwOutcomeParity(an, {
     referenceLevel: p.referenceLevel, treatedLevel: p.treatedLevel,
-    cellAxes: p.cellAxes.map((c) => c.axis), settingFilter: setting.stamped,
+    cellAxes: p.cellAxes.map(axisStamp), settingFilter: setting.stamped, bandings: p.bandings,
   }))}`);
   const limits = iptwOutcomeLimitations(an, listSystem);
   if (limits.length > 0) {
@@ -140,6 +131,15 @@ function sqlIptwOutcome(ctx: SqlCtx, an: IptwOutcomeAnalysis, suffix: string): S
   }
   L.push(`-- REVIEW - method notes (always emitted):`);
   for (const note of IPTW_OUTCOME_METHOD_NOTES) L.push(`--   * ${note}`);
+  const coarse = coarseningNotes(p.cellAxes);
+  if (coarse.length > 0) {
+    L.push(`-- REVIEW - DECLARED COARSENING (always emitted when a covariate is banded):`);
+    for (const note of coarse) L.push(`--   * ${note}`);
+  }
+  if (p.eValue) {
+    L.push(`-- REVIEW - E-VALUE (always emitted when one is requested):`);
+    for (const note of EVALUE_METHOD_NOTES) L.push(`--   * ${note}`);
+  }
 
   if (!p.emittable) {
     L.push(`-- NOT EMITTED: ${an.doublyRobust ? `doubly-robust estimation is not built yet — see readiness.` : `the exposure or the propensity covariates did not resolve.`}`);
@@ -177,20 +177,42 @@ function sqlIptwOutcome(ctx: SqlCtx, an: IptwOutcomeAnalysis, suffix: string): S
   C.push(`  SELECT DISTINCT c.enrolid FROM atrisk c JOIN ae a ON a.enrolid = c.enrolid`);
   C.push(`   AND a.event_date > c.index_date AND a.event_date <= ${d.offset("c.index_date", an.horizonDays)}`);
   C.push(`),`);
-  C.push(`subj AS (`);
-  C.push(`  SELECT c.enrolid,`);
-  C.push(`         CASE WHEN ${armExpr} = '${q(p.treatedLevel)}' THEN 1 ELSE 0 END AS treated,`);
-  C.push(`         ${p.cellAxes.map((a) => cellExprSql(a.axis, ctx)).join(` || '|' || `)} AS cell,`);
-  C.push(`         CASE WHEN cs.enrolid IS NOT NULL THEN 1.0 ELSE 0.0 END AS y`);
-  C.push(`  FROM atrisk c`);
-  C.push(`  LEFT JOIN demo1 dm ON dm.enrolid = c.enrolid`);
-  C.push(`  LEFT JOIN cases cs ON cs.enrolid = c.enrolid`);
-  if (viaNdc) {
-    C.push(`  JOIN ${wp}_ndc_lookup nl`);
-    C.push(`    ON nl.code_list_id = '${q(indexListId)}' AND nl.ndcnum = c.index_code`);
+  /* A BANDED axis becomes a named column so the coarsening can be reported on;
+   * without a banding the cell is built inline exactly as it always was. */
+  if (p.slots.length > 0) {
+    C.push(`subj0 AS (   -- each CELL AXIS as its own column, so a COARSENED axis is reportable`);
+    C.push(`  SELECT c.enrolid,`);
+    C.push(`         CASE WHEN ${armExpr} = '${q(p.treatedLevel)}' THEN 1 ELSE 0 END AS treated,`);
+    p.cellAxes.forEach((a, j) => C.push(`         ${cellExprSql(a, ctx)} AS ax${j},`));
+    C.push(`         CASE WHEN cs.enrolid IS NOT NULL THEN 1.0 ELSE 0.0 END AS y`);
+    C.push(`  FROM atrisk c`);
+    C.push(`  LEFT JOIN demo1 dm ON dm.enrolid = c.enrolid`);
+    C.push(`  LEFT JOIN cases cs ON cs.enrolid = c.enrolid`);
+    if (viaNdc) {
+      C.push(`  JOIN ${wp}_ndc_lookup nl`);
+      C.push(`    ON nl.code_list_id = '${q(indexListId)}' AND nl.ndcnum = c.index_code`);
+    }
+    C.push(`  WHERE ${armExpr} IN ('${q(p.referenceLevel)}', '${q(p.treatedLevel)}')`);
+    C.push(`),`);
+    C.push(`subj AS (`);
+    C.push(`  SELECT s.*, ${p.cellAxes.map((_a, j) => `ax${j}`).join(` || '|' || `)} AS cell FROM subj0 s`);
+    C.push(`),`);
+  } else {
+    C.push(`subj AS (`);
+    C.push(`  SELECT c.enrolid,`);
+    C.push(`         CASE WHEN ${armExpr} = '${q(p.treatedLevel)}' THEN 1 ELSE 0 END AS treated,`);
+    C.push(`         ${p.cellAxes.map((a) => cellExprSql(a, ctx)).join(` || '|' || `)} AS cell,`);
+    C.push(`         CASE WHEN cs.enrolid IS NOT NULL THEN 1.0 ELSE 0.0 END AS y`);
+    C.push(`  FROM atrisk c`);
+    C.push(`  LEFT JOIN demo1 dm ON dm.enrolid = c.enrolid`);
+    C.push(`  LEFT JOIN cases cs ON cs.enrolid = c.enrolid`);
+    if (viaNdc) {
+      C.push(`  JOIN ${wp}_ndc_lookup nl`);
+      C.push(`    ON nl.code_list_id = '${q(indexListId)}' AND nl.ndcnum = c.index_code`);
+    }
+    C.push(`  WHERE ${armExpr} IN ('${q(p.referenceLevel)}', '${q(p.treatedLevel)}')`);
+    C.push(`),`);
   }
-  C.push(`  WHERE ${armExpr} IN ('${q(p.referenceLevel)}', '${q(p.treatedLevel)}')`);
-  C.push(`),`);
   C.push(...psSqlCtes({ subjectsCte: "subj", estimand: an.estimand, stabilized: an.stabilized, trim: an.trim }));
   C.push(`support AS (`);
   C.push(`  SELECT SUM(CASE WHEN n_control_cell = 0 OR n_treated_cell = 0 THEN n_cell ELSE 0 END) AS off_support,`);
@@ -202,7 +224,30 @@ function sqlIptwOutcome(ctx: SqlCtx, an: IptwOutcomeAnalysis, suffix: string): S
   C.push(`  SELECT AVG(CASE WHEN treated = 1 THEN y END) AS u1,`);
   C.push(`         AVG(CASE WHEN treated = 0 THEN y END) AS u0`);
   C.push(`  FROM psk`);
-  C.push(`)`);
+  C.push(`)${p.slots.length > 0 || p.eValue ? `,` : ``}`);
+  if (p.slots.length > 0) {
+    C.push(...bandOccupancySqlCte({ from: "psk", slots: p.slots, alias: "bocc" }));
+    if (!p.eValue) C[C.length - 1] = C[C.length - 1].replace(/,\s*$/, "");
+  }
+  /* THE E-VALUE INPUTS, computed once so the point value and the limit value
+   * bound the SAME risk ratio this program already reported. */
+  if (p.eValue) {
+    const seLrrE = `SQRT(v1 / NULLIF(POWER(mu1, 2), 0) + v0 / NULLIF(POWER(mu0, 2), 0))`;
+    const rrE = `mu1 / NULLIF(mu0, 0)`;
+    C.push(`ev0 AS (   -- the risk ratio and its interval, for the E-value below`);
+    C.push(`  SELECT ${rrE} AS rr,`);
+    C.push(`         EXP(LN(NULLIF(${rrE}, 0)) - 1.96 * (${seLrrE})) AS rr_lo,`);
+    C.push(`         EXP(LN(NULLIF(${rrE}, 0)) + 1.96 * (${seLrrE})) AS rr_hi`);
+    C.push(`  FROM arms`);
+    C.push(`),`);
+    C.push(`ev AS (   -- and the limit NEAREST THE NULL, computed ONCE`);
+    C.push(`  -- It is NULL when the interval covers 1: there is no limit on the far`);
+    C.push(`  -- side to bound, and the row below says what that means rather than`);
+    C.push(`  -- printing the 1 it implies.`);
+    C.push(`  SELECT rr, rr_lo, rr_hi, ${nearestNullLimitSql(`rr_lo`, `rr_hi`)} AS rr_near`);
+    C.push(`  FROM ev0`);
+    C.push(`)`);
+  }
 
   const NULLN = `CAST(NULL AS NUMERIC)`;
   const STR = (e: string) => `CAST(${e} AS VARCHAR)`;
@@ -287,6 +332,45 @@ function sqlIptwOutcome(ctx: SqlCtx, an: IptwOutcomeAnalysis, suffix: string): S
     ` THEN 'THE INTERVAL LEAVES [-1, 1], which a difference of two probabilities cannot. The normal approximation has broken down at this sample size. It is reported UNCLAMPED on purpose - clamping would hide the one signal saying the interval should not be trusted'` +
     ` ELSE 'the interval stays inside the range a risk difference can occupy' END`, "arms"));
 
+  /* COARSENING — what was banded, and who is in each band. */
+  if (p.slots.length > 0) {
+    const bandedAxes = p.cellAxes.filter((a) => a.kind === "banded");
+    parts.push(row("coarsening", "bands_declared", ORD_COARSEN, `CAST(${p.slots.length} AS NUMERIC)`,
+      `'${q(bandedAxes.map((a) => `${stratLabel(a.label)} cut at ${(a.cutPoints ?? []).map(cutLit).join("/")}`).join("; "))}. CONFOUNDING WITHIN A BAND IS UNCONTROLLED - the score adjusts for the band, not the value - and a WIDER band controls LESS. The estimate above is adjusted for less than the covariate list suggests'`,
+      "bocc"));
+    p.slots.forEach((s) => {
+      parts.push(row("coarsening", `band_${s.ord}_treated`, ORD_COARSEN + s.ord * 2 - 1, `CAST(b${s.ord}_t AS NUMERIC)`,
+        `'treated subjects in band ${q(s.label)} of ${q(stratLabel(s.covariateLabel))}'`, "bocc"));
+      parts.push(row("coarsening", `band_${s.ord}_control`, ORD_COARSEN + s.ord * 2, `CAST(b${s.ord}_c AS NUMERIC)`,
+        `CASE WHEN (b${s.ord}_t + b${s.ord}_c) > 0 AND (b${s.ord}_t = 0 OR b${s.ord}_c = 0)` +
+        ` THEN 'THIS BAND HOLDS ONE ARM ONLY (band ${q(s.label)}). That is a positivity violation, and the balance table will NOT show it: a coarsened covariate can look balanced while a whole band has no counterpart in the other arm'` +
+        ` ELSE 'both arms occupy this band' END`, "bocc"));
+    });
+    parts.push(row("coarsening", "bands_with_one_arm", ORD_COARSEN + p.slots.length * 2 + 1,
+      `CAST(${oneArmBandCountSql(p.slots)} AS NUMERIC)`,
+      `CASE WHEN (${oneArmBandCountSql(p.slots)}) > 0` +
+      ` THEN 'BANDS WITH NO COUNTERPART. Coarsening created the band these subjects are stranded in - a narrower cut would split them differently, a wider one would hide them'` +
+      ` ELSE 'every non-empty band holds both arms' END`, "bocc"));
+  }
+
+  /* THE E-VALUE, bounding the risk ratio this program computed. */
+  if (p.eValue) {
+    parts.push(row("e_value", "risk_ratio_e_value", ORD_EVALUE, d.roundN(eValueSql(`rr`), 5),
+      `'${q(EVALUE_POINT_METHOD)}'`, "ev"));
+    if (p.eValue.includeLimit) {
+      const nearest = `rr_near`;
+      parts.push(row("e_value", "limit_nearest_null", ORD_EVALUE + 1, d.roundN(nearest, 5),
+        `CASE WHEN (${nearest}) IS NULL` +
+        ` THEN 'THE INTERVAL CROSSES THE NULL, so there is no limit on the far side to bound. The data are already compatible with no effect'` +
+        ` ELSE 'the confidence limit closer to 1 - the one the limit E-value below bounds' END`, "ev"));
+      parts.push(row("e_value", "limit_e_value", ORD_EVALUE + 2,
+        `COALESCE(${d.roundN(eValueSql(nearest), 5)}, CAST(1 AS NUMERIC))`,
+        `CASE WHEN (${nearest}) IS NULL` +
+        ` THEN 'ONE BY CONSTRUCTION, AND THAT IS THE FINDING: the interval crosses the null, so NO unmeasured confounding at all is needed - THE DATA ARE COMPATIBLE WITH NO EFFECT. Do not read this 1 as a small number on the same scale as the point E-value above it'` +
+        ` ELSE 'the minimum confounding strength that would move the confidence limit nearest the null to 1. Usually the more informative of the pair: a large point E-value beside a small one here means modest confounding would already explain the result away' END`, "ev"));
+    }
+  }
+
   parts.forEach((rowsOut, i) => {
     if (i > 0) L.push(`  UNION ALL`);
     L.push(...rowsOut);
@@ -305,6 +389,10 @@ function sqlIptwOutcome(ctx: SqlCtx, an: IptwOutcomeAnalysis, suffix: string): S
     extra: [
       `Analysis: ${oneLine(an.label)} (id ${an.id}); outcome "${clid}", horizon ${an.horizonDays}d.`,
       `Treated ${p.treatedLevel} vs reference ${p.referenceLevel}; score cells: ${p.cellAxes.map((c) => c.label).join(" x ")}.`,
+      ...(p.slots.length > 0
+        ? [`COARSENED: ${p.cellAxes.filter((a) => a.kind === "banded").map((a) => `${a.label} cut at ${(a.cutPoints ?? []).map(cutLit).join("/")}`).join("; ")}. Confounding WITHIN a band is uncontrolled.`]
+        : []),
+      ...(p.eValue ? [`E-value requested${p.eValue.includeLimit ? ` (point and confidence limit)` : ` (point estimate only)`}.`] : []),
     ],
     body: L.join("\n"),
   };
@@ -337,7 +425,7 @@ function sasIptwOutcome(ctx: SasCtx, an: IptwOutcomeAnalysis, num: string, suffi
     ]),
     `/* ${parityStamp("iptw_outcome", iptwOutcomeParity(an, {
       referenceLevel: p.referenceLevel, treatedLevel: p.treatedLevel,
-      cellAxes: p.cellAxes.map((c) => c.axis), settingFilter: setting.stamped,
+      cellAxes: p.cellAxes.map(axisStamp), settingFilter: setting.stamped, bandings: p.bandings,
     }))} */`,
     ``,
   ];
@@ -348,6 +436,15 @@ function sasIptwOutcome(ctx: SasCtx, an: IptwOutcomeAnalysis, num: string, suffi
     `/* REVIEW - method notes (always emitted):`,
     ...IPTW_OUTCOME_METHOD_NOTES.map((n) => `   * ${cmt(n)}`),
     `*/`,
+  );
+  const coarseSas = coarseningNotes(p.cellAxes);
+  if (coarseSas.length > 0) {
+    lines.push(`/* REVIEW - DECLARED COARSENING (always emitted when a covariate is banded):`, ...coarseSas.map((n) => `   * ${cmt(n)}`), `*/`);
+  }
+  if (p.eValue) {
+    lines.push(`/* REVIEW - E-VALUE (always emitted when one is requested):`, ...EVALUE_METHOD_NOTES.map((n) => `   * ${cmt(n)}`), `*/`);
+  }
+  lines.push(
     ``,
     ...INCLUDE_SETUP,
   );
@@ -419,14 +516,17 @@ function sasIptwOutcome(ctx: SasCtx, an: IptwOutcomeAnalysis, num: string, suffi
     `  by enrolid;`,
     `  if first.enrolid;`,
     `  length cell $200 ${p.cellAxes.map((_, j) => `_c${j}`).join(" ")} $40;`,
+    ...(p.slots.length > 0 ? [`  length ${p.cellAxes.map((_a, j) => `ax${j}`).join(" ")} $40;`] : []),
     `  treated = (arm = "${sq(p.treatedLevel)}");`,
+    ...(p.slots.length > 0 ? sasBandedValueStep().map((l) => `  ${l}`) : []),
     ...p.cellAxes.flatMap((a, j) => [
-      `  /* cell axis: ${cmt(a.label)} (${a.axis}) */`,
-      ...cellAssignSas(a.axis, `_c${j}`).map((l) => `  ${l}`),
+      `  /* cell axis: ${cmt(a.label)} (${a.kind}) */`,
+      ...cellAssignSas(a, `_c${j}`).map((l) => `  ${l}`),
     ]),
     `  cell = ${p.cellAxes.map((_, j) => `strip(_c${j})`).join(` || '|' || `)};`,
+    ...(p.slots.length > 0 ? p.cellAxes.map((_a, j) => `  ax${j} = _c${j};`) : []),
     `  if arm not in ("${sq(p.referenceLevel)}", "${sq(p.treatedLevel)}") then delete;`,
-    `  keep enrolid treated cell y;`,
+    `  keep enrolid treated cell y${p.slots.length > 0 ? ` ${p.cellAxes.map((_a, j) => `ax${j}`).join(" ")}` : ""};`,
     `run;`,
     ``,
     ...levelCheck(`work._${num}_subj`, "subjects in the analysis set", [`sum(y) as events`, `sum(treated) as treated`]),
@@ -450,6 +550,7 @@ function sasIptwOutcome(ctx: SasCtx, an: IptwOutcomeAnalysis, num: string, suffi
     `  from work._${num}_psk;`,
     `quit;`,
     ``,
+    ...(p.slots.length > 0 ? bandOccupancySasSteps({ num, from: `work._${num}_psk`, slots: p.slots }) : []),
     `/*-------------------- assemble the result table ------------------------------*/`,
     `data ${outT};`,
     `  length measure $20 component $16 statistic $32 method $360;`,
@@ -511,6 +612,84 @@ function sasIptwOutcome(ctx: SasCtx, an: IptwOutcomeAnalysis, num: string, suffi
     `  keep measure component statistic ord estimate se ci_low ci_high method;`,
     `run;`,
     ``,
+  );
+
+  const extraSets: string[] = [];
+  if (p.slots.length > 0) {
+    const bandedAxes = p.cellAxes.filter((a) => a.kind === "banded");
+    lines.push(
+      `data work._${num}_co;`,
+      `  length measure $20 component $16 statistic $32 method $360;`,
+      `  set work._${num}_bocc;`,
+      `  measure = "${MEASURE}"; component = 'coarsening'; se = .; ci_low = .; ci_high = .;`,
+      `  statistic='bands_declared'; ord=${ORD_COARSEN}; estimate=${p.slots.length};`,
+      `  method='${sq(bandedAxes.map((a) => `${stratLabel(a.label)} cut at ${(a.cutPoints ?? []).map(cutLit).join("/")}`).join("; "))}. CONFOUNDING WITHIN A BAND IS UNCONTROLLED - the score adjusts for the band, not the value - and a WIDER band controls LESS. The estimate above is adjusted for less than the covariate list suggests'; output;`,
+      ...p.slots.flatMap((s) => [
+        `  statistic='band_${s.ord}_treated'; ord=${ORD_COARSEN + s.ord * 2 - 1}; estimate=b${s.ord}_t;`,
+        `  method='treated subjects in band ${sq(s.label)} of ${sq(stratLabel(s.covariateLabel))}'; output;`,
+        `  statistic='band_${s.ord}_control'; ord=${ORD_COARSEN + s.ord * 2}; estimate=b${s.ord}_c;`,
+        `  if (b${s.ord}_t + b${s.ord}_c) > 0 and (b${s.ord}_t = 0 or b${s.ord}_c = 0) then method='THIS BAND HOLDS ONE ARM ONLY (band ${sq(s.label)}). That is a positivity violation, and the balance table will NOT show it: a coarsened covariate can look balanced while a whole band has no counterpart in the other arm';`,
+        `  else method='both arms occupy this band'; output;`,
+      ]),
+      `  statistic='bands_with_one_arm'; ord=${ORD_COARSEN + p.slots.length * 2 + 1};`,
+      `  estimate = ${oneArmBandCountSas(p.slots)};`,
+      `  if estimate > 0 then method='BANDS WITH NO COUNTERPART. Coarsening created the band these subjects are stranded in - a narrower cut would split them differently, a wider one would hide them';`,
+      `  else method='every non-empty band holds both arms'; output;`,
+      `  keep measure component statistic ord estimate se ci_low ci_high method;`,
+      `run;`,
+      ``,
+    );
+    extraSets.push(`work._${num}_co`);
+  }
+
+  if (p.eValue) {
+    const nearestSas = nearestNullLimitSas(`_rr_lo`, `_rr_hi`);
+    lines.push(
+      `/*-------------------- the E-VALUE, on the risk ratio computed above ----------*/`,
+      `data work._${num}_ev;`,
+      `  length measure $20 component $16 statistic $32 method $360;`,
+      `  set work._${num}_arms;`,
+      `  measure = "${MEASURE}"; component = 'e_value'; se = .; ci_low = .; ci_high = .;`,
+      `  if mu0 > 0 and mu1 > 0 then do;`,
+      `    _rr = mu1 / mu0;`,
+      `    _selrr = sqrt(v1/(mu1**2) + v0/(mu0**2));`,
+      `    _rr_lo = exp(log(_rr) - 1.96*_selrr);`,
+      `    _rr_hi = exp(log(_rr) + 1.96*_selrr);`,
+      `  end;`,
+      `  else do; _rr = .; _rr_lo = .; _rr_hi = .; end;`,
+      `  statistic='risk_ratio_e_value'; ord=${ORD_EVALUE}; estimate=round(${eValueSas(`_rr`)}, 0.00001);`,
+      `  method='${sq(EVALUE_POINT_METHOD)}'; output;`,
+      ...(p.eValue.includeLimit
+        ? [
+            `  /* the limit NEAREST THE NULL. Missing when the interval covers 1 -`,
+            `     there is no limit on the far side to bound. */`,
+            `  _near = ${nearestSas};`,
+            `  statistic='limit_nearest_null'; ord=${ORD_EVALUE + 1}; estimate=round(_near, 0.00001);`,
+            `  if _near = . then method='THE INTERVAL CROSSES THE NULL, so there is no limit on the far side to bound. The data are already compatible with no effect';`,
+            `  else method='the confidence limit closer to 1 - the one the limit E-value below bounds'; output;`,
+            `  statistic='limit_e_value'; ord=${ORD_EVALUE + 2};`,
+            `  if _near = . then estimate = 1; else estimate = round(${eValueSas(`_near`)}, 0.00001);`,
+            `  if _near = . then method='ONE BY CONSTRUCTION, AND THAT IS THE FINDING: the interval crosses the null, so NO unmeasured confounding at all is needed - THE DATA ARE COMPATIBLE WITH NO EFFECT. Do not read this 1 as a small number on the same scale as the point E-value above it';`,
+            `  else method='the minimum confounding strength that would move the confidence limit nearest the null to 1. Usually the more informative of the pair'; output;`,
+          ]
+        : []),
+      `  keep measure component statistic ord estimate se ci_low ci_high method;`,
+      `run;`,
+      ``,
+    );
+    extraSets.push(`work._${num}_ev`);
+  }
+
+  if (extraSets.length > 0) {
+    lines.push(
+      `data ${outT};`,
+      `  set ${outT}${extraSets.map((t) => ` ${t}`).join("")};`,
+      `run;`,
+      ``,
+    );
+  }
+
+  lines.push(
     `proc sort data=${outT}; by ord; run;`,
     ``,
     `title "IPTW outcome model: ${lbl}";`,

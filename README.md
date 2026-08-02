@@ -26,7 +26,7 @@ re-implementation of the logic; the emitted text itself, run in real Postgres 16
 
 ```
 $ npm run verify
-1995 checks passing, 0 failing
+2153 checks passing, 0 failing
 ```
 
 Five mechanisms, each covering a gap the others cannot:
@@ -38,7 +38,7 @@ Five mechanisms, each covering a gap the others cannot:
 | **Mutation testing**: corrupt the output on purpose, assert the harness goes red | checks that pass for the wrong reason |
 | **PARITY stamps** | a twin silently dropping a spec parameter it claimed to consume |
 | **Readiness gates** | analyses that cannot be computed honestly, refused *before* code is generated |
-| **Byte-identity snapshot** over 1737 emitted files | a change to the shared spine quietly moving a number in a module nobody touched |
+| **Byte-identity snapshot** over 2145 emitted files | a change to the shared spine quietly moving a number in a module nobody touched |
 
 Ground truth is derived by hand as exact fractions *before* anything is executed:
 incidence of 3 cases over 2425 person-days with a Byar CI of (90.82, 1320.24); a

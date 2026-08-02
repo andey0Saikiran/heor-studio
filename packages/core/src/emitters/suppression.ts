@@ -275,6 +275,24 @@ export const SUPPRESSION_SHAPES: Record<string, SuppressionShape> = {
     keepCols: ["ord", "method"],
     tieBreakCol: "statistic",
   },
+  negative_control: {
+    /* Event counts on a control outcome are counts of PEOPLE, and a control is
+     * chosen precisely because it is UNRELATED to the exposure — so it is often
+     * rare, and a rare outcome in a small cell is the most identifying thing in
+     * the table. The weighted risks and the ratio are computed from those
+     * counts, so everything masks together.
+     *
+     * The METHOD text is kept: it carries the rationale, the declared threshold
+     * and the breach verdict. A released table that hid "this control breaches
+     * the threshold" while showing the rest would be a table that suppressed
+     * the finding rather than the person. */
+    labelCols: ["measure", "component", "statistic"],
+    groupCols: ["measure", "component"],
+    countCol: "estimate",
+    maskCols: ["estimate"],
+    keepCols: ["ord", "term", "method"],
+    tieBreakCol: "statistic",
+  },
   propensity_score: {
     /* Cell counts and pseudo-population sizes are the disclosive quantities
      * here — a cell of one is one identifiable person, and the positivity rows

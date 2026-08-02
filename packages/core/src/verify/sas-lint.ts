@@ -141,6 +141,12 @@ export function sasStructureChecks(files: SasFile[]): Check[] {
     const defined = new Set<string>();
     for (const src of [f.content, setup?.content ?? ""]) {
       for (const m of src.matchAll(/%let\s+(\w+)\s*=/g)) defined.add(m[1].toLowerCase());
+      /* PROC SQL's `select ... into :name` is the OTHER way a macro variable
+       * gets defined, and it is the only way to define one from data. Missing
+       * it here made the lint reject a program that was perfectly correct —
+       * the propensity-score stratifier reads its own cohort size that way,
+       * because a %let cannot hold a number nobody knows until run time. */
+      for (const m of src.matchAll(/\binto\s*:(\w+)/gi)) defined.add(m[1].toLowerCase());
       // macro parameters, e.g. %macro foo(bar=, baz=);
       for (const m of src.matchAll(/%macro\s+\w+\s*\(([^)]*)\)/g)) {
         for (const p of m[1].split(",")) {

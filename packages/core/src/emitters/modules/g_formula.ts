@@ -52,13 +52,36 @@ import type { AnalysisModule, SqlCtx, SasCtx, SqlModuleFile } from "./types";
 import { describeWindow, oneLine, q, windowConds } from "../sql-base";
 import { cmt, header, levelCheck, sq, windowConds as sasWindowConds, INCLUDE_SETUP } from "../sas-base";
 import {
+  axisStamp,
+  bandOccupancySasSteps,
+  bandOccupancySqlCte,
+  bandSlots,
+  bandingStamp,
+  cellAssignSas,
+  cellExprSql,
+  coarseningNotes,
+  cutLit,
+  oneArmBandCountSas,
+  oneArmBandCountSql,
+  resolveCellAxes,
+  sasBandedValueStep,
+  type CellAxis,
+} from "../banding-core";
+import {
+  eValueSas,
+  eValueSql,
+  nearestNullLimitSas,
+  nearestNullLimitSql,
+  EVALUE_METHOD_NOTES,
+  EVALUE_POINT_METHOD,
+} from "../evalue-core";
+import {
   outcomeSettingPlan,
   parityStamp,
   gFormulaLimitations,
   gFormulaParity,
+  stratLabel,
   G_FORMULA_METHOD_NOTES,
-  REGION_LABELS,
-  SEX_LABELS,
 } from "../parity";
 
 const MEASURE = "g_formula";
@@ -67,51 +90,22 @@ const ORD_CELLS = 10;
 const ORD_G = 20;
 const ORD_AIPW = 30;
 const ORD_IDENT = 40;
-
-type CellAxis = "sex" | "region" | "plan_type" | "year";
+const ORD_COARSEN = 500;
+const ORD_EVALUE = 600;
 
 function plan(ctx: SqlCtx | SasCtx, an: GFormulaAnalysis) {
   const spec = ctx.spec;
   const gv = spec.groupVars.find((g) => g.id === an.groupVarId);
   const referenceLevel = gv?.referenceLevel ?? gv?.levels[0] ?? "";
   const treatedLevel = gv?.levels.find((l) => l !== referenceLevel) ?? "";
-  const cellAxes: Array<{ id: string; label: string; axis: CellAxis }> = [];
-  for (const id of an.covariateIds) {
-    const b = spec.baseline.find((x) => x.id === id);
-    if (b && (b.kind === "sex" || b.kind === "region" || b.kind === "plan_type" || b.kind === "year"))
-      cellAxes.push({ id, label: b.label, axis: b.kind });
-  }
-  return { gv, referenceLevel, treatedLevel, cellAxes, emittable: Boolean(gv && referenceLevel && treatedLevel && cellAxes.length > 0) };
-}
-
-function cellExprSql(axis: CellAxis, ctx: SqlCtx): string {
-  switch (axis) {
-    case "sex":
-      return `CASE CAST(dm.sex AS VARCHAR) ${Object.entries(SEX_LABELS).map(([k, v]) => `WHEN '${k}' THEN '${v}'`).join(" ")} ELSE 'Unknown' END`;
-    case "region":
-      return `CASE CAST(dm.region AS VARCHAR) ${Object.entries(REGION_LABELS).map(([k, v]) => `WHEN '${k}' THEN '${v}'`).join(" ")} ELSE 'Unknown' END`;
-    case "plan_type":
-      return `COALESCE(CAST(dm.plantyp AS VARCHAR), 'Unknown')`;
-    case "year":
-      return `CAST(${ctx.d.year("c.index_date")} AS VARCHAR)`;
-  }
-}
-
-function cellAssignSas(axis: CellAxis, v: string): string[] {
-  switch (axis) {
-    case "sex": {
-      const arms = Object.entries(SEX_LABELS).map(([k, lab], j) => `${j === 0 ? "if" : "else if"} sex = '${k}' then ${v} = '${lab}';`);
-      return [...arms, `else ${v} = 'Unknown';`];
-    }
-    case "region": {
-      const arms = Object.entries(REGION_LABELS).map(([k, lab], j) => `${j === 0 ? "if" : "else if"} region = '${k}' then ${v} = '${lab}';`);
-      return [...arms, `else ${v} = 'Unknown';`];
-    }
-    case "plan_type":
-      return [`${v} = strip(vvalue(plantyp));`, `if ${v} in ('', '.') then ${v} = 'Unknown';`];
-    case "year":
-      return [`${v} = strip(put(year(index_date), 4.));`];
-  }
+  const cellAxes: CellAxis[] = resolveCellAxes(spec.baseline, an.covariateIds, an.bandings);
+  return {
+    gv, referenceLevel, treatedLevel, cellAxes,
+    slots: bandSlots(cellAxes),
+    bandings: bandingStamp(an.bandings, spec.baseline),
+    eValue: an.eValue ? { includeLimit: an.eValue.includeLimit !== false } : undefined,
+    emittable: Boolean(gv && referenceLevel && treatedLevel && cellAxes.length > 0),
+  };
 }
 
 /* ================================================================== *
@@ -129,7 +123,7 @@ function sqlGFormula(ctx: SqlCtx, an: GFormulaAnalysis, suffix: string): SqlModu
 
   L.push(`-- ${parityStamp("g_formula", gFormulaParity(an, {
     referenceLevel: p.referenceLevel, treatedLevel: p.treatedLevel,
-    cellAxes: p.cellAxes.map((c) => c.axis), settingFilter: setting.stamped,
+    cellAxes: p.cellAxes.map(axisStamp), settingFilter: setting.stamped, bandings: p.bandings,
   }))}`);
   const limits = gFormulaLimitations(an, listSystem);
   if (limits.length > 0) {
@@ -138,6 +132,15 @@ function sqlGFormula(ctx: SqlCtx, an: GFormulaAnalysis, suffix: string): SqlModu
   }
   L.push(`-- REVIEW - method notes (always emitted):`);
   for (const note of G_FORMULA_METHOD_NOTES) L.push(`--   * ${note}`);
+  const coarse = coarseningNotes(p.cellAxes);
+  if (coarse.length > 0) {
+    L.push(`-- REVIEW - DECLARED COARSENING (always emitted when a covariate is banded):`);
+    for (const note of coarse) L.push(`--   * ${note}`);
+  }
+  if (p.eValue) {
+    L.push(`-- REVIEW - E-VALUE (always emitted when one is requested):`);
+    for (const note of EVALUE_METHOD_NOTES) L.push(`--   * ${note}`);
+  }
 
   if (!p.emittable) {
     L.push(`-- NOT EMITTED: the exposure or the covariates did not resolve.`);
@@ -172,20 +175,40 @@ function sqlGFormula(ctx: SqlCtx, an: GFormulaAnalysis, suffix: string): SqlModu
   C.push(`  SELECT DISTINCT c.enrolid FROM atrisk c JOIN ae a ON a.enrolid = c.enrolid`);
   C.push(`   AND a.event_date > c.index_date AND a.event_date <= ${d.offset("c.index_date", an.horizonDays)}`);
   C.push(`),`);
-  C.push(`subj AS (`);
-  C.push(`  SELECT c.enrolid,`);
-  C.push(`         CASE WHEN ${armExpr} = '${q(p.treatedLevel)}' THEN 1 ELSE 0 END AS treated,`);
-  C.push(`         ${p.cellAxes.map((a) => cellExprSql(a.axis, ctx)).join(` || '|' || `)} AS cell,`);
-  C.push(`         CASE WHEN cs.enrolid IS NOT NULL THEN 1.0 ELSE 0.0 END AS y`);
-  C.push(`  FROM atrisk c`);
-  C.push(`  LEFT JOIN demo1 dm ON dm.enrolid = c.enrolid`);
-  C.push(`  LEFT JOIN cases cs ON cs.enrolid = c.enrolid`);
-  if (viaNdc) {
-    C.push(`  JOIN ${wp}_ndc_lookup nl`);
-    C.push(`    ON nl.code_list_id = '${q(indexListId)}' AND nl.ndcnum = c.index_code`);
+  if (p.slots.length > 0) {
+    C.push(`subj0 AS (   -- each CELL AXIS as its own column, so a COARSENED axis is reportable`);
+    C.push(`  SELECT c.enrolid,`);
+    C.push(`         CASE WHEN ${armExpr} = '${q(p.treatedLevel)}' THEN 1 ELSE 0 END AS treated,`);
+    p.cellAxes.forEach((a, j) => C.push(`         ${cellExprSql(a, ctx)} AS ax${j},`));
+    C.push(`         CASE WHEN cs.enrolid IS NOT NULL THEN 1.0 ELSE 0.0 END AS y`);
+    C.push(`  FROM atrisk c`);
+    C.push(`  LEFT JOIN demo1 dm ON dm.enrolid = c.enrolid`);
+    C.push(`  LEFT JOIN cases cs ON cs.enrolid = c.enrolid`);
+    if (viaNdc) {
+      C.push(`  JOIN ${wp}_ndc_lookup nl`);
+      C.push(`    ON nl.code_list_id = '${q(indexListId)}' AND nl.ndcnum = c.index_code`);
+    }
+    C.push(`  WHERE ${armExpr} IN ('${q(p.referenceLevel)}', '${q(p.treatedLevel)}')`);
+    C.push(`),`);
+    C.push(`subj AS (`);
+    C.push(`  SELECT s.*, ${p.cellAxes.map((_a, j) => `ax${j}`).join(` || '|' || `)} AS cell FROM subj0 s`);
+    C.push(`),`);
+  } else {
+    C.push(`subj AS (`);
+    C.push(`  SELECT c.enrolid,`);
+    C.push(`         CASE WHEN ${armExpr} = '${q(p.treatedLevel)}' THEN 1 ELSE 0 END AS treated,`);
+    C.push(`         ${p.cellAxes.map((a) => cellExprSql(a, ctx)).join(` || '|' || `)} AS cell,`);
+    C.push(`         CASE WHEN cs.enrolid IS NOT NULL THEN 1.0 ELSE 0.0 END AS y`);
+    C.push(`  FROM atrisk c`);
+    C.push(`  LEFT JOIN demo1 dm ON dm.enrolid = c.enrolid`);
+    C.push(`  LEFT JOIN cases cs ON cs.enrolid = c.enrolid`);
+    if (viaNdc) {
+      C.push(`  JOIN ${wp}_ndc_lookup nl`);
+      C.push(`    ON nl.code_list_id = '${q(indexListId)}' AND nl.ndcnum = c.index_code`);
+    }
+    C.push(`  WHERE ${armExpr} IN ('${q(p.referenceLevel)}', '${q(p.treatedLevel)}')`);
+    C.push(`),`);
   }
-  C.push(`  WHERE ${armExpr} IN ('${q(p.referenceLevel)}', '${q(p.treatedLevel)}')`);
-  C.push(`),`);
   /* THE SATURATED OUTCOME REGRESSION. m1 and m0 are the cell means, which ARE
    * the fitted values of a model with a term for every cell-by-arm
    * combination. Both are NULL when the cell has no such subject, and that
@@ -238,7 +261,36 @@ function sqlGFormula(ctx: SqlCtx, an: GFormulaAnalysis, suffix: string): SqlModu
   C.push(`         -- and dropping it would overstate the interval.`);
   C.push(`         SUM((i.a1_i - a.a1) * (i.a0_i - a.a0)) / NULLIF(POWER(MAX(a.n_used), 2), 0) AS cov10`);
   C.push(`  FROM aipw_i i CROSS JOIN aipw a`);
-  C.push(`)`);
+  C.push(`)${p.slots.length > 0 || p.eValue ? `,` : ``}`);
+  if (p.slots.length > 0) {
+    /* Occupancy over the FULL at-risk set, not the restricted one: a band that
+     * lost an arm is exactly why the restriction happened, and reporting it
+     * after the restriction would hide the cause. */
+    C.push(...bandOccupancySqlCte({ from: "subj", slots: p.slots, alias: "bocc" }));
+    if (!p.eValue) C[C.length - 1] = C[C.length - 1].replace(/,\s*$/, "");
+  }
+  if (p.eValue) {
+    /* THE RISK RATIO AND ITS INTERVAL, on the g-formula/AIPW scale. The
+     * g-formula rows above carry point estimates only, because under double
+     * saturation AIPW IS the g-formula and one interval covers both. The
+     * E-value needs a RATIO interval, so it is derived here by the delta method
+     * from the same influence-function variances - INCLUDING the covariance,
+     * since every subject contributes to both arms. */
+    const seLogRr = `SQRT(GREATEST(v1 / NULLIF(POWER(a1, 2), 0) + v0 / NULLIF(POWER(a0, 2), 0) - 2 * cov10 / NULLIF(a1 * a0, 0), 0))`;
+    const rrE = `a1 / NULLIF(a0, 0)`;
+    C.push(`ev0 AS (   -- the risk ratio and its delta-method interval, for the E-value`);
+    C.push(`  SELECT ${rrE} AS rr,`);
+    C.push(`         EXP(LN(NULLIF(${rrE}, 0)) - 1.96 * (${seLogRr})) AS rr_lo,`);
+    C.push(`         EXP(LN(NULLIF(${rrE}, 0)) + 1.96 * (${seLogRr})) AS rr_hi`);
+    C.push(`  FROM aipw CROSS JOIN aipw_v`);
+    C.push(`),`);
+    C.push(`ev AS (   -- and the limit NEAREST THE NULL, computed ONCE`);
+    C.push(`  -- NULL when the interval covers 1: there is no limit on the far side`);
+    C.push(`  -- to bound, and the row below says what that means.`);
+    C.push(`  SELECT rr, rr_lo, rr_hi, ${nearestNullLimitSql(`rr_lo`, `rr_hi`)} AS rr_near`);
+    C.push(`  FROM ev0`);
+    C.push(`)`);
+  }
 
   const NULLN = `CAST(NULL AS NUMERIC)`;
   const STR = (e: string) => `CAST(${e} AS VARCHAR)`;
@@ -324,6 +376,43 @@ function sqlGFormula(ctx: SqlCtx, an: GFormulaAnalysis, suffix: string): SqlModu
     `  FROM aipw a CROSS JOIN gf g`,
   ]);
 
+  if (p.slots.length > 0) {
+    const bandedAxes = p.cellAxes.filter((a) => a.kind === "banded");
+    parts.push(row("coarsening", "bands_declared", ORD_COARSEN, `CAST(${p.slots.length} AS NUMERIC)`,
+      `'${q(bandedAxes.map((a) => `${stratLabel(a.label)} cut at ${(a.cutPoints ?? []).map(cutLit).join("/")}`).join("; "))}. A continuous covariate has no cells until it is banded, and these are the cells standardized over. CONFOUNDING WITHIN A BAND IS UNCONTROLLED, and a WIDER band controls LESS'`,
+      "bocc"));
+    p.slots.forEach((s) => {
+      parts.push(row("coarsening", `band_${s.ord}_treated`, ORD_COARSEN + s.ord * 2 - 1, `CAST(b${s.ord}_t AS NUMERIC)`,
+        `'treated subjects in band ${q(s.label)} of ${q(stratLabel(s.covariateLabel))}, over the whole at-risk set'`, "bocc"));
+      parts.push(row("coarsening", `band_${s.ord}_control`, ORD_COARSEN + s.ord * 2, `CAST(b${s.ord}_c AS NUMERIC)`,
+        `CASE WHEN (b${s.ord}_t + b${s.ord}_c) > 0 AND (b${s.ord}_t = 0 OR b${s.ord}_c = 0)` +
+        ` THEN 'THIS BAND HOLDS ONE ARM ONLY (band ${q(s.label)}). Its cells cannot be standardized and are dropped by the restriction above - the coarsening is what created the band those subjects are stranded in'` +
+        ` ELSE 'both arms occupy this band' END`, "bocc"));
+    });
+    parts.push(row("coarsening", "bands_with_one_arm", ORD_COARSEN + p.slots.length * 2 + 1,
+      `CAST(${oneArmBandCountSql(p.slots)} AS NUMERIC)`,
+      `CASE WHEN (${oneArmBandCountSql(p.slots)}) > 0` +
+      ` THEN 'BANDS WITH NO COUNTERPART. Read this beside subjects_excluded: a wider cut would have kept them and controlled less; a narrower one would have dropped more'` +
+      ` ELSE 'every non-empty band holds both arms' END`, "bocc"));
+  }
+
+  if (p.eValue) {
+    parts.push(row("e_value", "risk_ratio_e_value", ORD_EVALUE, d.roundN(eValueSql(`rr`), 5),
+      `'${q(EVALUE_POINT_METHOD)}. It bounds the RESTRICTED population these estimates describe, not the cohort'`, "ev"));
+    if (p.eValue.includeLimit) {
+      const nearest = `rr_near`;
+      parts.push(row("e_value", "limit_nearest_null", ORD_EVALUE + 1, d.roundN(nearest, 5),
+        `CASE WHEN (${nearest}) IS NULL` +
+        ` THEN 'THE INTERVAL CROSSES THE NULL, so there is no limit on the far side to bound. The data are already compatible with no effect'` +
+        ` ELSE 'the confidence limit closer to 1, from the delta method on the influence-function variances INCLUDING the between-arm covariance' END`, "ev"));
+      parts.push(row("e_value", "limit_e_value", ORD_EVALUE + 2,
+        `COALESCE(${d.roundN(eValueSql(nearest), 5)}, CAST(1 AS NUMERIC))`,
+        `CASE WHEN (${nearest}) IS NULL` +
+        ` THEN 'ONE BY CONSTRUCTION, AND THAT IS THE FINDING: the interval crosses the null, so NO unmeasured confounding at all is needed - THE DATA ARE COMPATIBLE WITH NO EFFECT. Do not read this 1 as a small number on the same scale as the point E-value above it'` +
+        ` ELSE 'the minimum confounding strength that would move the confidence limit nearest the null to 1. Usually the more informative of the pair' END`, "ev"));
+    }
+  }
+
   parts.forEach((rowsOut, i) => {
     if (i > 0) L.push(`  UNION ALL`);
     L.push(...rowsOut);
@@ -342,6 +431,10 @@ function sqlGFormula(ctx: SqlCtx, an: GFormulaAnalysis, suffix: string): SqlModu
     extra: [
       `Analysis: ${oneLine(an.label)} (id ${an.id}); outcome "${clid}", horizon ${an.horizonDays}d.`,
       `Treated ${p.treatedLevel} vs reference ${p.referenceLevel}; cells: ${p.cellAxes.map((c) => c.label).join(" x ")}.`,
+      ...(p.slots.length > 0
+        ? [`COARSENED: ${p.cellAxes.filter((a) => a.kind === "banded").map((a) => `${a.label} cut at ${(a.cutPoints ?? []).map(cutLit).join("/")}`).join("; ")}. Confounding WITHIN a band is uncontrolled.`]
+        : []),
+      ...(p.eValue ? [`E-value requested${p.eValue.includeLimit ? ` (point and confidence limit)` : ` (point estimate only)`}.`] : []),
     ],
     body: L.join("\n"),
   };
@@ -375,7 +468,7 @@ function sasGFormula(ctx: SasCtx, an: GFormulaAnalysis, num: string, suffix: str
     ]),
     `/* ${parityStamp("g_formula", gFormulaParity(an, {
       referenceLevel: p.referenceLevel, treatedLevel: p.treatedLevel,
-      cellAxes: p.cellAxes.map((c) => c.axis), settingFilter: setting.stamped,
+      cellAxes: p.cellAxes.map(axisStamp), settingFilter: setting.stamped, bandings: p.bandings,
     }))} */`,
     ``,
   ];
@@ -386,6 +479,15 @@ function sasGFormula(ctx: SasCtx, an: GFormulaAnalysis, num: string, suffix: str
     `/* REVIEW - method notes (always emitted):`,
     ...G_FORMULA_METHOD_NOTES.map((n) => `   * ${cmt(n)}`),
     `*/`,
+  );
+  const coarseSas = coarseningNotes(p.cellAxes);
+  if (coarseSas.length > 0) {
+    lines.push(`/* REVIEW - DECLARED COARSENING (always emitted when a covariate is banded):`, ...coarseSas.map((n) => `   * ${cmt(n)}`), `*/`);
+  }
+  if (p.eValue) {
+    lines.push(`/* REVIEW - E-VALUE (always emitted when one is requested):`, ...EVALUE_METHOD_NOTES.map((n) => `   * ${cmt(n)}`), `*/`);
+  }
+  lines.push(
     ``,
     ...INCLUDE_SETUP,
   );
@@ -448,14 +550,17 @@ function sasGFormula(ctx: SasCtx, an: GFormulaAnalysis, num: string, suffix: str
     `  by enrolid;`,
     `  if first.enrolid;`,
     `  length cell $200 ${p.cellAxes.map((_, j) => `_c${j}`).join(" ")} $40;`,
+    ...(p.slots.length > 0 ? [`  length ${p.cellAxes.map((_a, j) => `ax${j}`).join(" ")} $40;`] : []),
     `  treated = (arm = "${sq(p.treatedLevel)}");`,
+    ...(p.slots.length > 0 ? sasBandedValueStep().map((l) => `  ${l}`) : []),
     ...p.cellAxes.flatMap((a, j) => [
-      `  /* cell axis: ${cmt(a.label)} (${a.axis}) */`,
-      ...cellAssignSas(a.axis, `_c${j}`).map((l) => `  ${l}`),
+      `  /* cell axis: ${cmt(a.label)} (${a.kind}) */`,
+      ...cellAssignSas(a, `_c${j}`).map((l) => `  ${l}`),
     ]),
     `  cell = ${p.cellAxes.map((_, j) => `strip(_c${j})`).join(` || '|' || `)};`,
+    ...(p.slots.length > 0 ? p.cellAxes.map((_a, j) => `  ax${j} = _c${j};`) : []),
     `  if arm not in ("${sq(p.referenceLevel)}", "${sq(p.treatedLevel)}") then delete;`,
-    `  keep enrolid treated cell y;`,
+    `  keep enrolid treated cell y${p.slots.length > 0 ? ` ${p.cellAxes.map((_a, j) => `ax${j}`).join(" ")}` : ""};`,
     `run;`,
     ``,
     ...levelCheck(`work._${num}_subj`, "subjects in the analysis set", [`sum(y) as events`]),
@@ -511,6 +616,7 @@ function sasGFormula(ctx: SasCtx, an: GFormulaAnalysis, num: string, suffix: str
     `  from work._${num}_ai as i, work._${num}_aipw as a;`,
     `quit;`,
     ``,
+    ...(p.slots.length > 0 ? bandOccupancySasSteps({ num, from: `work._${num}_subj`, slots: p.slots }) : []),
     `/*-------------------- assemble the result table ------------------------------*/`,
     `data ${outT};`,
     `  length measure $20 component $12 statistic $32 method $420;`,
@@ -558,6 +664,86 @@ function sasGFormula(ctx: SasCtx, an: GFormulaAnalysis, num: string, suffix: str
     `  keep measure component statistic ord estimate se ci_low ci_high method;`,
     `run;`,
     ``,
+  );
+
+  const extraSets: string[] = [];
+  if (p.slots.length > 0) {
+    const bandedAxes = p.cellAxes.filter((a) => a.kind === "banded");
+    lines.push(
+      `data work._${num}_co;`,
+      `  length measure $20 component $12 statistic $32 method $420;`,
+      `  set work._${num}_bocc;`,
+      `  measure = "${MEASURE}"; component = 'coarsening'; se = .; ci_low = .; ci_high = .;`,
+      `  statistic='bands_declared'; ord=${ORD_COARSEN}; estimate=${p.slots.length};`,
+      `  method='${sq(bandedAxes.map((a) => `${stratLabel(a.label)} cut at ${(a.cutPoints ?? []).map(cutLit).join("/")}`).join("; "))}. A continuous covariate has no cells until it is banded, and these are the cells standardized over. CONFOUNDING WITHIN A BAND IS UNCONTROLLED, and a WIDER band controls LESS'; output;`,
+      ...p.slots.flatMap((s) => [
+        `  statistic='band_${s.ord}_treated'; ord=${ORD_COARSEN + s.ord * 2 - 1}; estimate=b${s.ord}_t;`,
+        `  method='treated subjects in band ${sq(s.label)} of ${sq(stratLabel(s.covariateLabel))}, over the whole at-risk set'; output;`,
+        `  statistic='band_${s.ord}_control'; ord=${ORD_COARSEN + s.ord * 2}; estimate=b${s.ord}_c;`,
+        `  if (b${s.ord}_t + b${s.ord}_c) > 0 and (b${s.ord}_t = 0 or b${s.ord}_c = 0) then method='THIS BAND HOLDS ONE ARM ONLY (band ${sq(s.label)}). Its cells cannot be standardized and are dropped by the restriction above - the coarsening is what created the band those subjects are stranded in';`,
+        `  else method='both arms occupy this band'; output;`,
+      ]),
+      `  statistic='bands_with_one_arm'; ord=${ORD_COARSEN + p.slots.length * 2 + 1};`,
+      `  estimate = ${oneArmBandCountSas(p.slots)};`,
+      `  if estimate > 0 then method='BANDS WITH NO COUNTERPART. Read this beside subjects_excluded: a wider cut would have kept them and controlled less; a narrower one would have dropped more';`,
+      `  else method='every non-empty band holds both arms'; output;`,
+      `  keep measure component statistic ord estimate se ci_low ci_high method;`,
+      `run;`,
+      ``,
+    );
+    extraSets.push(`work._${num}_co`);
+  }
+
+  if (p.eValue) {
+    const nearestSas = nearestNullLimitSas(`_rr_lo`, `_rr_hi`);
+    lines.push(
+      `/*-------------------- the E-VALUE, on the standardized risk ratio ------------*/`,
+      `data work._${num}_ev;`,
+      `  length measure $20 component $12 statistic $32 method $420;`,
+      `  set work._${num}_aipw;`,
+      `  if _n_ = 1 then set work._${num}_aiv;`,
+      `  measure = "${MEASURE}"; component = 'e_value'; se = .; ci_low = .; ci_high = .;`,
+      `  /* the ratio interval comes from the SAME influence-function variances as`,
+      `     the risk-difference interval above, INCLUDING the between-arm`,
+      `     covariance - every subject contributes to both arms */`,
+      `  if a0 > 0 and a1 > 0 then do;`,
+      `    _rr = a1 / a0;`,
+      `    _selrr = sqrt(max(v1/(a1**2) + v0/(a0**2) - 2*cov10/(a1*a0), 0));`,
+      `    _rr_lo = exp(log(_rr) - 1.96*_selrr);`,
+      `    _rr_hi = exp(log(_rr) + 1.96*_selrr);`,
+      `  end;`,
+      `  else do; _rr = .; _rr_lo = .; _rr_hi = .; end;`,
+      `  statistic='risk_ratio_e_value'; ord=${ORD_EVALUE}; estimate=round(${eValueSas(`_rr`)}, 0.00001);`,
+      `  method='${sq(EVALUE_POINT_METHOD)}. It bounds the RESTRICTED population these estimates describe, not the cohort'; output;`,
+      ...(p.eValue.includeLimit
+        ? [
+            `  _near = ${nearestSas};`,
+            `  statistic='limit_nearest_null'; ord=${ORD_EVALUE + 1}; estimate=round(_near, 0.00001);`,
+            `  if _near = . then method='THE INTERVAL CROSSES THE NULL, so there is no limit on the far side to bound. The data are already compatible with no effect';`,
+            `  else method='the confidence limit closer to 1, from the delta method on the influence-function variances INCLUDING the between-arm covariance'; output;`,
+            `  statistic='limit_e_value'; ord=${ORD_EVALUE + 2};`,
+            `  if _near = . then estimate = 1; else estimate = round(${eValueSas(`_near`)}, 0.00001);`,
+            `  if _near = . then method='ONE BY CONSTRUCTION, AND THAT IS THE FINDING: the interval crosses the null, so NO unmeasured confounding at all is needed - THE DATA ARE COMPATIBLE WITH NO EFFECT. Do not read this 1 as a small number on the same scale as the point E-value above it';`,
+            `  else method='the minimum confounding strength that would move the confidence limit nearest the null to 1. Usually the more informative of the pair'; output;`,
+          ]
+        : []),
+      `  keep measure component statistic ord estimate se ci_low ci_high method;`,
+      `run;`,
+      ``,
+    );
+    extraSets.push(`work._${num}_ev`);
+  }
+
+  if (extraSets.length > 0) {
+    lines.push(
+      `data ${outT};`,
+      `  set ${outT}${extraSets.map((t) => ` ${t}`).join("")};`,
+      `run;`,
+      ``,
+    );
+  }
+
+  lines.push(
     `proc sort data=${outT}; by ord; run;`,
     ``,
     `title "Standardization and AIPW: ${lbl}";`,

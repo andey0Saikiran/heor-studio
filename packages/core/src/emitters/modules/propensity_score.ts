@@ -47,6 +47,23 @@ import type { AnalysisModule, SqlCtx, SasCtx, SqlModuleFile } from "./types";
 import { oneLine, q } from "../sql-base";
 import { cmt, header, levelCheck, sq, INCLUDE_SETUP } from "../sas-base";
 import { psSqlCtes, psSasSteps, psSasAnchor } from "../ps-core";
+import { psStratSqlCtes, psStratSasSteps, CONVENTIONAL_STRATA } from "../psstrat-core";
+import {
+  axisStamp,
+  bandOccupancySasSteps,
+  bandOccupancySqlCte,
+  bandSlots,
+  bandingStamp,
+  cellAssignSas,
+  cellExprSql,
+  coarseningNotes,
+  cutLit,
+  oneArmBandCountSas,
+  oneArmBandCountSql,
+  resolveCellAxes,
+  sasBandedValueStep,
+  type CellAxis,
+} from "../banding-core";
 import {
   balanceCovariates,
   outcomeSettingPlan,
@@ -55,8 +72,6 @@ import {
   propensityScoreParity,
   stratLabel,
   PROPENSITY_SCORE_METHOD_NOTES,
-  REGION_LABELS,
-  SEX_LABELS,
   type BalanceCovariate,
 } from "../parity";
 
@@ -65,64 +80,36 @@ const ORD_DESIGN = 0;
 const ORD_POSITIVITY = 10;
 const ORD_WEIGHTS = 20;
 const ORD_BALANCE = 30;
-
-/** The categorical axes a saturated cell can be built from. Readiness refuses
- *  anything else, so this map and that list must agree. */
-type CellAxis = "sex" | "region" | "plan_type" | "year";
+/* The coarsening and stratification blocks sit BELOW balance, which starts at
+ * 30 and grows by 3 per balance covariate. 500/600 leave that room permanently
+ * rather than by arithmetic that has to be revisited. */
+const ORD_COARSEN = 500;
+const ORD_STRATA = 600;
 
 function plan(ctx: SqlCtx | SasCtx, an: PropensityScoreAnalysis) {
   const spec = ctx.spec;
   const gv = spec.groupVars.find((g) => g.id === an.groupVarId);
   const referenceLevel = gv?.referenceLevel ?? gv?.levels[0] ?? "";
   const treatedLevel = gv?.levels.find((l) => l !== referenceLevel) ?? "";
-  const cellAxes: Array<{ id: string; label: string; axis: CellAxis }> = [];
-  for (const id of an.psCovariateIds) {
-    const b = spec.baseline.find((x) => x.id === id);
-    if (b && (b.kind === "sex" || b.kind === "region" || b.kind === "plan_type" || b.kind === "year"))
-      cellAxes.push({ id, label: b.label, axis: b.kind });
-  }
+  const cellAxes: CellAxis[] = resolveCellAxes(spec.baseline, an.psCovariateIds, an.bandings);
   const { supported, unsupported } = balanceCovariates(
     spec.baseline,
     an.balanceCovariateIds,
     new Set(spec.analyses.filter((x) => x.kind === "comorbidity_index" && x.enabled).map((x) => x.id)),
   );
+  const stratified = an.method === "stratification";
   return {
     gv, referenceLevel, treatedLevel, cellAxes,
+    slots: bandSlots(cellAxes),
+    bandings: bandingStamp(an.bandings, spec.baseline),
+    stratified,
     balance: supported,
     droppedBalance: unsupported.map((u) => u.id),
-    emittable: Boolean(gv && referenceLevel && treatedLevel && cellAxes.length > 0 && an.method === "iptw"),
+    emittable: Boolean(
+      gv && referenceLevel && treatedLevel && cellAxes.length > 0 &&
+      (an.method === "iptw" || (stratified && supported.length > 0)),
+    ),
   };
-}
-
-/** SQL expression for one cell axis. */
-function cellExprSql(axis: CellAxis, ctx: SqlCtx): string {
-  switch (axis) {
-    case "sex":
-      return `CASE CAST(dm.sex AS VARCHAR) ${Object.entries(SEX_LABELS).map(([k, v]) => `WHEN '${k}' THEN '${v}'`).join(" ")} ELSE 'Unknown' END`;
-    case "region":
-      return `CASE CAST(dm.region AS VARCHAR) ${Object.entries(REGION_LABELS).map(([k, v]) => `WHEN '${k}' THEN '${v}'`).join(" ")} ELSE 'Unknown' END`;
-    case "plan_type":
-      return `COALESCE(CAST(dm.plantyp AS VARCHAR), 'Unknown')`;
-    case "year":
-      return `CAST(${ctx.d.year("c.index_date")} AS VARCHAR)`;
-  }
-}
-
-function cellAssignSas(axis: CellAxis, v: string): string[] {
-  switch (axis) {
-    case "sex": {
-      const arms = Object.entries(SEX_LABELS).map(([k, lab], j) => `${j === 0 ? "if" : "else if"} sex = '${k}' then ${v} = '${lab}';`);
-      return [...arms, `else ${v} = 'Unknown';`];
-    }
-    case "region": {
-      const arms = Object.entries(REGION_LABELS).map(([k, lab], j) => `${j === 0 ? "if" : "else if"} region = '${k}' then ${v} = '${lab}';`);
-      return [...arms, `else ${v} = 'Unknown';`];
-    }
-    case "plan_type":
-      return [`${v} = strip(vvalue(plantyp));`, `if ${v} in ('', '.') then ${v} = 'Unknown';`];
-    case "year":
-      return [`${v} = strip(put(year(index_date), 4.));`];
-  }
 }
 
 const balCol = (c: BalanceCovariate) => (c.axis === "age" ? "age_val" : c.axis === "sex" ? "sex_male" : "cci_val");
@@ -139,7 +126,8 @@ function sqlPropensityScore(ctx: SqlCtx, an: PropensityScoreAnalysis, suffix: st
 
   L.push(`-- ${parityStamp("propensity_score", propensityScoreParity(an, {
     referenceLevel: p.referenceLevel, treatedLevel: p.treatedLevel,
-    cellAxes: p.cellAxes.map((c) => c.axis), balanceTerms: p.balance.map((c) => stratLabel(c.label)),
+    cellAxes: p.cellAxes.map(axisStamp), balanceTerms: p.balance.map((c) => stratLabel(c.label)),
+    bandings: p.bandings, strataRequested: p.stratified ? CONVENTIONAL_STRATA : undefined,
   }))}`);
   const limits = propensityScoreLimitations(an, p.droppedBalance);
   if (limits.length > 0) {
@@ -148,9 +136,14 @@ function sqlPropensityScore(ctx: SqlCtx, an: PropensityScoreAnalysis, suffix: st
   }
   L.push(`-- REVIEW - method notes (always emitted):`);
   for (const note of PROPENSITY_SCORE_METHOD_NOTES) L.push(`--   * ${note}`);
+  const coarse = coarseningNotes(p.cellAxes);
+  if (coarse.length > 0) {
+    L.push(`-- REVIEW - DECLARED COARSENING (always emitted when a covariate is banded):`);
+    for (const note of coarse) L.push(`--   * ${note}`);
+  }
 
   if (!p.emittable) {
-    L.push(`-- NOT EMITTED: ${an.method !== "iptw" ? `method "${an.method}" is not emitted — see readiness for why.` : `the exposure or the propensity covariates did not resolve.`}`);
+    L.push(`-- NOT EMITTED: ${an.method !== "iptw" && an.method !== "stratification" ? `method "${an.method}" is not emitted — see readiness for why.` : `the exposure or the propensity covariates did not resolve.`}`);
     return {
       slug: `ps${suffix}`, title: `Propensity score${suffix ? ` (${an.label})` : ""}`,
       subtitle: "not emitted", extra: [`Analysis: ${oneLine(an.label)} (id ${an.id}).`], body: L.join("\n"),
@@ -171,25 +164,55 @@ function sqlPropensityScore(ctx: SqlCtx, an: PropensityScoreAnalysis, suffix: st
   C.push(`  JOIN ${ctx.t("enrollment_detail")} en ON en.enrolid = c.enrolid AND en.dtstart <= c.index_date`);
   C.push(`),`);
   C.push(`demo1 AS (SELECT enrolid, dobyr, sex, region, plantyp FROM demo WHERE rn = 1),`);
-  C.push(`subj AS (   -- one row per cohort member: arm, CELL, and the balance covariates`);
-  C.push(`  SELECT c.enrolid,`);
-  C.push(`         CASE WHEN ${armExpr} = '${q(p.treatedLevel)}' THEN 1 ELSE 0 END AS treated,`);
-  /* THE CELL. Concatenated in a FIXED axis order, which the parity stamp
-   * records: two twins that agreed on the covariates but spelled the cell
-   * differently would produce different scores from the same data, and no
-   * comparison of NUMBERS would say so. */
-  C.push(`         ${p.cellAxes.map((a) => cellExprSql(a.axis, ctx)).join(` || '|' || `)} AS cell,`);
-  C.push(`         CAST(${d.year("c.index_date")} - dm.dobyr AS DOUBLE PRECISION) AS age_val,`);
-  C.push(`         CASE WHEN dm.sex = '1' THEN 1.0 ELSE 0.0 END AS sex_male${needCci ? `,` : ``}`);
-  if (needCci) C.push(`         CAST(0 AS DOUBLE PRECISION) AS cci_val`);
-  C.push(`  FROM cohort c`);
-  C.push(`  LEFT JOIN demo1 dm ON dm.enrolid = c.enrolid`);
-  if (viaNdc) {
-    C.push(`  JOIN ${wp}_ndc_lookup nl`);
-    C.push(`    ON nl.code_list_id = '${q(indexListId)}' AND nl.ndcnum = c.index_code`);
+  /* A BANDED axis has to be reportable on its own, so when one is declared each
+   * axis becomes a named column and the cell is concatenated from those columns
+   * in a second step. Without a banding the cell is built inline exactly as it
+   * always was — the coarsening path must not move a byte of output for a spec
+   * that never asked for it. */
+  if (p.slots.length > 0) {
+    C.push(`subj0 AS (   -- one row per cohort member: arm, each CELL AXIS as its own`);
+    C.push(`  -- column (so a COARSENED axis can be reported on), and the balance covariates`);
+    C.push(`  SELECT c.enrolid,`);
+    C.push(`         CASE WHEN ${armExpr} = '${q(p.treatedLevel)}' THEN 1 ELSE 0 END AS treated,`);
+    p.cellAxes.forEach((a, j) => C.push(`         ${cellExprSql(a, ctx)} AS ax${j},`));
+    C.push(`         CAST(${d.year("c.index_date")} - dm.dobyr AS DOUBLE PRECISION) AS age_val,`);
+    C.push(`         CASE WHEN dm.sex = '1' THEN 1.0 ELSE 0.0 END AS sex_male${needCci ? `,` : ``}`);
+    if (needCci) C.push(`         CAST(0 AS DOUBLE PRECISION) AS cci_val`);
+    C.push(`  FROM cohort c`);
+    C.push(`  LEFT JOIN demo1 dm ON dm.enrolid = c.enrolid`);
+    if (viaNdc) {
+      C.push(`  JOIN ${wp}_ndc_lookup nl`);
+      C.push(`    ON nl.code_list_id = '${q(indexListId)}' AND nl.ndcnum = c.index_code`);
+    }
+    C.push(`  WHERE ${armExpr} IN ('${q(p.referenceLevel)}', '${q(p.treatedLevel)}')`);
+    C.push(`),`);
+    C.push(`subj AS (   -- THE CELL, concatenated in a FIXED axis order that the parity`);
+    C.push(`  -- stamp records: two twins agreeing on the covariates but spelling the`);
+    C.push(`  -- cell differently would score the same subject differently, and no`);
+    C.push(`  -- comparison of NUMBERS would say so.`);
+    C.push(`  SELECT s.*, ${p.cellAxes.map((_a, j) => `ax${j}`).join(` || '|' || `)} AS cell FROM subj0 s`);
+    C.push(`),`);
+  } else {
+    C.push(`subj AS (   -- one row per cohort member: arm, CELL, and the balance covariates`);
+    C.push(`  SELECT c.enrolid,`);
+    C.push(`         CASE WHEN ${armExpr} = '${q(p.treatedLevel)}' THEN 1 ELSE 0 END AS treated,`);
+    /* THE CELL. Concatenated in a FIXED axis order, which the parity stamp
+     * records: two twins that agreed on the covariates but spelled the cell
+     * differently would produce different scores from the same data, and no
+     * comparison of NUMBERS would say so. */
+    C.push(`         ${p.cellAxes.map((a) => cellExprSql(a, ctx)).join(` || '|' || `)} AS cell,`);
+    C.push(`         CAST(${d.year("c.index_date")} - dm.dobyr AS DOUBLE PRECISION) AS age_val,`);
+    C.push(`         CASE WHEN dm.sex = '1' THEN 1.0 ELSE 0.0 END AS sex_male${needCci ? `,` : ``}`);
+    if (needCci) C.push(`         CAST(0 AS DOUBLE PRECISION) AS cci_val`);
+    C.push(`  FROM cohort c`);
+    C.push(`  LEFT JOIN demo1 dm ON dm.enrolid = c.enrolid`);
+    if (viaNdc) {
+      C.push(`  JOIN ${wp}_ndc_lookup nl`);
+      C.push(`    ON nl.code_list_id = '${q(indexListId)}' AND nl.ndcnum = c.index_code`);
+    }
+    C.push(`  WHERE ${armExpr} IN ('${q(p.referenceLevel)}', '${q(p.treatedLevel)}')`);
+    C.push(`),`);
   }
-  C.push(`  WHERE ${armExpr} IN ('${q(p.referenceLevel)}', '${q(p.treatedLevel)}')`);
-  C.push(`),`);
   C.push(...psSqlCtes({ subjectsCte: "subj", estimand: an.estimand, stabilized: an.stabilized, trim: an.trim }));
 
   /* Positivity, from the cell table: a cell with no control (or no treated)
@@ -246,6 +269,18 @@ function sqlPropensityScore(ctx: SqlCtx, an: PropensityScoreAnalysis, suffix: st
     C.push(`  GROUP BY b.m_t, b.m_c, b.v_t, b.v_c, b.sw_t, b.sw_c, b.sw2_t, b.sw2_c, b.swx_t, b.swx_c`);
     C.push(`),`);
   });
+  /* BAND OCCUPANCY, over the analysis set the weights are computed on. */
+  if (p.slots.length > 0) C.push(...bandOccupancySqlCte({ from: "psk", slots: p.slots, alias: "bocc" }));
+  /* STRATIFICATION, one block per balance covariate. The strata themselves do
+   * not depend on which covariate is contrasted — the boundaries come from the
+   * SCORE — so the design rows are read from the first block. */
+  if (p.stratified) {
+    p.balance.forEach((b, i) => {
+      C.push(...psStratSqlCtes({
+        scoredCte: "psk", outcomeCol: balCol(b), strata: CONVENTIONAL_STRATA, prefix: `s${i}`,
+      }));
+    });
+  }
   C[C.length - 1] = C[C.length - 1].replace(/,\s*$/, "");
 
   const STR = (e: string) => `CAST(${e} AS VARCHAR)`;
@@ -323,6 +358,57 @@ function sqlPropensityScore(ctx: SqlCtx, an: PropensityScoreAnalysis, suffix: st
       ` ELSE 'improved, but still above the conventional 0.1 threshold' END`, `bal${i}`));
   });
 
+  /* COARSENING — the cut points that were consumed, and who sits in each band.
+   * Emitted whenever a covariate was banded, whatever the occupancy turns out
+   * to be: what it says is true of every banding, not only the bad ones. */
+  if (p.slots.length > 0) {
+    const bandedAxes = p.cellAxes.filter((a) => a.kind === "banded");
+    parts.push(row("coarsening", cmp, "bands_declared", ORD_COARSEN, `CAST(${p.slots.length} AS NUMERIC)`,
+      `'${q(bandedAxes.map((a) => `${stratLabel(a.label)} cut at ${(a.cutPoints ?? []).map(cutLit).join("/")}`).join("; "))}. Left-closed, right-open, plus an Unknown band for missing values. CONFOUNDING WITHIN A BAND IS UNCONTROLLED - the model adjusts for the band, not the value - and a WIDER band controls LESS'`,
+      "bocc"));
+    p.slots.forEach((s) => {
+      parts.push(row("coarsening", s.label, `band_${s.ord}_treated`, ORD_COARSEN + s.ord * 2 - 1,
+        `CAST(b${s.ord}_t AS NUMERIC)`,
+        `'treated subjects in band ${q(s.label)} of ${q(stratLabel(s.covariateLabel))}. Everyone here is one covariate value to the score'`, "bocc"));
+      parts.push(row("coarsening", s.label, `band_${s.ord}_control`, ORD_COARSEN + s.ord * 2,
+        `CAST(b${s.ord}_c AS NUMERIC)`,
+        `CASE WHEN (b${s.ord}_t + b${s.ord}_c) > 0 AND (b${s.ord}_t = 0 OR b${s.ord}_c = 0)` +
+        ` THEN 'THIS BAND HOLDS ONE ARM ONLY. That is a positivity violation, and the balance table will NOT show it: the standardized difference of a coarsened covariate can sit below 0.1 while a whole band has no counterpart in the other arm'` +
+        ` ELSE 'both arms occupy this band' END`, "bocc"));
+    });
+    parts.push(row("coarsening", cmp, "bands_with_one_arm", ORD_COARSEN + p.slots.length * 2 + 1,
+      `CAST(${oneArmBandCountSql(p.slots)} AS NUMERIC)`,
+      `CASE WHEN (${oneArmBandCountSql(p.slots)}) > 0` +
+      ` THEN 'BANDS WITH NO COUNTERPART. Subjects in them cannot be balanced by any weighting, and coarsening is what created the band they are stranded in - a narrower cut would split them differently, a wider one would hide them'` +
+      ` ELSE 'every non-empty band holds both arms' END`, "bocc"));
+  }
+
+  /* STRATIFICATION — the strata that could be formed, and the ones that
+   * estimate nothing. */
+  if (p.stratified) {
+    parts.push(row("strata", cmp, "strata_requested", ORD_STRATA, `CAST(${CONVENTIONAL_STRATA} AS NUMERIC)`,
+      `'the CONVENTIONAL ${CONVENTIONAL_STRATA} (Rosenbaum & Rubin 1983). A convention, not a property of this study'`, "s0stp"));
+    parts.push(row("strata", cmp, "strata_formed", ORD_STRATA + 1, `CAST(strata_formed AS NUMERIC)`,
+      `CASE WHEN strata_formed < ${CONVENTIONAL_STRATA}` +
+      ` THEN 'FEWER STRATA THAN REQUESTED. Boundaries fall BETWEEN distinct score values and never inside one, so a saturated score with few distinct values cannot be cut into ${CONVENTIONAL_STRATA} parts. A program that reported "quintiles" here would be describing something it did not build'` +
+      ` ELSE 'every requested stratum was formed' END`, "s0stp"));
+    parts.push(row("strata", cmp, "strata_one_arm_only", ORD_STRATA + 2, `CAST(strata_one_arm AS NUMERIC)`,
+      `'strata containing only treated subjects, or only controls. They have NO contrast to estimate: their contribution is NULL and they are excluded from the pooled estimate, never zero - zero is a real estimate and would be pooled as though it had been measured'`, "s0stp"));
+    parts.push(row("strata", cmp, "subjects_pooled", ORD_STRATA + 3, `CAST(n_pooled AS NUMERIC)`,
+      `'subjects in strata that HAVE both arms. This is the population the stratified estimate below describes'`, "s0stp"));
+    parts.push(row("strata", cmp, "subjects_dropped", ORD_STRATA + 4, `CAST(n_dropped AS NUMERIC)`,
+      `CASE WHEN n_dropped > 0` +
+      ` THEN 'DROPPED, because their stratum holds one arm only. The pooled estimate below is not the effect in the cohort - it is the effect among the subjects who had a counterpart at a similar score'` +
+      ` ELSE 'no subject was dropped: every formed stratum holds both arms' END`, "s0stp"));
+    p.balance.forEach((b, i) => {
+      const label = stratLabel(b.label);
+      parts.push(row("strata", label, "stratified_difference", ORD_STRATA + 10 + i,
+        d.roundN(`num / NULLIF(n_pooled, 0)`, 5),
+        `'stratum-size-weighted average of the within-stratum differences (treated minus control) in ${q(label)}, over strata with BOTH arms. This analysis declares no OUTCOME, so what is pooled is the adjusted difference in a covariate, not an effect on an outcome'`,
+        `s${i}stp`));
+    });
+  }
+
   parts.forEach((rowsOut, i) => {
     if (i > 0) L.push(`  UNION ALL`);
     L.push(...rowsOut);
@@ -337,10 +423,16 @@ function sqlPropensityScore(ctx: SqlCtx, an: PropensityScoreAnalysis, suffix: st
   return {
     slug: `ps${suffix}`,
     title: `Propensity score${suffix ? ` (${an.label})` : ""}`,
-    subtitle: `saturated propensity score + ${an.estimand.toUpperCase()} weights + balance before/after`,
+    subtitle: p.stratified
+      ? `saturated propensity score + stratification on distinct score values + balance`
+      : `saturated propensity score + ${an.estimand.toUpperCase()} weights + balance before/after`,
     extra: [
       `Analysis: ${oneLine(an.label)} (id ${an.id}).`,
       `Treated ${p.treatedLevel} vs reference ${p.referenceLevel}; score cells: ${p.cellAxes.map((c) => c.label).join(" x ")}.`,
+      ...(p.slots.length > 0
+        ? [`COARSENED: ${p.cellAxes.filter((a) => a.kind === "banded").map((a) => `${a.label} cut at ${(a.cutPoints ?? []).map(cutLit).join("/")}`).join("; ")}. Confounding WITHIN a band is uncontrolled.`]
+        : []),
+      ...(p.stratified ? [`Strata requested: ${CONVENTIONAL_STRATA}, with boundaries BETWEEN distinct score values (never NTILE).`] : []),
     ],
     body: L.join("\n"),
   };
@@ -370,7 +462,8 @@ function sasPropensityScore(ctx: SasCtx, an: PropensityScoreAnalysis, num: strin
     ]),
     `/* ${parityStamp("propensity_score", propensityScoreParity(an, {
       referenceLevel: p.referenceLevel, treatedLevel: p.treatedLevel,
-      cellAxes: p.cellAxes.map((c) => c.axis), balanceTerms: p.balance.map((c) => stratLabel(c.label)),
+      cellAxes: p.cellAxes.map(axisStamp), balanceTerms: p.balance.map((c) => stratLabel(c.label)),
+      bandings: p.bandings, strataRequested: p.stratified ? CONVENTIONAL_STRATA : undefined,
     }))} */`,
     ``,
   ];
@@ -381,11 +474,17 @@ function sasPropensityScore(ctx: SasCtx, an: PropensityScoreAnalysis, num: strin
     `/* REVIEW - method notes (always emitted):`,
     ...PROPENSITY_SCORE_METHOD_NOTES.map((n) => `   * ${cmt(n)}`),
     `*/`,
+  );
+  const coarseSas = coarseningNotes(p.cellAxes);
+  if (coarseSas.length > 0) {
+    lines.push(`/* REVIEW - DECLARED COARSENING (always emitted when a covariate is banded):`, ...coarseSas.map((n) => `   * ${cmt(n)}`), `*/`);
+  }
+  lines.push(
     ``,
     ...INCLUDE_SETUP,
   );
   if (!p.emittable) {
-    lines.push(`/* NOT EMITTED: ${an.method !== "iptw" ? `method "${cmt(an.method)}" is not emitted - see readiness.` : `the exposure or the propensity covariates did not resolve.`} */`, ``);
+    lines.push(`/* NOT EMITTED: ${an.method !== "iptw" && an.method !== "stratification" ? `method "${cmt(an.method)}" is not emitted - see readiness.` : `the exposure or the propensity covariates did not resolve.`} */`, ``);
     return { path: `sas/${num}_ps${suffix}.sas`, language: "sas", title: `${num} Propensity score (not emitted)`, content: lines.join("\n") };
   }
 
@@ -424,21 +523,26 @@ function sasPropensityScore(ctx: SasCtx, an: PropensityScoreAnalysis, num: strin
     `  by enrolid;`,
     `  if first.enrolid;`,
     `  length cell $200 ${p.cellAxes.map((_, j) => `_c${j}`).join(" ")} $40;`,
+    ...(p.slots.length > 0 ? [`  length ${p.cellAxes.map((_, j) => `ax${j}`).join(" ")} $40;`] : []),
     `  treated = (arm = "${sq(p.treatedLevel)}");`,
+    ...(p.slots.length > 0 ? sasBandedValueStep().map((l) => `  ${l}`) : []),
     ...p.cellAxes.flatMap((a, j) => [
-      `  /* cell axis: ${cmt(a.label)} (${a.axis}) */`,
-      ...cellAssignSas(a.axis, `_c${j}`).map((l) => `  ${l}`),
+      `  /* cell axis: ${cmt(a.label)} (${a.kind}) */`,
+      ...cellAssignSas(a, `_c${j}`).map((l) => `  ${l}`),
     ]),
     `  /* the CELL, in the SAME axis order as the SQL twin - the parity stamp`,
     `     records that order, because two twins that agreed on the covariates and`,
     `     spelled the cell differently would produce different scores and no`,
     `     comparison of numbers would say so. */`,
     `  cell = ${p.cellAxes.map((_, j) => `strip(_c${j})`).join(` || '|' || `)};`,
+    /* Carried as named columns so a COARSENED axis can be reported on, which is
+     * the same reason the SQL twin splits its subject CTE in two. */
+    ...(p.slots.length > 0 ? p.cellAxes.map((_a, j) => `  ax${j} = _c${j};`) : []),
     `  age_val  = year(index_date) - dobyr;`,
     `  sex_male = (sex = '1');`,
     ...(needCciS ? [`  cci_val  = 0;`] : []),
     `  if arm not in ("${sq(p.referenceLevel)}", "${sq(p.treatedLevel)}") then delete;`,
-    `  keep enrolid treated cell age_val sex_male${needCciS ? " cci_val" : ""};`,
+    `  keep enrolid treated cell age_val sex_male${needCciS ? " cci_val" : ""}${p.slots.length > 0 ? ` ${p.cellAxes.map((_a, j) => `ax${j}`).join(" ")}` : ""};`,
     `run;`,
     ``,
     ...levelCheck(`work._${num}_subj`, "cohort members scored", [`sum(treated) as treated`]),
@@ -503,6 +607,16 @@ function sasPropensityScore(ctx: SasCtx, an: PropensityScoreAnalysis, num: strin
       ``,
     );
   });
+  if (p.slots.length > 0) {
+    lines.push(...bandOccupancySasSteps({ num, from: `work._${num}_psk`, slots: p.slots }));
+  }
+  if (p.stratified) {
+    p.balance.forEach((b, i) => {
+      lines.push(...psStratSasSteps({
+        num: `${num}_s${i}`, subjT: `work._${num}_psk`, outcomeCol: balCol(b), strata: CONVENTIONAL_STRATA,
+      }));
+    });
+  }
 
   lines.push(
     `data ${outT};`,
@@ -576,9 +690,82 @@ function sasPropensityScore(ctx: SasCtx, an: PropensityScoreAnalysis, num: strin
       ``,
     );
   });
+
+  /* COARSENING rows, in their own data step so the occupancy table can be read
+   * directly. Emitted whenever a covariate was banded, however the occupancy
+   * came out - the caution is true of every banding, not only the bad ones. */
+  const extraSets: string[] = [];
+  if (p.slots.length > 0) {
+    const bandedAxes = p.cellAxes.filter((a) => a.kind === "banded");
+    lines.push(
+      `data work._${num}_co;`,
+      `  length measure $20 component $12 term $60 statistic $32 method $320;`,
+      `  set work._${num}_bocc;`,
+      `  measure = "${MEASURE}"; component = 'coarsening';`,
+      `  term = "${sq(cmp)}"; statistic='bands_declared'; ord=${ORD_COARSEN}; estimate=${p.slots.length};`,
+      `  method='${sq(bandedAxes.map((a) => `${stratLabel(a.label)} cut at ${(a.cutPoints ?? []).map(cutLit).join("/")}`).join("; "))}. Left-closed, right-open, plus an Unknown band for missing values. CONFOUNDING WITHIN A BAND IS UNCONTROLLED - the model adjusts for the band, not the value - and a WIDER band controls LESS'; output;`,
+      ...p.slots.flatMap((s) => [
+        `  term = "${sq(s.label)}"; statistic='band_${s.ord}_treated'; ord=${ORD_COARSEN + s.ord * 2 - 1}; estimate=b${s.ord}_t;`,
+        `  method='treated subjects in band ${sq(s.label)} of ${sq(stratLabel(s.covariateLabel))}. Everyone here is one covariate value to the score'; output;`,
+        `  statistic='band_${s.ord}_control'; ord=${ORD_COARSEN + s.ord * 2}; estimate=b${s.ord}_c;`,
+        `  if (b${s.ord}_t + b${s.ord}_c) > 0 and (b${s.ord}_t = 0 or b${s.ord}_c = 0) then method='THIS BAND HOLDS ONE ARM ONLY. That is a positivity violation, and the balance table will NOT show it: the standardized difference of a coarsened covariate can sit below 0.1 while a whole band has no counterpart in the other arm';`,
+        `  else method='both arms occupy this band'; output;`,
+      ]),
+      `  term = "${sq(cmp)}"; statistic='bands_with_one_arm'; ord=${ORD_COARSEN + p.slots.length * 2 + 1};`,
+      `  estimate = ${oneArmBandCountSas(p.slots)};`,
+      `  if estimate > 0 then method='BANDS WITH NO COUNTERPART. Subjects in them cannot be balanced by any weighting, and coarsening is what created the band they are stranded in - a narrower cut would split them differently, a wider one would hide them';`,
+      `  else method='every non-empty band holds both arms'; output;`,
+      `  keep measure component term statistic ord estimate method;`,
+      `run;`,
+      ``,
+    );
+    extraSets.push(`work._${num}_co`);
+  }
+
+  if (p.stratified) {
+    lines.push(
+      `data work._${num}_sd;`,
+      `  length measure $20 component $12 term $60 statistic $32 method $320;`,
+      `  set work._${num}_s0_stp;`,
+      `  measure = "${MEASURE}"; component = 'strata'; term = "${cmp}";`,
+      `  statistic='strata_requested'; ord=${ORD_STRATA}; estimate=${CONVENTIONAL_STRATA};`,
+      `  method='the CONVENTIONAL ${CONVENTIONAL_STRATA} (Rosenbaum & Rubin 1983). A convention, not a property of this study'; output;`,
+      `  statistic='strata_formed'; ord=${ORD_STRATA + 1}; estimate=strata_formed;`,
+      `  if strata_formed < ${CONVENTIONAL_STRATA} then method='FEWER STRATA THAN REQUESTED. Boundaries fall BETWEEN distinct score values and never inside one, so a saturated score with few distinct values cannot be cut into ${CONVENTIONAL_STRATA} parts. A program that reported "quintiles" here would be describing something it did not build';`,
+      `  else method='every requested stratum was formed'; output;`,
+      `  statistic='strata_one_arm_only'; ord=${ORD_STRATA + 2}; estimate=strata_one_arm;`,
+      `  method='strata containing only treated subjects, or only controls. They have NO contrast to estimate: their contribution is NULL and they are excluded from the pooled estimate, never zero - zero is a real estimate and would be pooled as though it had been measured'; output;`,
+      `  statistic='subjects_pooled'; ord=${ORD_STRATA + 3}; estimate=n_pooled;`,
+      `  method='subjects in strata that HAVE both arms. This is the population the stratified estimate below describes'; output;`,
+      `  statistic='subjects_dropped'; ord=${ORD_STRATA + 4}; estimate=n_dropped;`,
+      `  if n_dropped > 0 then method='DROPPED, because their stratum holds one arm only. The pooled estimate below is not the effect in the cohort - it is the effect among the subjects who had a counterpart at a similar score';`,
+      `  else method='no subject was dropped: every formed stratum holds both arms'; output;`,
+      `  keep measure component term statistic ord estimate method;`,
+      `run;`,
+      ``,
+    );
+    extraSets.push(`work._${num}_sd`);
+    p.balance.forEach((b, i) => {
+      const label = sq(stratLabel(b.label));
+      lines.push(
+        `data work._${num}_sr${i};`,
+        `  length measure $20 component $12 term $60 statistic $32 method $320;`,
+        `  set work._${num}_s${i}_stp;`,
+        `  measure = "${MEASURE}"; component = 'strata'; term = "${label}";`,
+        `  statistic='stratified_difference'; ord=${ORD_STRATA + 10 + i};`,
+        `  if n_pooled > 0 then estimate = round(num / n_pooled, 0.00001); else estimate = .;`,
+        `  method='stratum-size-weighted average of the within-stratum differences (treated minus control) in ${label}, over strata with BOTH arms. This analysis declares no OUTCOME, so what is pooled is the adjusted difference in a covariate, not an effect on an outcome'; output;`,
+        `  keep measure component term statistic ord estimate method;`,
+        `run;`,
+        ``,
+      );
+      extraSets.push(`work._${num}_sr${i}`);
+    });
+  }
+
   lines.push(
     `data ${outT};`,
-    `  set ${outT}${p.balance.map((_, i) => ` work._${num}_br${i}`).join("")};`,
+    `  set ${outT}${p.balance.map((_, i) => ` work._${num}_br${i}`).join("")}${extraSets.map((t) => ` ${t}`).join("")};`,
     `run;`,
     ``,
     `proc sort data=${outT}; by ord; run;`,

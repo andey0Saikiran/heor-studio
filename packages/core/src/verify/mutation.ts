@@ -37,6 +37,7 @@ import { GOLD_A_SPEC, GOLD_A_OPTS } from "./fixture";
 import { GOLD_F_SPEC, GOLD_F_OPTS } from "./fixture-f";
 import { GOLD_G_SPEC, GOLD_G_OPTS } from "./fixture-g";
 import { GOLD_H_SPEC, GOLD_H_OPTS } from "./fixture-h";
+import { GOLD_I_SPEC, GOLD_I_OPTS } from "./fixture-i";
 import type { StudySpec } from "../spec/types";
 import type { Check } from "./run";
 
@@ -63,8 +64,13 @@ interface Mutation {
    * declared. A mutation of the CPI factor would then find nothing to replace
    * and read as vacuous rather than as a test. Naming the fixture says which
    * emission the corruption is about.
+   *
+   * Gold I is the same story for the Wave-2 options: Gold A emits
+   * propensity_score, iptw_outcome and g_formula with no banding, no
+   * stratification and no E-value, so every corruption of those would land on a
+   * program that never asked for them.
    */
-  source?: "A" | "F" | "G" | "H";
+  source?: "A" | "F" | "G" | "H" | "I";
   /**
    * Set when the mutation is DELIBERATELY not idempotent, with the reason.
    *
@@ -1172,6 +1178,68 @@ const MUTATIONS: Mutation[] = [
     kind: "g_formula", lang: "sas",
     apply: (t) => t.replace(/if v1 <= 0 or v0 <= 0 then method='AN ARM HAS ZERO/g, "if 0 then method='AN ARM HAS ZERO"),
   },
+  /* ---- Wave 2: declared coarsening, stratification, E-values, controls ----
+   *
+   * All pinned to Gold I, the only fixture that declares any of them. Gold A
+   * emits the same three kinds with none of these options, so a corruption
+   * aimed at Gold A's emission would find nothing and read as vacuous.
+   */
+  {
+    /* A BAND BOUNDARY MOVES. The label beside it still says '<50', so the
+     * result table reads exactly as before while a subject aged 50-54 has
+     * silently changed covariate value - and therefore changed cell, score,
+     * weight and stratum. Nothing about the output looks unusual. */
+    name: "SQL band boundary shifts (age cut 50 -> 55) while the label still says <50",
+    kind: "propensity_score", lang: "sql", source: "I",
+    apply: (t) => t.replace(/AS DOUBLE PRECISION\) < 50 THEN/g, "AS DOUBLE PRECISION) < 55 THEN"),
+  },
+  {
+    /* A ONE-ARM STRATUM CONTRIBUTES ZERO INSTEAD OF NULL. Zero is a real
+     * effect estimate: it is pooled as though it had been measured AND it
+     * enlarges the denominator, so the pooled number moves twice. On Gold I it
+     * moves from 185/42 to 185/48 while every count in the table stays put. */
+    name: "SQL pools a one-arm stratum as 0 instead of excluding it as NULL",
+    kind: "propensity_score", lang: "sql", source: "I",
+    apply: (t) => t.replace(/ELSE NULL END AS diff/g, "ELSE 0 END AS diff"),
+  },
+  {
+    /* THE CONVENTIONAL RECIPE. NTILE(K) over a SATURATED score cuts through
+     * tied groups - everyone in a covariate cell shares the score - so which
+     * subject lands on each side depends on row arrival order. That is the
+     * exact order-dependence that got greedy matching refused, and it produces
+     * a perfectly ordinary-looking set of quintiles. */
+    name: "SQL forms strata with NTILE instead of boundaries between distinct scores",
+    kind: "propensity_score", lang: "sql", source: "I",
+    apply: (t) => t.replace(
+      /LEAST\(5, FLOOR\(v\.n_below \* 5\.0 \/ NULLIF\(t\.n_all, 0\)\) \+ 1\)/g,
+      "NTILE(5) OVER (ORDER BY v.ps)"),
+  },
+  {
+    /* THE E-VALUE LOSES ITS SQUARE ROOT. RR + RR(RR-1) is still a number
+     * larger than RR, still monotone in RR, and still looks like an E-value -
+     * it is simply a different and much larger one, which reads as robustness. */
+    name: "SQL E-value drops the sqrt term (RR + RR(RR-1) instead of RR + sqrt(RR(RR-1)))",
+    kind: "iptw_outcome", lang: "sql", source: "I",
+    apply: (t) => t.replace(/rr \+ SQRT\(rr \* \(rr - 1\)\)/g, "rr + (rr * (rr - 1))"),
+  },
+  {
+    /* A NEGATIVE CONTROL SILENTLY PASSES. The upper limit of the breach test
+     * is widened while the row that PRINTS the threshold still says 1.25, so
+     * the table reports the declared threshold and the verdict was computed
+     * against another one. Gold I's fracture control (RR = 21/8) stops
+     * breaching and the suite reports "no control breached". */
+    name: "SQL widens the negative-control breach test while still printing the declared threshold",
+    kind: "negative_control", lang: "sql", source: "I",
+    apply: (t) => t.replace(/ > 1\.25 THEN 1/g, " > 100 THEN 1"),
+  },
+  {
+    /* THE RATIONALE GOES MISSING. Every ratio stays exactly the same, and the
+     * suite becomes a list of outcomes nobody argued for - which a reader
+     * cannot distinguish from a list of controls that were reasoned about. */
+    name: "SQL drops the rationale row beside each negative control",
+    kind: "negative_control", lang: "sql", source: "I",
+    apply: (t) => t.replace(/CAST\('rationale' AS VARCHAR\) AS statistic/g, "CAST('control_note' AS VARCHAR) AS statistic"),
+  },
 ];
 
 interface Program {
@@ -1211,6 +1279,7 @@ export function mutationChecks(): Check[] {
     { name: "F", spec: GOLD_F_SPEC, opts: GOLD_F_OPTS },
     { name: "G", spec: GOLD_G_SPEC, opts: GOLD_G_OPTS },
     { name: "H", spec: GOLD_H_SPEC, opts: GOLD_H_OPTS },
+    { name: "I", spec: GOLD_I_SPEC, opts: GOLD_I_OPTS },
   ].map(({ name, spec, opts }) => {
     const sas = emitSas(spec, opts);
     return {

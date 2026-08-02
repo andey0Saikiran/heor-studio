@@ -30,6 +30,7 @@ import { fineGrayModule } from "./fine_gray";
 import { propensityScoreModule } from "./propensity_score";
 import { iptwOutcomeModule } from "./iptw_outcome";
 import { gFormulaModule } from "./g_formula";
+import { negativeControlModule } from "./negative_control";
 import { adherenceModule } from "./adherence";
 import { treatmentSwitchingModule } from "./treatment_switching";
 
@@ -52,6 +53,7 @@ export const ANALYSIS_MODULES: Partial<Record<Analysis["kind"], AnalysisModule<n
   propensity_score: propensityScoreModule as AnalysisModule<never>,
   iptw_outcome: iptwOutcomeModule as AnalysisModule<never>,
   g_formula: gFormulaModule as AnalysisModule<never>,
+  negative_control: negativeControlModule as AnalysisModule<never>,
   adherence: adherenceModule as AnalysisModule<never>,
   treatment_switching: treatmentSwitchingModule as AnalysisModule<never>,
 };

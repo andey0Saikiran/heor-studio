@@ -22,6 +22,8 @@ import { GOLD_E_SPEC, GOLD_E_OPTS, EXPECTED_E, fixtureESeedSql } from "./fixture
 import { GOLD_F_SPEC, GOLD_F_OPTS, EXPECTED_F, fixtureFSeedSql } from "./fixture-f";
 import { GOLD_G_SPEC, GOLD_G_OPTS, EXPECTED_G, fixtureGSeedSql } from "./fixture-g";
 import { GOLD_H_SPEC, GOLD_H_OPTS, EXPECTED_H, fixtureHSeedSql } from "./fixture-h";
+import { GOLD_I_SPEC, GOLD_I_OPTS, EXPECTED_I, fixtureISeedSql } from "./fixture-i";
+import { eValueSql, nearestNullLimitSql } from "../emitters/evalue-core";
 import { EMITTABLE_ANALYSIS_KINDS } from "../spec/types";
 import type { StudySpec, EmitOptions } from "../index";
 
@@ -1246,6 +1248,315 @@ export async function verifyGoldH(): Promise<Check[]> {
 
   out.push(...sasSqlParityChecks(GOLD_H_SPEC, GOLD_H_OPTS));
   out.push(...sasStructureChecks(emitSas(GOLD_H_SPEC, GOLD_H_OPTS)));
+  return out;
+}
+
+/**
+ * Gold Case I — the causal layer's second wave, executed.
+ *
+ * Four things that each move a number without changing the shape of a table:
+ * a DECLARED COARSENING of a continuous covariate, STRATIFICATION on the
+ * resulting score, NEGATIVE CONTROLS against a threshold declared in advance,
+ * and E-VALUES on the estimate the same program computed. Every expected value
+ * is an exact fraction written down in fixture-i.ts BEFORE the modules ran.
+ *
+ * The two assertions that matter most are both about a REFUSAL to report:
+ * the one-arm stratum whose contribution is NULL rather than zero, and the
+ * confidence limit that crosses the null so the limit E-value is 1 by
+ * construction and must be explained rather than printed.
+ */
+export async function verifyGoldI(): Promise<Check[]> {
+  const { db, ok, steps } = await seedAndRun(GOLD_I_SPEC, GOLD_I_OPTS, fixtureISeedSql());
+  const out: Check[] = [];
+  if (!ok) {
+    return [{
+      name: "Gold Case I executes",
+      status: "fail",
+      detail: steps.filter((x) => !x.ok).map((x) => `${x.path}: ${x.error}`).join(" | "),
+    }];
+  }
+  const eq = (name: string, got: number | null | undefined, want: number) =>
+    out.push({ name, status: Number(got) === want ? "pass" : "fail", detail: `expected ${want}, got ${got}` });
+  const approx = (name: string, got: number, want: number, tol = 0.00001) =>
+    out.push({ name, status: Math.abs(got - want) <= tol ? "pass" : "fail", detail: `expected ${want}±${tol}, got ${got}` });
+  const push = (name: string, cond: boolean, detail: string) =>
+    out.push({ name, status: cond ? "pass" : "fail", detail });
+
+  eq("I: cohort N = 8", await scalar<number>(db, "SELECT count(*)::int FROM tz_i_cohort"), EXPECTED_I.cohortN);
+
+  const cell = async (table: string, statistic: string, extra = "") =>
+    (
+      await rows<{ estimate: number | null; method: string; term?: string }>(
+        db,
+        `SELECT estimate::float8, method FROM ${table} WHERE statistic = '${statistic}'${extra}`,
+      )
+    )[0];
+
+  /* ================= DECLARED COARSENING ================= */
+  const ps = (s: string, extra = "") => cell("tz_i_ps", s, extra);
+
+  eq("I: 4 bands declared on age (3 intervals + Unknown)",
+    Number((await ps("bands_declared"))?.estimate), EXPECTED_I.bandsDeclared);
+  const bandsNote = await ps("bands_declared");
+  push(
+    "I: and the program ALWAYS says confounding within a band is uncontrolled and a wider band controls less",
+    /CONFOUNDING WITHIN A BAND IS UNCONTROLLED/.test(bandsNote?.method ?? "")
+      && /WIDER band controls LESS/.test(bandsNote?.method ?? ""),
+    (bandsNote?.method ?? "no row").slice(0, 120),
+  );
+  push(
+    "I: and it names the cut points it consumed",
+    /cut at 50\/60/.test(bandsNote?.method ?? ""),
+    (bandsNote?.method ?? "no row").slice(0, 80),
+  );
+
+  /* BAND OCCUPANCY BY ARM — the positivity signal a balance table cannot give. */
+  for (let j = 0; j < EXPECTED_I.bandOccupancy.length; j++) {
+    const [wantT, wantC] = EXPECTED_I.bandOccupancy[j];
+    const label = EXPECTED_I.bandLabels[j];
+    eq(`I: band ${label} holds ${wantT} treated`, Number((await ps(`band_${j + 1}_treated`))?.estimate), wantT);
+    eq(`I: band ${label} holds ${wantC} control`, Number((await ps(`band_${j + 1}_control`))?.estimate), wantC);
+  }
+  /* P1 is 49 and P2 is 50 — one on each side of the first cut. If the boundary
+   * moved by one, band 1 would hold 2 treated and band 2 would hold 1. */
+  push(
+    "I: the cut at 50 separates a REAL subject on each side (49 -> band 1, 50 -> band 2)",
+    Number((await ps("band_1_treated"))?.estimate) === 1 && Number((await ps("band_2_treated"))?.estimate) === 2,
+    `band1 treated=${(await ps("band_1_treated"))?.estimate}, band2 treated=${(await ps("band_2_treated"))?.estimate}`,
+  );
+  eq("I: exactly 1 band holds one arm only", Number((await ps("bands_with_one_arm"))?.estimate), EXPECTED_I.bandsWithOneArm);
+  const oneArmBand = await ps("band_3_control");
+  push(
+    "I: and the >=60 band SAYS it is a positivity violation the balance table cannot show",
+    /ONE ARM ONLY/.test(oneArmBand?.method ?? "") && /balance table will NOT show it/.test(oneArmBand?.method ?? ""),
+    (oneArmBand?.method ?? "no row").slice(0, 120),
+  );
+
+  /* The saturated score over the BANDS — the coarsening is what made it exist. */
+  eq("I: 3 occupied cells", Number((await ps("n_cells"))?.estimate), EXPECTED_I.nCells);
+  approx("I: minimum score = 1/4", Number((await ps("min_score"))?.estimate), EXPECTED_I.minScore);
+  eq("I: maximum score = 1 (the >=60 band is entirely treated)", Number((await ps("max_score"))?.estimate), EXPECTED_I.maxScore);
+  eq("I: 1 subject off support", Number((await ps("subjects_off_support"))?.estimate), EXPECTED_I.subjectsOffSupport);
+  eq("I: treated pseudo-population = 8", Number((await ps("pseudo_population_treated"))?.estimate), EXPECTED_I.pseudoTreated);
+  eq("I: control pseudo-population = 7", Number((await ps("pseudo_population_control"))?.estimate), EXPECTED_I.pseudoControl);
+  eq("I: the gap of 1 IS P4", Number((await ps("pseudo_population_gap"))?.estimate), EXPECTED_I.pseudoGap);
+
+  /* ================= STRATIFICATION ================= */
+  eq("I: 5 strata REQUESTED (the Rosenbaum-Rubin convention)",
+    Number((await ps("strata_requested"))?.estimate), EXPECTED_I.strataRequested);
+  const formed = await ps("strata_formed");
+  eq("I: only 3 strata could be FORMED", Number(formed?.estimate), EXPECTED_I.strataFormed);
+  push(
+    "I: and the program says so rather than calling three groups quintiles",
+    /FEWER STRATA THAN REQUESTED/.test(formed?.method ?? "") && /BETWEEN distinct score values/.test(formed?.method ?? ""),
+    (formed?.method ?? "no row").slice(0, 130),
+  );
+  const oneArm = await ps("strata_one_arm_only");
+  eq("I: 1 stratum holds one arm only", Number(oneArm?.estimate), EXPECTED_I.strataOneArm);
+  push(
+    "I: and its contribution is NULL, not zero — zero is a real estimate and would be pooled",
+    /contribution is NULL/.test(oneArm?.method ?? "") && /never zero/.test(oneArm?.method ?? ""),
+    (oneArm?.method ?? "no row").slice(0, 130),
+  );
+  eq("I: 7 subjects pooled", Number((await ps("subjects_pooled"))?.estimate), EXPECTED_I.subjectsPooled);
+  const dropped = await ps("subjects_dropped");
+  eq("I: 1 subject dropped with the one-arm stratum", Number(dropped?.estimate), EXPECTED_I.subjectsDropped);
+  push(
+    "I: and the program says the pooled estimate is not the effect in the cohort",
+    /not the effect in the cohort/.test(dropped?.method ?? ""),
+    (dropped?.method ?? "no row").slice(0, 110),
+  );
+
+  /* THE NUMBER THE NULL-NOT-ZERO RULE DECIDES. Pooling the one-arm stratum as
+   * zero would put its subject in the denominator and give 185/48 = 3.85417. */
+  const sd = Number((await ps("stratified_difference"))?.estimate);
+  approx("I: stratified age difference = (185/6)/7 = 185/42", sd, EXPECTED_I.stratifiedDifference);
+  push(
+    "I: and it is NOT 185/48 — the value a stratum contributing 0 instead of NULL would give",
+    Math.abs(sd - EXPECTED_I.stratifiedDifferenceIfZeroPooled) > 0.001,
+    `got ${sd}, the zero-pooled value would be ${EXPECTED_I.stratifiedDifferenceIfZeroPooled}`,
+  );
+  approx("I: raw-age SMD before weighting = -8.5/sqrt(163/6)",
+    Number((await ps("smd_unweighted"))?.estimate), EXPECTED_I.ageSmdUnweighted);
+
+  /* ================= THE IPTW EFFECT AND ITS E-VALUE ================= */
+  const iw = (s: string, comp = "") => cell("tz_i_iptw", s, comp ? ` AND component = '${comp}'` : "");
+  const x = EXPECTED_I.iptw;
+
+  eq("I: iptw analysis set = 8 (no washout exclusions)", Number((await iw("analysis_set_n"))?.estimate), x.analysisSetN);
+  eq("I: iptw 1 subject off support", Number((await iw("subjects_off_support"))?.estimate), x.offSupport);
+  eq("I: iptw effect is NOT identified", Number((await iw("identified"))?.estimate), x.identified);
+  approx("I: weighted risk (treated) = 1/2", Number((await iw("weighted_risk_treated"))?.estimate), x.riskTreated);
+  approx("I: weighted risk (control) = 3/7", Number((await iw("weighted_risk_control"))?.estimate), x.riskControl);
+  {
+    const t = (await rows<{ se: number }>(db, `SELECT se::float8 FROM tz_i_iptw WHERE statistic = 'weighted_risk_treated'`))[0];
+    const c = (await rows<{ se: number }>(db, `SELECT se::float8 FROM tz_i_iptw WHERE statistic = 'weighted_risk_control'`))[0];
+    approx("I: sandwich se (treated) = sqrt(43/512)", Number(t?.se), x.seTreated);
+    approx("I: sandwich se (control) = sqrt(192/2401)", Number(c?.se), x.seControl);
+  }
+  approx("I: risk difference = 1/14", Number((await iw("risk_difference", "effect"))?.estimate), x.riskDifference);
+  approx("I: risk ratio = 7/6", Number((await iw("risk_ratio"))?.estimate), x.riskRatio);
+  approx("I: odds ratio = 4/3", Number((await iw("odds_ratio"))?.estimate), x.oddsRatio);
+
+  /* THE E-VALUE, hand-derived: (7 + sqrt 7)/6. */
+  approx("I: E-value on RR = 7/6 is (7 + sqrt 7)/6 = 1.60763",
+    Number((await iw("risk_ratio_e_value"))?.estimate), x.eValue);
+  const evNote = await iw("risk_ratio_e_value");
+  push(
+    "I: and it says an E-value is NOT evidence a confounder exists or does not",
+    /NOT evidence a confounder exists or does not/.test(evNote?.method ?? "")
+      && /judgement about the subject, not a computation/.test(evNote?.method ?? ""),
+    (evNote?.method ?? "no row").slice(0, 130),
+  );
+  /* THE CROSSING BRANCH. The interval runs 0.20863 to 6.52413, so no
+   * confounding at all is needed and the limit E-value is 1 by construction. */
+  const nearest = await iw("limit_nearest_null");
+  push(
+    "I: the CI crosses the null, so there is no limit on the far side to bound",
+    nearest?.estimate === null && /CROSSES THE NULL/.test(nearest?.method ?? ""),
+    `estimate=${nearest?.estimate}; ${(nearest?.method ?? "").slice(0, 90)}`,
+  );
+  const limitEv = await iw("limit_e_value");
+  eq("I: the limit E-value is 1", Number(limitEv?.estimate), x.limitEValue);
+  push(
+    "I: and the 1 is EXPLAINED as compatibility with no effect, not printed bare",
+    /COMPATIBLE WITH NO EFFECT/.test(limitEv?.method ?? "") && /ONE BY CONSTRUCTION/.test(limitEv?.method ?? ""),
+    (limitEv?.method ?? "no row").slice(0, 130),
+  );
+  {
+    const rr = (await rows<{ ci_low: number; ci_high: number }>(
+      db, `SELECT ci_low::float8, ci_high::float8 FROM tz_i_iptw WHERE statistic = 'risk_ratio'`))[0];
+    approx("I: RR interval low = 0.20863", Number(rr?.ci_low), x.rrCi[0], 0.0001);
+    approx("I: RR interval high = 6.52413", Number(rr?.ci_high), x.rrCi[1], 0.001);
+  }
+
+  /* ================= THE WIDER BAND ================= */
+  const gf = (s: string, comp = "") => cell("tz_i_gform", s, comp ? ` AND component = '${comp}'` : "");
+  const g = EXPECTED_I.gform;
+
+  eq("I: the wider band gives 2 cells, not 3", Number((await gf("cells_total"))?.estimate), g.cellsTotal);
+  eq("I: only 1 of them has both arms", Number((await gf("cells_with_both_arms"))?.estimate), g.cellsWithBothArms);
+  eq("I: 7 subjects in the standardized analysis", Number((await gf("subjects_in_analysis"))?.estimate), g.subjectsInAnalysis);
+  eq("I: 1 excluded (P4, again)", Number((await gf("subjects_excluded"))?.estimate), g.subjectsExcluded);
+  approx("I: standardized risk (treated) = 1/3", Number((await gf("standardized_risk_treated"))?.estimate), g.g1);
+  approx("I: standardized risk (control) = 1/4", Number((await gf("standardized_risk_control"))?.estimate), g.g0);
+  approx("I: g-formula risk difference = 1/12", Number((await gf("risk_difference", "g_formula"))?.estimate), g.riskDifference);
+  approx("I: g-formula risk ratio = 4/3", Number((await gf("risk_ratio"))?.estimate), g.riskRatio);
+  /* E = 4/3 + sqrt((4/3)(1/3)) = 4/3 + 2/3 = 2, EXACTLY. */
+  approx("I: E-value on RR = 4/3 is EXACTLY 2", Number((await gf("risk_ratio_e_value"))?.estimate), g.eValue);
+  eq("I: its limit E-value is 1 too (this interval also crosses)", Number((await gf("limit_e_value"))?.estimate), g.limitEValue);
+  {
+    const idr = await gf("aipw_minus_g_formula");
+    push(
+      "I: AIPW equals the g-formula exactly on the coarsened cells",
+      Number(idr?.estimate) === 0 && /HOLDS/.test(idr?.method ?? ""),
+      `residual ${idr?.estimate}`,
+    );
+    const rdRow = (await rows<{ se: number }>(
+      db, `SELECT se::float8 FROM tz_i_gform WHERE statistic = 'risk_difference' AND component = 'aipw'`))[0];
+    approx("I: AIPW rd se = sqrt(2/27 + 3/64) (covariance is exactly 0 here)", Number(rdRow?.se), g.aipwRdSe, 0.0001);
+  }
+  eq("I: the wider banding declares 3 bands, not 4", Number((await gf("bands_declared"))?.estimate), g.bandsDeclared);
+  eq("I: and still strands exactly 1 band on one arm", Number((await gf("bands_with_one_arm"))?.estimate), g.bandsWithOneArm);
+  /* THE COMPARISON THE TWO BANDINGS EXIST TO MAKE. Same data, same outcome,
+   * different coarsening: 1/14 weighted on three bands against 1/12
+   * standardized over two. Neither is a mistake, and the difference is the
+   * coarsening plus the restriction. */
+  push(
+    "I: the two coarsenings give DIFFERENT effect estimates on identical data (1/14 vs 1/12)",
+    Math.abs(Number((await iw("risk_difference", "effect"))?.estimate) - Number((await gf("risk_difference", "g_formula"))?.estimate)) > 0.005,
+    `iptw ${(await iw("risk_difference", "effect"))?.estimate} vs g-formula ${(await gf("risk_difference", "g_formula"))?.estimate}`,
+  );
+
+  /* ================= NEGATIVE CONTROLS ================= */
+  const nc = (s: string, term = "") => cell("tz_i_negctl", s, term ? ` AND term = '${term}'` : "");
+  const n = EXPECTED_I.negctl;
+
+  eq("I: the declared bias threshold reaches the program as a number",
+    Number((await nc("bias_threshold"))?.estimate), n.threshold);
+  const thr = await nc("bias_threshold");
+  push(
+    "I: and it says a threshold chosen after seeing the estimate is not a test",
+    /DECLARED IN ADVANCE/.test(thr?.method ?? "") && /is not a test/.test(thr?.method ?? ""),
+    (thr?.method ?? "no row").slice(0, 110),
+  );
+  eq("I: the controls run on the SAME score, so 1 subject is off support there too",
+    Number((await nc("subjects_off_support"))?.estimate), n.offSupport);
+
+  approx("I: fracture control RR = 21/8 = 2.625", Number((await nc("adjusted_risk_ratio", "nc_fx"))?.estimate), n.fxRiskRatio);
+  const fxB = await nc("breaches_threshold", "nc_fx");
+  eq("I: and it BREACHES the declared threshold", Number(fxB?.estimate), n.fxBreaches);
+  push(
+    "I: the breach is called residual confounding, without claiming a direction for the primary estimate",
+    /RESIDUAL CONFOUNDING/.test(fxB?.method ?? "") && /does not say which way/.test(fxB?.method ?? ""),
+    (fxB?.method ?? "no row").slice(0, 130),
+  );
+  approx("I: dermatitis control RR = 63/64 = 0.98438", Number((await nc("adjusted_risk_ratio", "nc_derm"))?.estimate), n.dermRiskRatio);
+  const dermB = await nc("breaches_threshold", "nc_derm");
+  eq("I: and it does NOT breach", Number(dermB?.estimate), n.dermBreaches);
+  push(
+    "I: a pass is called WEAK reassurance, not a clean bill of health",
+    /WEAK reassurance/.test(dermB?.method ?? ""),
+    (dermB?.method ?? "no row").slice(0, 110),
+  );
+
+  /* THE RATIONALE, beside the number. A control without one is an arbitrary
+   * outcome and nothing else in the table can tell the difference. */
+  for (const [id, needle] of [["nc_fx", "bone density"], ["nc_derm", "external agent"]] as const) {
+    const r = await nc("rationale", id);
+    push(
+      `I: control "${id}" carries its own written rationale`,
+      r?.estimate === null && /WHY THE EXPOSURE CANNOT CAUSE THIS/.test(r?.method ?? "") && (r?.method ?? "").includes(needle),
+      `estimate=${r?.estimate}; ${(r?.method ?? "no row").slice(0, 90)}`,
+    );
+  }
+  eq("I: 2 controls tested", Number((await nc("controls_tested"))?.estimate), n.controlsTested);
+  const breach = await nc("controls_breaching");
+  eq("I: exactly 1 breaches — a suite where everything passes proves nothing",
+    Number(breach?.estimate), n.controlsBreaching);
+  push(
+    "I: and the verdict says residual confounding is EVIDENCED",
+    /RESIDUAL CONFOUNDING IS EVIDENCED/.test(breach?.method ?? ""),
+    (breach?.method ?? "no row").slice(0, 110),
+  );
+
+  /* ================= THE E-VALUE CLOSED FORM, BOTH BRANCHES =================
+   *
+   * Eight patients cannot produce an interval that misses the null, so the
+   * lo > 1 and hi < 1 branches of the nearest-limit selection are unreachable
+   * from this cohort. They are executed here instead, by running the SAME
+   * expressions the emitters write against literal ratios with hand-derived
+   * answers. This is the emitted algebra, not a re-implementation of it. */
+  {
+    const vals = EXPECTED_I.eValueTable
+      .map((t) => `(${t.rr}::double precision, ${t.lo}::double precision, ${t.hi}::double precision)`)
+      .join(", ");
+    const q = `SELECT rr, ${eValueSql("rr")} AS e, ${nearestNullLimitSql("lo", "hi")} AS near
+               FROM (VALUES ${vals}) v(rr, lo, hi) ORDER BY rr`;
+    const got = await rows<{ rr: number; e: number | null; near: number | null }>(db, q);
+    for (const want of EXPECTED_I.eValueTable) {
+      const r = got.find((z) => Math.abs(Number(z.rr) - want.rr) < 1e-12);
+      approx(`I: E-value closed form at RR = ${want.rr} is ${want.e}`, Number(r?.e), want.e, 0.00001);
+      push(
+        `I: the limit nearest the null for [${want.lo}, ${want.hi}] is ${want.nearest ?? "NULL (the interval crosses)"}`,
+        want.nearest === null ? r?.near === null : Math.abs(Number(r?.near) - want.nearest) < 1e-9,
+        `got ${r?.near}`,
+      );
+    }
+    /* THE SYMMETRY. An RR of 2 and an RR of 0.5 are the same distance from the
+     * null, so they must get the same E-value. A formula that forgot the
+     * reciprocal branch fails here and nowhere else. */
+    const two = got.find((z) => Number(z.rr) === 2);
+    const half = got.find((z) => Number(z.rr) === 0.5);
+    push(
+      "I: RR = 2 and RR = 0.5 get the SAME E-value (the measure is symmetric about the null)",
+      Math.abs(Number(two?.e) - Number(half?.e)) < 1e-9,
+      `${two?.e} vs ${half?.e}`,
+    );
+  }
+
+  out.push(...sasSqlParityChecks(GOLD_I_SPEC, GOLD_I_OPTS));
+  out.push(...sasStructureChecks(emitSas(GOLD_I_SPEC, GOLD_I_OPTS)));
   return out;
 }
 

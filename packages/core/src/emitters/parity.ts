@@ -31,6 +31,7 @@ import type {
   PropensityScoreAnalysis,
   IptwOutcomeAnalysis,
   GFormulaAnalysis,
+  NegativeControlAnalysis,
   AdherenceAnalysis,
   TreatmentSwitchingAnalysis,
   SurvivalAnalysis,
@@ -38,6 +39,7 @@ import type {
 } from "../spec/types";
 import type { StudySpec } from "../spec/types";
 import { survivalOutcome, daysSupplyCleaningFor } from "../spec/types";
+import { CONVENTIONAL_STRATA } from "./psstrat-core";
 import type { LedgerAttribution, LedgerInflation, MemberMonthOptions } from "./ledger";
 
 /** Default mean days per year — internally consistent (rate/person-years/CI all
@@ -1682,6 +1684,16 @@ export function fineGrayParity(
  *  Propensity score (IPTW)
  * ------------------------------------------------------------------ */
 
+/** A DECLARED COARSENING, as it is stamped. Present only when one was
+ *  declared, so a spec that asked for none stamps byte-identically to before.
+ *  The cut points ARE the adjustment — move one and the estimate moves — so
+ *  they are recorded here and cross-checked against each twin's own code. */
+export interface BandingStamp {
+  baselineId: string;
+  coarsens: string;
+  cutPoints: number[];
+}
+
 export interface PropensityScoreParity {
   id: string;
   referenceLevel: string;
@@ -1691,11 +1703,23 @@ export interface PropensityScoreParity {
    *  data, and no comparison of NUMBERS would catch it — the cell is a string,
    *  and its construction is part of the contract. */
   cellAxes: string[];
+  /** declared coarsenings, omitted entirely when there are none */
+  bandings?: BandingStamp[];
   balanceTerms: string[];
   method: string;
   estimand: string;
   stabilized: boolean;
   trim: number;
+  /** method "stratification": the K the program ASKED for. How many were
+   *  actually formed is data-dependent and is reported by the program itself —
+   *  the two are stamped and emitted separately on purpose, because a program
+   *  that said "quintiles" while forming three would be describing something it
+   *  did not build. */
+  strataRequested?: number;
+  /** method "stratification": how boundaries are placed. NEVER ntile. */
+  strataBoundaries?: "between_distinct_scores";
+  /** method "stratification": a one-arm stratum contributes NOTHING, not zero */
+  strataOneArmContribution?: "null_excluded_from_pool";
   score: "saturated_closed_form";
   variance: "frequency_weighted_sample";
   sasPrimary: "none";
@@ -1706,13 +1730,23 @@ export function propensityScoreLimitations(an: PropensityScoreAnalysis, droppedB
   for (const d of droppedBalance)
     out.push(`balance covariate "${d}" is NOT reported - only age, sex and a comorbidity_index referencing an ENABLED index analysis are derivable from the cohort spine today`);
   out.push(`the score is SATURATED over categorical cells, which is what makes it closed form. It is therefore a FULLY INTERACTED model: every combination of the covariates gets its own probability. That is the most flexible specification available and also the one most prone to empty cells - read the positivity rows first`);
-  out.push(`NO CONTINUOUS COVARIATE can enter the score. Readiness refuses one rather than emitting a pipeline whose every number would come from a probability that is not the maximum-likelihood estimate. Band it, or fit the score elsewhere`);
-  out.push(`the OUTCOME MODEL is not run here. This analysis produces the score, the weights and the balance; a weighted effect estimate is a separate analysis, and the weights it would need are per-subject rather than in this summary table`);
+  if ((an.bandings ?? []).length > 0)
+    out.push(`a CONTINUOUS covariate enters the score only as DECLARED BANDS. The score is then saturated again and closed form again, but what is adjusted for is the BAND and not the value: confounding within a band is uncontrolled, and a wider band controls less. The coarsening rows report the cut points and the occupancy of every band by arm`);
+  else
+    out.push(`NO CONTINUOUS COVARIATE can enter the score. Readiness refuses one rather than emitting a pipeline whose every number would come from a probability that is not the maximum-likelihood estimate. Band it, or fit the score elsewhere`);
+  if (an.method === "stratification")
+    out.push(`this analysis declares NO OUTCOME, so the quantity pooled across strata is the adjusted difference in each declared BALANCE covariate, not a treatment effect on an outcome. An outcome effect is iptw_outcome or g_formula, which is where an outcome is declared`);
+  else
+    out.push(`the OUTCOME MODEL is not run here. This analysis produces the score, the weights and the balance; a weighted effect estimate is a separate analysis, and the weights it would need are per-subject rather than in this summary table`);
   out.push(`weighting adjusts for what is IN the score and nothing else. Unmeasured confounding is untouched, and covariates outside the model can end up MORE imbalanced - the balance rows report both numbers so that is visible rather than assumed away`);
   if (an.trim > 0)
     out.push(`TRIMMING at ${an.trim} changes the estimand: the effect is now for the sub-population whose score falls inside the bounds, which is not the cohort described in the attrition table`);
   if (an.method === "iptw" && !an.stabilized)
     out.push(`weights are UNSTABILIZED, so their scale is the pseudo-population rather than the sample. Stabilized weights change the scale and not the balance, and make the effective sample size easier to read against the actual n`);
+  if (an.method === "stratification") {
+    out.push(`K is the CONVENTIONAL ${CONVENTIONAL_STRATA}, from Rosenbaum & Rubin's observation that five subclasses remove about 90% of the bias due to a continuous confounder. It is a convention, not a property of this study, and it is stamped as REQUESTED because the number actually formed is data-dependent`);
+    out.push(`the weight columns above are still computed and reported - they are properties of the same score - but NOTHING in the stratified estimate uses them. The pooled contrast is a stratum-size-weighted average of within-stratum differences`);
+  }
   return out;
 }
 
@@ -1729,18 +1763,31 @@ export const PROPENSITY_SCORE_METHOD_NOTES = [
 
 export function propensityScoreParity(
   an: PropensityScoreAnalysis,
-  consumed: { referenceLevel: string; treatedLevel: string; cellAxes: string[]; balanceTerms: string[] },
+  consumed: {
+    referenceLevel: string; treatedLevel: string; cellAxes: string[]; balanceTerms: string[];
+    bandings?: BandingStamp[]; strataRequested?: number;
+  },
 ): PropensityScoreParity {
   return {
     id: an.id,
     referenceLevel: consumed.referenceLevel,
     treatedLevel: consumed.treatedLevel,
     cellAxes: consumed.cellAxes,
+    /* OMITTED, not empty, when nothing was coarsened — an added key would move
+     * the stamp of every spec that never asked for a banding. */
+    ...(consumed.bandings ? { bandings: consumed.bandings } : {}),
     balanceTerms: consumed.balanceTerms,
     method: an.method,
     estimand: an.estimand,
     stabilized: an.stabilized,
     trim: an.trim,
+    ...(consumed.strataRequested !== undefined
+      ? {
+          strataRequested: consumed.strataRequested,
+          strataBoundaries: "between_distinct_scores" as const,
+          strataOneArmContribution: "null_excluded_from_pool" as const,
+        }
+      : {}),
     score: "saturated_closed_form",
     variance: "frequency_weighted_sample",
     sasPrimary: "none",
@@ -1760,6 +1807,9 @@ export interface IptwOutcomeParity {
   referenceLevel: string;
   treatedLevel: string;
   cellAxes: string[];
+  bandings?: BandingStamp[];
+  /** present only when an E-value was requested */
+  eValue?: { includeLimit: boolean; formula: "vanderweele_ding_2017" };
   estimand: string;
   stabilized: boolean;
   trim: number;
@@ -1780,6 +1830,12 @@ export function iptwOutcomeLimitations(an: IptwOutcomeAnalysis, listSystem: Code
   out.push(`the sandwich variance treats the WEIGHTS AS KNOWN. They come from a fitted score, and propagating that estimation generally NARROWS the interval rather than widening it (Lunceford & Davidian 2004), so what is reported is conservative for the ATE and is labelled weights_treated_as_known rather than simply "robust"`);
   out.push(`NO doubly-robust augmentation. With categorical covariates the outcome regression would also be saturated, so this is buildable and simply not built - the missing piece is the augmentation term's own influence function, since the AIPW variance is not the Hajek sandwich`);
   out.push(`NO bootstrap interval: it needs an RNG and would break byte-stable emission outright`);
+  if ((an.bandings ?? []).length > 0)
+    out.push(`a coarsened covariate is adjusted for AS BANDS. Confounding within a band is uncontrolled, and a wider band controls less - so the estimate below is adjusted for less than the covariate list suggests. The coarsening rows report the cut points and the band occupancy by arm`);
+  if (an.eValue)
+    out.push(`the E-VALUE bounds UNMEASURED CONFOUNDING ONLY. It says nothing about selection, about outcome misclassification, or about the fixed horizon this outcome was ascertained over - each of which can move an estimate further than a confounder of the strength it names`);
+  if (an.eValue && an.eValue.includeLimit === false)
+    out.push(`the limit E-value was turned OFF (eValue.includeLimit: false), so only the point estimate is bounded. The limit nearest the null is usually the more informative of the two - a large point E-value beside a limit E-value near 1 means modest confounding would already make the data compatible with no effect`);
   if (an.estimand === "att")
     out.push(`the ATT weights make this the effect among the TREATED, so the risk in the control arm is a counterfactual for the treated population and not a description of the controls themselves`);
   return out;
@@ -1798,7 +1854,7 @@ export const IPTW_OUTCOME_METHOD_NOTES = [
 
 export function iptwOutcomeParity(
   an: IptwOutcomeAnalysis,
-  consumed: { referenceLevel: string; treatedLevel: string; cellAxes: string[]; settingFilter: string },
+  consumed: { referenceLevel: string; treatedLevel: string; cellAxes: string[]; settingFilter: string; bandings?: BandingStamp[] },
 ): IptwOutcomeParity {
   return {
     id: an.id,
@@ -1809,6 +1865,8 @@ export function iptwOutcomeParity(
     referenceLevel: consumed.referenceLevel,
     treatedLevel: consumed.treatedLevel,
     cellAxes: consumed.cellAxes,
+    ...(consumed.bandings ? { bandings: consumed.bandings } : {}),
+    ...(an.eValue ? { eValue: { includeLimit: an.eValue.includeLimit !== false, formula: "vanderweele_ding_2017" as const } } : {}),
     estimand: an.estimand,
     stabilized: an.stabilized,
     trim: an.trim,
@@ -1832,6 +1890,8 @@ export interface GFormulaParity {
   referenceLevel: string;
   treatedLevel: string;
   cellAxes: string[];
+  bandings?: BandingStamp[];
+  eValue?: { includeLimit: boolean; formula: "vanderweele_ding_2017" };
   outcomeModel: "saturated_cell_means";
   scoreModel: "saturated_cell_fraction";
   /** the population the estimates describe, which is NOT the cohort */
@@ -1848,7 +1908,14 @@ export function gFormulaLimitations(an: GFormulaAnalysis, listSystem: CodeSystem
   out.push(`this is a DIFFERENT population from the one an IPTW outcome model reports on. Weighting carries single-arm subjects along at weight 1 and produces a number for a population that includes people with no comparison group; standardization cannot, so the two estimates can differ substantially on the same data and both be computed correctly`);
   out.push(`the outcome model is SATURATED over the cells - a mean per cell per arm. It cannot be misspecified in the usual sense, which is why "doubly robust" buys nothing extra here: both models are exactly right by construction, and AIPW reduces to the g-formula`);
   out.push(`the variance is the influence-function form and treats the cell means as estimated, but the CELL PROPORTIONS as fixed. That is standard and is a small understatement at these sample sizes`);
-  out.push(`NO continuous covariate: standardization here is over cells, and a continuous covariate has none. It would need a fitted outcome model, which is a different estimator than the one this module implements and checks`);
+  if ((an.bandings ?? []).length > 0)
+    out.push(`a continuous covariate has no cells until it is BANDED, and the bands are what this program standardizes over. Confounding within a band is uncontrolled and a wider band controls less, so the standardized risks below are adjusted for less than the covariate list suggests - read the coarsening rows`);
+  else
+    out.push(`NO continuous covariate: standardization here is over cells, and a continuous covariate has none. It would need a fitted outcome model, which is a different estimator than the one this module implements and checks`);
+  if (an.eValue)
+    out.push(`the E-VALUE bounds UNMEASURED CONFOUNDING ONLY, and it bounds the RESTRICTED population these estimates describe - not the cohort. It says nothing about selection, misclassification, or the horizon this outcome was ascertained over`);
+  if (an.eValue && an.eValue.includeLimit === false)
+    out.push(`the limit E-value was turned OFF (eValue.includeLimit: false), so only the point estimate is bounded`);
   out.push(`the outcome is a BINARY indicator over a fixed horizon, with nobody censored - a subject who leaves the data early is counted event-free`);
   return out;
 }
@@ -1865,7 +1932,7 @@ export const G_FORMULA_METHOD_NOTES = [
 
 export function gFormulaParity(
   an: GFormulaAnalysis,
-  consumed: { referenceLevel: string; treatedLevel: string; cellAxes: string[]; settingFilter: string },
+  consumed: { referenceLevel: string; treatedLevel: string; cellAxes: string[]; settingFilter: string; bandings?: BandingStamp[] },
 ): GFormulaParity {
   return {
     id: an.id,
@@ -1876,10 +1943,94 @@ export function gFormulaParity(
     referenceLevel: consumed.referenceLevel,
     treatedLevel: consumed.treatedLevel,
     cellAxes: consumed.cellAxes,
+    ...(consumed.bandings ? { bandings: consumed.bandings } : {}),
+    ...(an.eValue ? { eValue: { includeLimit: an.eValue.includeLimit !== false, formula: "vanderweele_ding_2017" as const } } : {}),
     outcomeModel: "saturated_cell_means",
     scoreModel: "saturated_cell_fraction",
     population: "cells_with_both_arms",
     variance: "influence_function_with_covariance",
+    sasPrimary: "none",
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ *  Negative control outcomes
+ * ------------------------------------------------------------------ */
+
+export interface NegativeControlParity {
+  id: string;
+  referenceLevel: string;
+  treatedLevel: string;
+  cellAxes: string[];
+  bandings?: BandingStamp[];
+  horizonDays: number;
+  /** DECLARED IN ADVANCE. Every verdict in the program is this number. */
+  biasThreshold: number;
+  /** the interval the threshold defines, spelled out so the twins cannot
+   *  disagree about whether it is symmetric on the ratio scale */
+  biasInterval: string;
+  /** each control, with the outcome it reads and the argument for why the
+   *  exposure cannot cause it. The RATIONALE is stamped because a control
+   *  without one is an arbitrary outcome and nothing downstream can tell. */
+  controls: Array<{ id: string; codeListId: string; settingFilter: string; rationale: string }>;
+  /** THE SAME PIPELINE AS THE PRIMARY ANALYSIS, and its fixed choices. This
+   *  analysis declares no estimand/stabilization/trim, so the module uses the
+   *  ATE-weighted saturated score and stamps that rather than leaving three
+   *  unstated defaults deciding every control's number. */
+  adjustment: "saturated_score_iptw";
+  estimand: "ate";
+  stabilized: false;
+  trim: 0;
+  estimator: "hajek_ratio";
+  /** NO interval is computed — see the method notes for why */
+  interval: "none_declared_threshold_is_the_test";
+  sasPrimary: "none";
+}
+
+export function negativeControlLimitations(an: NegativeControlAnalysis): string[] {
+  const out: string[] = [];
+  out.push(`each control outcome is a BINARY indicator over a fixed ${an.horizonDays}-day horizon with NO washout: a subject who already had the control outcome before index is not excluded, so a control that is largely chronic will look prevalent in both arms and its ratio will be pulled toward 1 - which reads as reassurance`);
+  out.push(`NO confidence interval is reported on a control estimate. The DECLARED threshold is the test, and it was declared in advance for that reason. An interval invites the reading "not significant, therefore fine", which on a small control is only a statement about power - the direction in which a negative-control suite is most often over-trusted`);
+  out.push(`a NULL control is WEAK reassurance. It says this particular pathway showed nothing; it cannot say the measured covariates captured the confounding, because a control is only sensitive to confounders it shares with the primary outcome`);
+  out.push(`NO multiplicity adjustment across controls. With several controls at a fixed threshold the chance that one breaches by accident rises, and a suite reporting "1 of 5 breached" should be read with that in mind rather than as one positive finding`);
+  if ((an.bandings ?? []).length > 0)
+    out.push(`a coarsened covariate is adjusted for AS BANDS here exactly as in the primary analysis. That is deliberate - the point of a negative control is the SAME pipeline - but it means the control inherits the same residual confounding within bands`);
+  return out;
+}
+
+export const NEGATIVE_CONTROL_METHOD_NOTES = [
+  `a NEGATIVE CONTROL OUTCOME is an outcome the exposure CANNOT plausibly cause. Run through the identical adjustment, a non-null result is strong evidence of RESIDUAL CONFOUNDING - something produced an association where no causal path exists (Lipsitch et al. Epidemiology 2010;21:383)`,
+  `every control runs through the SAME pipeline as the primary analysis - the same saturated score over the same cells, the same ATE weights, the same Hajek ratio. A control estimated crudely, or on a smaller covariate set, would be testing a different claim and a null result would be reassurance about an analysis nobody ran`,
+  `the THRESHOLD IS DECLARED IN ADVANCE and stamped into this program. A risk ratio outside [1/t, t] is called residual confounding. A threshold chosen after seeing the estimate is not a test, which is why it is a spec field rather than a number in a footnote`,
+  `THE RATIONALE IS EMITTED BESIDE EVERY CONTROL. A negative control whose rationale nobody wrote down is an arbitrary outcome, and a reader cannot tell the difference - nor, later, can the analyst who chose it`,
+  `A NULL RESULT IS WEAK REASSURANCE AND A BREACH IS STRONG EVIDENCE. The asymmetry is the point: passing controls do not license the primary estimate, and a breach does not tell you which way the primary estimate is biased or by how much`,
+  `SAS-PRIMARY: nothing. Every number here is computed by both twins`,
+];
+
+export function negativeControlParity(
+  an: NegativeControlAnalysis,
+  consumed: {
+    referenceLevel: string; treatedLevel: string; cellAxes: string[];
+    bandings?: BandingStamp[];
+    controls: Array<{ id: string; codeListId: string; settingFilter: string; rationale: string }>;
+  },
+): NegativeControlParity {
+  return {
+    id: an.id,
+    referenceLevel: consumed.referenceLevel,
+    treatedLevel: consumed.treatedLevel,
+    cellAxes: consumed.cellAxes,
+    ...(consumed.bandings ? { bandings: consumed.bandings } : {}),
+    horizonDays: an.horizonDays,
+    biasThreshold: an.biasThreshold,
+    biasInterval: `[1/${an.biasThreshold}, ${an.biasThreshold}]`,
+    controls: consumed.controls,
+    adjustment: "saturated_score_iptw",
+    estimand: "ate",
+    stabilized: false,
+    trim: 0,
+    estimator: "hajek_ratio",
+    interval: "none_declared_threshold_is_the_test",
     sasPrimary: "none",
   };
 }

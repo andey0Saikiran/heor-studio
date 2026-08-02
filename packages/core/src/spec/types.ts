@@ -612,11 +612,134 @@ export interface CompetingRisksAnalysis extends AnalysisCommon {
  * Ref: Rosenbaum & Rubin Biometrika 1983;70:41; Austin & Stuart Stat Med
  * 2015;34:3661.
  */
+/**
+ * DECLARED COARSENING — the path out of the continuous-covariate refusal.
+ *
+ * The refusal is right and stays: the propensity score here is closed form ONLY
+ * because a logistic model over categorical cells is saturated, so its fitted
+ * probability in each cell IS the observed treated fraction. One continuous
+ * covariate and the score stops being the MLE, and every weight downstream
+ * becomes a wrong number rather than a missing one.
+ *
+ * But the refusal already named the remedy — "use a banded version of it" — and
+ * offered no way to do it, which left age, the single most common confounder in
+ * this literature, as a dead end. Banding is what analysts do anyway; the
+ * difference here is that the bands are DECLARED and STAMPED rather than chosen
+ * in a hand-written step nobody reviews.
+ *
+ * WHAT THIS DOES NOT DO. Coarsening is not a continuous score. Confounding
+ * WITHIN a band is uncontrolled, and a wide band controls less than a narrow
+ * one. The module says so in an always-emitted note and reports the band
+ * occupancy, because a band holding one arm only is a positivity violation that
+ * a balance table will not show you.
+ */
+export interface CovariateBanding {
+  /** the continuous baseline characteristic being coarsened */
+  baselineId: string;
+  /** ASCENDING interior cut points. [45, 65] gives (-inf,45), [45,65), [65,inf).
+   *  Left-closed, right-open, so a value never lands in two bands. */
+  cutPoints: number[];
+}
+
+/** Baseline kinds that are ALREADY a legal cell axis. The saturated score's
+ *  closed form is exactly the statement that the model has one parameter per
+ *  cell, so this list and the emitters' cell-axis switch must agree — a kind in
+ *  one and not the other is a covariate readiness accepts and the twins drop. */
+export const CATEGORICAL_CELL_KINDS: ReadonlySet<string> = new Set([
+  "sex", "region", "plan_type", "year",
+]);
+
+/** Baseline kinds a DECLARED banding can coarsen into a cell axis.
+ *
+ *  Age at index is the only continuous covariate the cohort spine derives in
+ *  both twins (year(index_date) - dobyr). A banding on anything else would need
+ *  a value the emitters do not have, so readiness refuses it rather than
+ *  approving an analysis the emitters cannot produce. */
+export const BANDABLE_BASELINE_KINDS: ReadonlySet<string> = new Set(["age"]);
+
+/**
+ * NEGATIVE CONTROL OUTCOMES and E-VALUES — bounding unmeasured confounding.
+ *
+ * Every observational estimate in this tool rests on an assumption no data can
+ * check: that the measured covariates capture the confounding. These two are
+ * the standard ways of interrogating it, and BOTH ARE CLOSED FORM, so there is
+ * no reason they were missing.
+ *
+ * A NEGATIVE CONTROL is an outcome the exposure cannot plausibly cause, run
+ * through the identical pipeline. A null result is weak reassurance. A NON-null
+ * result is strong evidence of residual confounding, because something produced
+ * an association where no causal path exists. The threshold is declared in
+ * advance, because a threshold chosen after seeing the estimate is not a test.
+ *
+ * An E-VALUE is the minimum strength of association, on the risk-ratio scale,
+ * that an unmeasured confounder would need with BOTH exposure and outcome to
+ * explain away the observed effect. Closed form:
+ *
+ *     E = RR + sqrt(RR * (RR - 1))          for RR >= 1
+ *     E = 1/RR + sqrt((1/RR) * (1/RR - 1))  for RR < 1
+ *
+ * The E-value for the confidence limit NEAREST THE NULL is the one that
+ * matters, and it is routinely the more informative of the two: a large point
+ * E-value with a limit E-value near 1 means the data are compatible with
+ * modest confounding explaining everything.
+ *
+ * WHAT AN E-VALUE IS NOT. It is not evidence a confounder exists, and not
+ * evidence one does not. It converts an estimate into "how strong would the
+ * lurking variable have to be", and answering whether anything that strong is
+ * plausible is a judgement about the subject, not a computation. The emitted
+ * program says exactly that, because an E-value reported as though it were a
+ * robustness certificate is worse than no E-value.
+ *
+ * Ref: Lipsitch et al. Epidemiology 2010;21:383 (negative controls);
+ * VanderWeele & Ding Ann Intern Med 2017;167:268 (E-values).
+ */
+export interface NegativeControlAnalysis extends AnalysisCommon {
+  kind: "negative_control";
+  /** the exposure contrast being interrogated */
+  groupVarId: string;
+  /** outcomes with NO plausible causal path from the exposure */
+  controls: NegativeControlOutcome[];
+  /** cell axes for the same adjustment the primary analysis used, so the
+   *  control is run through the SAME pipeline rather than an easier one */
+  covariateIds: string[];
+  bandings?: CovariateBanding[];
+  /** window over which each control outcome is ascertained */
+  horizonDays: number;
+  /** DECLARED IN ADVANCE. A risk ratio outside [1/t, t] on a negative control
+   *  is called residual confounding. Chosen after seeing the estimate, this is
+   *  not a test, so the spec carries it and the stamp records it. */
+  biasThreshold: number;
+}
+
+export interface NegativeControlOutcome {
+  id: string;
+  label: string;
+  outcomeDefinition: OutcomeDefinition;
+  /** WHY the exposure cannot cause this. Required, and emitted into the
+   *  program: a negative control whose rationale nobody wrote down is an
+   *  arbitrary outcome, and the reader cannot tell the difference. */
+  rationale: string;
+}
+
+/**
+ * E-values attach to an EXISTING effect estimate rather than standing alone.
+ * Declared on the causal analyses so the number they bound is the number the
+ * same program computed, never one retyped from elsewhere.
+ */
+export interface EValueRequest {
+  /** compute the E-value for the confidence limit nearest the null too.
+   *  Default true, because it is usually the more informative of the pair. */
+  includeLimit?: boolean;
+}
+
 export interface PropensityScoreAnalysis extends AnalysisCommon {
   kind: "propensity_score";
   groupVarId: string;
-  /** the PS model's covariates. Must ALL be categorical — see readiness. */
+  /** the PS model's covariates. Must ALL be categorical, OR continuous WITH a
+   *  declared banding in `bandings` below — see readiness. */
   psCovariateIds: string[];
+  /** coarsenings that make named continuous covariates usable as cell axes */
+  bandings?: CovariateBanding[];
   /** what balance is reported on; may include continuous covariates */
   balanceCovariateIds: string[];
   method: "iptw" | "stratification" | "nearest_neighbour" | "optimal";
@@ -644,7 +767,12 @@ export interface PropensityScoreAnalysis extends AnalysisCommon {
 export interface IptwOutcomeAnalysis extends AnalysisCommon {
   kind: "iptw_outcome";
   groupVarId: string;
-  /** the score's covariates. Must ALL be categorical — same gate as propensity_score. */
+  /** coarsenings that make named continuous covariates usable as cell axes.
+   *  Same mechanism and the same honest limit as propensity_score. */
+  bandings?: CovariateBanding[];
+  /** bound the unmeasured confounding needed to explain this estimate away */
+  eValue?: EValueRequest;
+  /** the score's covariates. Categorical, or continuous WITH a banding. */
   psCovariateIds: string[];
   estimand: "ate" | "att";
   stabilized: boolean;
@@ -676,7 +804,13 @@ export interface IptwOutcomeAnalysis extends AnalysisCommon {
 export interface GFormulaAnalysis extends AnalysisCommon {
   kind: "g_formula";
   groupVarId: string;
-  /** cell axes. Must ALL be categorical — same gate as the other causal kinds. */
+  /** coarsenings that make named continuous covariates usable as cell axes.
+   *  The g-formula standardizes OVER cells, so a continuous axis has no cells
+   *  at all until it is banded. */
+  bandings?: CovariateBanding[];
+  /** bound the unmeasured confounding needed to explain this estimate away */
+  eValue?: EValueRequest;
+  /** cell axes. Categorical, or continuous WITH a banding. */
   covariateIds: string[];
   outcomeDefinition: OutcomeDefinition;
   washout: RelativeWindow;
@@ -1152,6 +1286,7 @@ export type Analysis =
   | IptwOutcomeAnalysis
   | GFormulaAnalysis
   | AdherenceAnalysis
+  | NegativeControlAnalysis
   | TreatmentSwitchingAnalysis
   | StatisticalEngineAnalysis
   | FutureAnalysisStub;
@@ -1185,6 +1320,7 @@ export const EMITTABLE_ANALYSIS_KINDS: ReadonlySet<AnalysisKind> = new Set<Analy
   "propensity_score",
   "iptw_outcome",
   "g_formula",
+  "negative_control",
   "adherence",
   "treatment_switching",
 ]);
@@ -1439,6 +1575,78 @@ export function validateAnalyses(spec: StudySpec): string[] {
       }
     }
   }
+
+  /* ---- DECLARED COARSENING, checked once for every kind that accepts one ----
+   *
+   * A banding is what makes a continuous covariate a legal cell axis, so it is
+   * load-bearing: a malformed one does not fail loudly, it produces a cell
+   * definition that is wrong in a way no number downstream reveals. Duplicate
+   * cut points give an EMPTY band, unsorted ones give a band whose predicate
+   * can never be reached, and a banding on an already-categorical covariate
+   * would coarsen something that has no order to coarsen along. */
+  const checkBandings = (
+    bandings: CovariateBanding[] | undefined,
+    covariateIds: string[],
+    w: string,
+  ) => {
+    if (!bandings || bandings.length === 0) return;
+    const seenBanded = new Set<string>();
+    for (const b of bandings) {
+      const bw = `${w}: banding on "${b.baselineId}"`;
+      const base = findBaseline(spec, b.baselineId);
+      if (!base) {
+        problems.push(`${bw} names a baseline characteristic that does not exist. A banding coarsens a DECLARED covariate; there is nothing here to coarsen.`);
+        continue;
+      }
+      if (seenBanded.has(b.baselineId))
+        problems.push(`${bw} is declared twice — two coarsenings of one covariate would give it two different cell axes, and which one the score used would depend on emission order.`);
+      seenBanded.add(b.baselineId);
+      if (CATEGORICAL_CELL_KINDS.has(base.kind))
+        problems.push(
+          `${bw} is already CATEGORICAL (kind "${base.kind}"), so it is already a legal cell axis and there is nothing to coarsen. Banding it would impose an ORDER on values that have none — the cut points would have to compare region codes as numbers.`,
+        );
+      else if (!BANDABLE_BASELINE_KINDS.has(base.kind))
+        problems.push(
+          `${bw} is kind "${base.kind}", which the cohort spine derives no continuous value for. Only "age" can be banded today, because age at index is the one continuous covariate both twins compute from the spine — a banding on anything else would need a value the emitters would have to invent.`,
+        );
+      if (!covariateIds.includes(b.baselineId))
+        problems.push(
+          `${bw} coarsens a covariate that is not in this analysis's covariate list, so the banding would be declared and never used. Add "${b.baselineId}" to the covariates, or drop the banding.`,
+        );
+      if (b.cutPoints.length === 0)
+        problems.push(`${bw} has an EMPTY cutPoints array, which is one band holding everybody — that adjusts for nothing while looking like an adjustment.`);
+      for (let i = 1; i < b.cutPoints.length; i++) {
+        if (b.cutPoints[i] === b.cutPoints[i - 1])
+          problems.push(`${bw} repeats the cut point ${b.cutPoints[i]}, which creates an EMPTY band between two identical boundaries.`);
+        else if (b.cutPoints[i] < b.cutPoints[i - 1])
+          problems.push(
+            `${bw} has cut points out of order (${b.cutPoints[i - 1]} then ${b.cutPoints[i]}). Bands are left-closed and right-open and are tested in sequence, so a descending boundary makes a band whose predicate can never be reached — every subject in it lands somewhere else, silently.`,
+          );
+      }
+    }
+  };
+
+  /** ids the analysis declared a banding for — the covariates whose continuous
+   *  refusal is now answered rather than outstanding. */
+  const bandedIds = (bandings: CovariateBanding[] | undefined) =>
+    new Set((bandings ?? []).map((b) => b.baselineId));
+
+  /** The saturation gate, shared by every module that builds a saturated cell.
+   *  A covariate is legal when it is categorical, or when a DECLARED banding
+   *  makes it categorical. Anything else keeps the original refusal, now with a
+   *  pointer to the remedy that exists. */
+  const checkCellCovariate = (
+    id: string,
+    bands: Set<string>,
+    w: string,
+    refusal: (kind: string) => string,
+  ) => {
+    const b = findBaseline(spec, id);
+    if (!b) { problems.push(`${w} references "${id}", which is not in baseline[].`); return; }
+    if (CATEGORICAL_CELL_KINDS.has(b.kind)) return;
+    if (bands.has(id)) return;   // a declared banding makes it a cell axis
+    problems.push(refusal(b.kind));
+  };
 
   const seenIds = new Set<string>();
   for (const a of spec.analyses) {
@@ -1831,22 +2039,27 @@ export function validateAnalyses(spec: StudySpec): string[] {
           problems.push(
             `${w}: optimal matching is NOT emitted. Minimizing total distance across all pairs is an assignment problem — it needs the Hungarian algorithm or a min-cost flow, neither of which warehouse SQL can express, and ties between equally-good assignments have to be broken by a rule the method itself does not specify. Use method:"iptw".`,
           );
-        if (a.method === "stratification")
+        /* STRATIFICATION is built (emitters/psstrat-core.ts). Its one refusal
+         * is structural rather than methodological: a pooled stratified
+         * contrast needs something to contrast, and this analysis declares no
+         * outcome — balanceCovariateIds is what it has. */
+        if (a.method === "stratification" && a.balanceCovariateIds.length === 0)
           problems.push(
-            `${w}: propensity-score STRATIFICATION is not built yet. It is deterministic and closed form, so this is an unbuilt feature and not a refusal, and the algebra is written down in emitters/psstrat-core.ts. Worth knowing before you reach for it elsewhere: the conventional NTILE-into-quintiles recipe does NOT work on this score. A saturated score is constant within a covariate cell, so NTILE cuts through tied groups and which subjects fall on each side depends on row order - the same order-dependence that makes greedy matching unusable here. Boundaries have to fall BETWEEN distinct score values, which also means K strata cannot always be formed. method:"iptw" is available now.`,
+            `${w}: propensity-score stratification needs at least one balanceCovariateId. This analysis declares no OUTCOME — an outcome model is iptw_outcome or g_formula — so the quantity pooled across strata is the adjusted difference in each declared balance covariate. With none declared there is nothing to pool, and the program would report strata that estimate nothing.`,
           );
         if (a.psCovariateIds.length === 0)
           problems.push(`${w}: psCovariateIds[] is empty, so there is no propensity model.`);
+        checkBandings(a.bandings, a.psCovariateIds, w);
         /* SATURATION IS THE WHOLE BASIS of the closed form. One continuous
          * covariate and the model is no longer saturated, its MLE is not the
          * cell fraction, and every number downstream would be wrong while
-         * looking entirely reasonable. */
-        for (const id of a.psCovariateIds) {
-          const b = spec.baseline.find((x) => x.id === id);
-          if (!b) { problems.push(`${w}: psCovariateIds references "${id}", which is not in baseline[].`); continue; }
-          if (!["sex", "region", "plan_type", "year"].includes(b.kind))
-            problems.push(
-              `${w}: propensity covariate "${id}" is kind "${b.kind}", which is not categorical. The score here is closed form ONLY because a logistic model over categorical cells is SATURATED — its fitted probability in each cell IS the observed treated fraction. A continuous covariate breaks that, the maximum-likelihood score becomes something only iteratively reweighted least squares can produce, and every weight, diagnostic and balance number downstream would be computed from a score that is not the MLE. Use a banded version of it, or fit the score in SAS and bring it in.`,
+         * looking entirely reasonable. A DECLARED BANDING answers that, because
+         * a banded covariate is a categorical one. */
+        {
+          const banded = bandedIds(a.bandings);
+          for (const id of a.psCovariateIds)
+            checkCellCovariate(id, banded, `${w}: psCovariateIds`, (kind) =>
+              `${w}: propensity covariate "${id}" is kind "${kind}", which is not categorical. The score here is closed form ONLY because a logistic model over categorical cells is SATURATED — its fitted probability in each cell IS the observed treated fraction. A continuous covariate breaks that, the maximum-likelihood score becomes something only iteratively reweighted least squares can produce, and every weight, diagnostic and balance number downstream would be computed from a score that is not the MLE. Use a banded version of it, or fit the score in SAS and bring it in. To band it HERE, declare bandings: [{ baselineId: "${id}", cutPoints: [...] }] — the coarsening is then stamped into both twins, and the program reports what it costs.`,
             );
         }
         a.balanceCovariateIds.forEach((b) => requireBaseline(b, `${w} balance covariate`));
@@ -1863,16 +2076,16 @@ export function validateAnalyses(spec: StudySpec): string[] {
         requireCodeList(a.outcomeDefinition.codeListId, `${w} outcome`);
         if (a.horizonDays <= 0) problems.push(`${w}: horizonDays must be positive.`);
         if (a.psCovariateIds.length === 0) problems.push(`${w}: psCovariateIds[] is empty, so there is no propensity model.`);
+        checkBandings(a.bandings, a.psCovariateIds, w);
         /* THE SAME SATURATION GATE as propensity_score, for the same reason —
          * and it matters more here, because a score that is not the MLE
          * produces an EFFECT ESTIMATE that is wrong rather than a diagnostic
          * that is wrong. */
-        for (const id of a.psCovariateIds) {
-          const b = spec.baseline.find((x) => x.id === id);
-          if (!b) { problems.push(`${w}: psCovariateIds references "${id}", which is not in baseline[].`); continue; }
-          if (!["sex", "region", "plan_type", "year"].includes(b.kind))
-            problems.push(
-              `${w}: propensity covariate "${id}" is kind "${b.kind}", which is not categorical. The weighted effect estimate here is closed form ONLY because a logistic score over categorical cells is SATURATED. A continuous covariate makes the score something only iteratively reweighted least squares can produce, and the effect estimate would then be computed from weights that are not the maximum-likelihood ones — a wrong number rather than a missing one.`,
+        {
+          const banded = bandedIds(a.bandings);
+          for (const id of a.psCovariateIds)
+            checkCellCovariate(id, banded, `${w}: psCovariateIds`, (kind) =>
+              `${w}: propensity covariate "${id}" is kind "${kind}", which is not categorical. The weighted effect estimate here is closed form ONLY because a logistic score over categorical cells is SATURATED. A continuous covariate makes the score something only iteratively reweighted least squares can produce, and the effect estimate would then be computed from weights that are not the maximum-likelihood ones — a wrong number rather than a missing one. Declare bandings: [{ baselineId: "${id}", cutPoints: [...] }] to coarsen it into cells, and the program will report what that coarsening costs.`,
             );
         }
         if (a.doublyRobust)
@@ -1889,12 +2102,54 @@ export function validateAnalyses(spec: StudySpec): string[] {
         requireCodeList(a.outcomeDefinition.codeListId, `${w} outcome`);
         if (a.horizonDays <= 0) problems.push(`${w}: horizonDays must be positive.`);
         if (a.covariateIds.length === 0) problems.push(`${w}: covariateIds[] is empty, so there is nothing to standardize over.`);
-        for (const id of a.covariateIds) {
-          const b = spec.baseline.find((x) => x.id === id);
-          if (!b) { problems.push(`${w}: covariateIds references "${id}", which is not in baseline[].`); continue; }
-          if (!["sex", "region", "plan_type", "year"].includes(b.kind))
+        checkBandings(a.bandings, a.covariateIds, w);
+        {
+          const banded = bandedIds(a.bandings);
+          for (const id of a.covariateIds)
+            checkCellCovariate(id, banded, `${w}: covariateIds`, (kind) =>
+              `${w}: covariate "${id}" is kind "${kind}", which is not categorical. The g-formula here standardizes over CELLS, and a continuous covariate has no cells — it would need a fitted outcome model, which is a different estimator than the one this module implements and checks. Declare bandings: [{ baselineId: "${id}", cutPoints: [...] }] to give it cells, and read the band-occupancy rows: standardizing over coarsened cells leaves confounding WITHIN each band uncontrolled.`,
+            );
+        }
+        break;
+      }
+      /* NEGATIVE CONTROLS. The threshold is the only thing here that decides an
+       * answer, and it is required to be declared IN ADVANCE — a threshold
+       * chosen after seeing the estimate is not a test, so it lives in the spec
+       * and is stamped into both twins. */
+      case "negative_control": {
+        const gvN = groupVars.find((g) => g.id === a.groupVarId);
+        if (!gvN) problems.push(`${w}: groupVarId "${a.groupVarId}" is not in groupVars[].`);
+        else {
+          if (gvN.levels.length !== 2) problems.push(`${w}: exposure "${gvN.id}" has ${gvN.levels.length} levels — the control estimates are a two-arm contrast, so exactly 2 are required.`);
+          if (!gvN.referenceLevel) problems.push(`${w}: exposure "${gvN.id}" has no referenceLevel, so the direction of every control's risk ratio is arbitrary — and a threshold test on an arbitrary direction is not a test.`);
+        }
+        if (a.controls.length === 0)
+          problems.push(`${w}: controls[] is empty. An empty negative-control suite passes vacuously and would be reported as "no evidence of residual confounding".`);
+        const seenCtl = new Set<string>();
+        for (const c of a.controls) {
+          if (seenCtl.has(c.id)) problems.push(`${w}: duplicate control id "${c.id}".`);
+          seenCtl.add(c.id);
+          requireCodeList(c.outcomeDefinition.codeListId, `${w} control "${c.id}"`);
+          if (!c.rationale || c.rationale.trim().length === 0)
             problems.push(
-              `${w}: covariate "${id}" is kind "${b.kind}", which is not categorical. The g-formula here standardizes over CELLS, and a continuous covariate has no cells — it would need a fitted outcome model, which is a different estimator than the one this module implements and checks.`,
+              `${w}: control "${c.id}" has no rationale. A negative control is an outcome the exposure CANNOT plausibly cause, and the only thing separating it from an arbitrary outcome is the argument for why. Unwritten, a reader cannot tell the difference — and neither can the person who wrote it, six months on.`,
+            );
+        }
+        if (a.horizonDays <= 0) problems.push(`${w}: horizonDays must be positive.`);
+        if (!(a.biasThreshold > 1))
+          problems.push(
+            `${w}: biasThreshold must be greater than 1; got ${a.biasThreshold}. It bounds a symmetric interval [1/t, t] on the risk-ratio scale, so a value at or below 1 makes an interval that no estimate can sit inside and every control would "breach".`,
+          );
+        if (a.covariateIds.length === 0)
+          problems.push(
+            `${w}: covariateIds[] is empty, so the controls would be estimated CRUDE. A negative control has to run through the SAME adjustment as the primary analysis — an unadjusted control tests a different claim, and a null one would be reassurance about an analysis nobody ran.`,
+          );
+        checkBandings(a.bandings, a.covariateIds, w);
+        {
+          const banded = bandedIds(a.bandings);
+          for (const id of a.covariateIds)
+            checkCellCovariate(id, banded, `${w}: covariateIds`, (kind) =>
+              `${w}: covariate "${id}" is kind "${kind}", which is not categorical. The control estimates use the same SATURATED closed-form score as the primary analysis, and a continuous covariate breaks saturation there in exactly the same way. Band it with bandings: [{ baselineId: "${id}", cutPoints: [...] }], or drop it from the control adjustment — but then it is not the same pipeline the primary analysis used.`,
             );
         }
         break;
