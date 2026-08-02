@@ -13,6 +13,9 @@
     "deploy:preview": "npm run build && wrangler versions upload"
   },
   "dependencies": {
+    "@fontsource/ibm-plex-mono": "^5.3.0",
+    "@fontsource/ibm-plex-sans": "^5.3.0",
+    "@fontsource/stix-two-text": "^5.3.0",
     "@heor-studio/core": "*",
     "jszip": "^3.10.1",
     "react": "^19.2.7",

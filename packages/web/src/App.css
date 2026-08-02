@@ -171,6 +171,8 @@
 }
 
 .card-title {
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
   font-family: var(--font-body);
   font-size: 1.15rem;
   font-weight: 600;
@@ -474,6 +476,7 @@ textarea.control {
 
 .badge {
   display: inline-block;
+  font-family: var(--font-mono);
   font-size: 0.72rem;
   font-weight: 600;
   letter-spacing: 0.02em;
@@ -546,23 +549,23 @@ textarea.control {
 
 .banner-ok {
   background: var(--ok-wash);
-  border-color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 35%, var(--hairline));
   color: var(--ink);
 }
 
 .banner-warn {
   background: var(--warn-wash);
-  border-color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 35%, var(--hairline));
 }
 
 .banner-danger {
   background: var(--danger-wash);
-  border-color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 35%, var(--hairline));
 }
 
 .banner-info {
   background: var(--accent-wash);
-  border-color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--hairline));
 }
 
 .banner-actions {

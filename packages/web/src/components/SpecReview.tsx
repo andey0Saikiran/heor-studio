@@ -99,7 +99,7 @@ function dayPhrase(n: number): string {
 
 function windowPhrase(w: RelativeWindow): string {
   if (w.start === 0 && w.end === 0) {
-    return w.includesIndex ? "on the index date" : "on the index date (index excluded — empty window)";
+    return w.includesIndex ? "on the index date" : "on the index date (index excluded: empty window)";
   }
   const start = w.start === "anytime_before" ? "any time before index" : dayPhrase(w.start);
   const end = w.end === "anytime_after" ? "any time after index" : dayPhrase(w.end);
@@ -146,7 +146,7 @@ export function describeTest(spec: StudySpec, test: Test): string {
         return `Age ${test.min} to ${test.max} on the index date.`;
       if (test.min !== undefined) return `Age ${test.min} or older on the index date.`;
       if (test.max !== undefined) return `Age ${test.max} or younger on the index date.`;
-      return "Age at index — no bounds set yet.";
+      return "Age at index. No bounds set yet.";
     case "sex":
       return `Sex recorded as ${test.value === "M" ? "male" : "female"}.`;
     case "continuous_enrollment":
@@ -160,7 +160,7 @@ export function describeTest(spec: StudySpec, test: Test): string {
         "."
       );
     case "unmapped":
-      return "Not mapped to a testable rule yet — resolve before code can be generated.";
+      return "Not mapped to a testable rule yet. Resolve before code can be generated.";
   }
 }
 
@@ -390,7 +390,7 @@ function CodeListSelect({
         {label}
       </label>
       <select id={id} className="control" value={value} onChange={(e) => onChange(e.target.value)}>
-        {value === "" && <option value="">— choose —</option>}
+        {value === "" && <option value="">choose…</option>}
         {missing && <option value={value}>{value} (missing)</option>}
         {spec.codeLists.map((cl) => (
           <option key={cl.id} value={cl.id}>
@@ -1273,7 +1273,7 @@ function CriterionRow({
                   setTest(buildDefaultTest(v, spec, spec.codeLists[0]?.id ?? ""));
               }}
             >
-              <option value="">— choose a test type —</option>
+              <option value="">choose a test type…</option>
               {(Object.keys(TEST_TYPE_LABELS) as TestType[])
                 .filter((k) => k !== "unmapped")
                 .map((k) => (
@@ -3783,7 +3783,7 @@ export default function SpecReview({
       ) : (
         <div className="banner banner-warn" role="status">
           <div className="banner-body">
-            <p className="banner-title">Not ready yet — code generation stays locked until:</p>
+            <p className="banner-title">Not ready yet. Code generation stays locked until:</p>
             <ul>
               {readiness.problems.map((p) => (
                 <li key={p}>{p}</li>

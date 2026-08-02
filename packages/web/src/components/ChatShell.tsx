@@ -265,6 +265,12 @@ export default function ChatShell(props: ChatShellProps) {
 
   const landing = !spec && (
     <div className="cs-landing">
+      {!hasKey && (
+        <div className="cs-callout" role="note">
+          <span className="cs-callout-body">Reading a document needs your API key.</span>
+          <button type="button" className="cs-callout-link" onClick={onOpenSettings}>Add key in settings</button>
+        </div>
+      )}
       <label
         className={dragging ? "cs-drop cs-drag" : "cs-drop"}
         onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
@@ -273,28 +279,63 @@ export default function ChatShell(props: ChatShellProps) {
       >
         <input type="file" accept="application/pdf,.pdf" className="sr-only"
           onChange={(e) => { void acceptFile(e.target.files?.[0]); e.target.value = ""; }} />
-        <span className="cs-drop-primary">Drop your protocol or SAP here</span>
-        <span className="cs-drop-sub">
-          Read in this browser and sent only to Anthropic, with your key. It goes nowhere else.
+        <svg className="cs-drop-glyph" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M6 2.5h8.5L20 8v13.5H6z" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+          <path d="M14.5 2.5V8H20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+          <path d="M9 12.5h8M9 15.5h8M9 18.5h5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+        </svg>
+        <span className="cs-drop-primary">Drop your protocol or SAP</span>
+        <span className="cs-drop-formats" aria-label="Accepted format: PDF">
+          <span className="cs-chip">.pdf</span>
+        </span>
+        <span className="cs-drop-trust">
+          <svg viewBox="0 0 16 16" aria-hidden="true" width="12" height="12">
+            <rect x="3" y="7" width="10" height="7" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.3" />
+            <path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" fill="none" stroke="currentColor" strokeWidth="1.3" />
+          </svg>
+          Read in your browser, sent only to Anthropic with your key.
         </span>
       </label>
-      <div className="cs-or">or</div>
-      <div className="field-row">
-        <button type="button" className="btn" onClick={props.onLoadDemo}>Load a demo study</button>
+      <div className="cs-actions">
+        <button type="button" className="btn btn-primary" onClick={props.onLoadDemo}>Load a demo study</button>
         <button type="button" className="btn btn-quiet" onClick={props.onStartBlank}>Start from blank</button>
       </div>
-      {!hasKey && (
-        <p className="cs-hint">
-          Reading a document needs your own API key.{" "}
-          <button type="button" className="btn btn-quiet btn-sm" onClick={onOpenSettings}>Add one in Settings</button>
-        </p>
-      )}
     </div>
+  );
+
+  /* THE VERIFICATION RAIL. Presentational only: it derives from the same
+     spec/readiness state everything else reads, and changes nothing. In the
+     empty state it teaches the pipeline; once a study exists it is live
+     status. Step 3 lights only when readiness is genuinely ready, because a
+     rail that shows "verified code" while the gate is blocked would be the
+     exact settled-looking-unsettled state this product refuses. */
+  const railStep = !spec ? 1 : readiness?.ready ? 3 : 2;
+  const rail = (
+    <nav className="cs-rail" aria-label="Pipeline">
+      <ol className="cs-rail-steps">
+        {(["upload protocol", "review spec", "verified code"] as const).map((label, i) => {
+          const n = i + 1;
+          const state = n < railStep ? "done" : n === railStep ? "active" : "future";
+          return (
+            <li key={label} className="cs-rail-step" data-state={state}>
+              <span className="cs-rail-num" aria-hidden="true">{state === "done" ? "✓" : n}</span>
+              <span className="cs-rail-label">
+                {label}
+                {state === "active" && n === 2 && progress && progress.remaining > 0 && (
+                  <span className="cs-rail-note">{progress.remaining} to confirm</span>
+                )}
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+    </nav>
   );
 
   return (
     <div className={paneOpen && files.length > 0 ? "cs-shell cs-split cs-split-margin" : "cs-shell"}>
       <section className="cs-chat" aria-label="Conversation">
+        {rail}
         <div className="cs-log" ref={logRef}>
           {landing}
 

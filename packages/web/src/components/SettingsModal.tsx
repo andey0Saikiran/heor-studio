@@ -166,7 +166,7 @@ export default function SettingsModal({ settings, onChange, onClose }: SettingsM
           )}
           <span className="field-hint">
             {models.length === 0
-              ? "Model list unavailable — enter a model id."
+              ? "Model list unavailable. Enter a model id."
               : "Model used for spec extraction."}
           </span>
         </div>

@@ -1,10 +1,6 @@
 /* HEOR Studio global base — consumes brand.css tokens only. */
 @import "./brand.css";
 
-:root {
-  color-scheme: light dark;
-}
-
 *,
 *::before,
 *::after {
@@ -26,7 +22,7 @@ body {
   background: var(--paper);
   color: var(--ink);
   font-family: var(--font-body);
-  font-size: 16px;
+  font-size: 15px;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
@@ -76,7 +72,7 @@ button:disabled {
 }
 
 :focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
 

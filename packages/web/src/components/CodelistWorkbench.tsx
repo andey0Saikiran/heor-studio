@@ -487,8 +487,8 @@ function AddCodeRow({
     <div className="wb-search">
       <label className="wb-label" htmlFor={searchId}>
         {system === "icd10cm"
-          ? "Add code — search ICD-10-CM (NLM Clinical Tables)"
-          : "Add code — search drug names (NLM RxNav)"}
+          ? "Add code: search ICD-10-CM (NLM Clinical Tables)"
+          : "Add code: search drug names (NLM RxNav)"}
       </label>
       <input
         id={searchId}

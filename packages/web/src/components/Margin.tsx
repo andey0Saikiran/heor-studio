@@ -111,7 +111,7 @@ export default function Margin({ programCount, onExpand }: MarginProps) {
               key={m.id}
               className="mg-mark"
               data-s={m.state}
-              title={expanded ? `${m.name}${m.detail ? ` — ${m.detail}` : ""}` : undefined}
+              title={expanded ? `${m.name}${m.detail ? `: ${m.detail}` : ""}` : undefined}
             />
           ))}
         </div>

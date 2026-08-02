@@ -163,7 +163,7 @@ function ProtocolStep({
       return;
     }
     if (!settings.apiKey) {
-      setError("AI extraction needs your API key — set it in Settings.");
+      setError("AI extraction needs your API key. Set it in Settings.");
       return;
     }
     setBusy(true);
@@ -376,7 +376,7 @@ export default function App() {
           <h1 className="wordmark">HEOR Studio</h1>
           <span className="tagline">Protocol to verified study code, for MarketScan</span>
           <div className="header-actions">
-            <button type="button" className="btn btn-sm" onClick={() => setInboxOpen(true)}>
+            <button type="button" className="btn btn-quiet btn-sm" onClick={() => setInboxOpen(true)}>
               Corrections
               {openCount > 0 && (
                 <span className="count-badge" aria-label={`${openCount} open`}>
@@ -384,7 +384,7 @@ export default function App() {
                 </span>
               )}
             </button>
-            <button type="button" className="btn btn-sm" onClick={() => setSettingsOpen(true)}>
+            <button type="button" className="btn btn-quiet btn-sm" onClick={() => setSettingsOpen(true)}>
               Settings
             </button>
           </div>

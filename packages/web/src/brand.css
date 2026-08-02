@@ -2,153 +2,171 @@
    Do not re-declare palette values in components; consume the variables.
 
    ===========================================================================
-   TWO MATERIALS, ONE SEAM.
+   VERIFICATION INSTRUMENT.
 
-   The left pane is PAPER: a cool neutral ground where a human writes the study,
-   and it inverts with the theme like a document should. The right pane is
-   PLATE: a dark machined ground where the machine returns specimens in fixed
-   pitch, and it is dark in BOTH themes, because generated code is a specimen
-   surface rather than a document. That constancy is what makes the split read
-   as two materials instead of as a theme flip.
+   Cool lab-paper surfaces, ink typography, and ONE deep verified-green accent.
+   Verification is the product's promise, so the brand colour IS the
+   verification colour: the same green signs the wordmark's ground, the primary
+   action, the pass verdict and the active pipeline step. Nothing else on the
+   page is allowed to be green, which is what keeps the colour a signature
+   instead of a theme.
 
-   Between them runs THE MARGIN: a 44px ruled column carrying one mark per
-   verification check, each sitting at the vertical offset of the generated line
-   it proves. It is the only element in this product allowed to sit on a hue.
+   The page is LIGHT, committed, with no dark variant. The scene: an analyst in
+   an office, protocol PDF on one monitor, this on the other, both documents.
+   The single dark surface is the CODE PLATE, a green-black instrument panel set
+   into the paper, dark because generated code is a specimen rather than a
+   document. That one inversion is the visual seam the product hangs on.
 
-   Everything outside that column is held to near-monochrome austerity. No pass
-   pills, no badges, no hero metrics, no shadow you can consciously see. The
-   only thing here that has earned loudness is evidence that actually exists.
-
-   WHY NO GREEN. 1,572 green ticks encode zero information per pixel and read as
-   decoration, which is exactly what makes a verification screen look fake. A
-   passing mark is achromatic: passes must encode DENSITY, not approval. Green
-   appears on the verdict glyph and nowhere else.
+   Between paper and plate runs THE MARGIN: a 44px ruled column carrying one
+   mark per verification check. Marks are muted green-gray; 2,532 saturated
+   ticks would be decoration, and status colour is never decorative. Full
+   --verified appears on the VERDICT, and on nothing inside the rail.
 
    CONTRAST IS SOLVED, NOT EYEBALLED. Every text token clears WCAG AA 4.5:1
    against the worst surface it can land on. Ratios are recorded beside each
    value so a future edit has to knowingly break one.
    =========================================================================== */
 
+@import "@fontsource/stix-two-text/500.css";
+@import "@fontsource/stix-two-text/600.css";
+@import "@fontsource/ibm-plex-sans/400.css";
+@import "@fontsource/ibm-plex-sans/500.css";
+@import "@fontsource/ibm-plex-sans/600.css";
+@import "@fontsource/ibm-plex-mono/400.css";
+@import "@fontsource/ibm-plex-mono/500.css";
+@import "@fontsource/ibm-plex-mono/600.css";
+
 :root {
-  color-scheme: light dark;
+  /* Light only. A committed look, held everywhere; the plate carries its own
+     color-scheme:dark locally so its scrollbars and controls render dark. */
+  color-scheme: light;
 
-  /* ---- grounds ---- */
-  --paper: #F4F6F8;          /* left pane: the human side */
-  --surface: #EDF0F2;
-  --surface-deep: #E2E7EA;
-  --surface-2: #E8ECEF;      /* row hover, inset wells */
+  /* ---- grounds ----
+     Paper is a green-tinted near-white: the neutral is tinted toward the
+     brand's own hue, never toward generic warmth. Cards are true white so the
+     page reads as sheets ON a bench rather than as one flat field. */
+  --paper: #F6F7F5;          /* the bench */
+  --surface: #FFFFFF;        /* sheets: cards, panes, header */
+  --surface-deep: #F1F3F0;   /* inset wells on a sheet */
+  --surface-2: #EDF0EC;      /* row hover */
 
-  /* PLATE is dark in both themes. Not a theme value. A material. */
-  --plate: #0D1114;
-  --plate-edge: #0F1418;     /* the Margin's own ground, one step off plate */
-  --plate-ink: #D6DEE5;      /* 13.5:1 on plate */
-  --plate-ink-dim: #9AA7B2;  /*  7.1:1 — keywords */
-  --plate-ink-lit: #7FB2E5;  /*        — literals */
+  /* PLATE: the one dark surface. Green-black, an instrument panel. */
+  --plate: #0E1B16;
+  --plate-edge: #0A1410;     /* the Margin's own ground, one step off plate */
+  --plate-ink: #CFE3D9;      /* 12.6:1 on plate */
+  --plate-ink-dim: #8FA89C;  /*  6.1:1 — comments, keywords */
+  --plate-ink-lit: #7FD1AE;  /*  9.4:1 — literals, the green family */
 
   /* ---- ink on paper ---- */
-  --ink: #141A1F;            /* 14.08:1 on surface-deep */
-  --ink-soft: #48545E;       /*  6.23:1 */
-  --ink-faint: #5D6974;      /*  4.51:1 — the hard floor. Nothing sits below it. */
-  --ink-inv: #E6EBEF;
+  --ink: #171A18;            /* 15.6:1 on surface-deep */
+  --ink-soft: #454C47;       /*  8.6:1 */
+  --ink-faint: #5C645E;      /*  5.6:1 on white, 5.2:1 on paper — the floor. */
+  --ink-2: var(--ink-faint); /* the brief's name for the same ink */
+  --ink-inv: #F6F7F5;
 
-  /* ---- the countersign. At most twice per screen, never a fill over 32px. -- */
-  --accent: #1F4E79;         /*  6.95:1 */
-  --accent-ink: #16395A;     /*  9.54:1 */
-  --accent-wash: #DFE8F1;
+  /* ---- THE accent. Primary actions, verified states, active step. ---- */
+  --verified: #0F6B54;       /*  6.3:1 on white; white on it 4.9:1 */
+  --verified-hover: #0B523F; /*  8.6:1 */
+  --verified-wash: #E6F1EC;
+  --accent: var(--verified);           /* legacy names flow to the same green */
+  --accent-ink: var(--verified-hover);
+  --accent-wash: var(--verified-wash);
 
-  /* ---- the checker's second ink. ONLY inside the Margin, only for a pass. -- */
-  --mark: #6E7A84;
+  /* ---- the checker's second ink. ONLY inside the Margin, only for a pass.
+     Muted green-gray: passes encode DENSITY, the verdict carries the green. */
+  --mark: #6D8A7C;
 
-  /* ---- verdicts. Colour never carries meaning alone. ---- */
-  --danger: #A32F2A;         /*  5.62:1 — refusal, failed check */
-  --danger-wash: #F7E4E3;
-  --warn: #8A5200;           /*  5.13:1 — caution, staleness. On the CONTROL, never the output. */
-  --warn-wash: #F6EBDA;
-  --ok: #1F6B4A;             /*  5.17:1 — the verdict glyph and nothing else */
-  --ok-wash: #DFEDE6;
+  /* ---- status. Colour never carries meaning alone. ---- */
+  --danger: #A63A2E;         /*  6.0:1 — refusal, failed check */
+  --danger-wash: #F7ECEA;
+  --error: var(--danger);
+  --warn: #935F00;           /*  5.1:1 — caution the analyst must resolve */
+  --warn-wash: #F8F1DF;
+  --caution: var(--warn);
+  --ok: var(--verified);     /* a pass IS the brand promise */
+  --ok-wash: var(--verified-wash);
 
   /* ---- one rule value, no variants ---- */
-  --hairline: #D3DAE0;
+  --hairline: #DEE2DC;
+  --border: var(--hairline);
   --line: var(--hairline);   /* back-compat alias */
   --code-bg: var(--plate);
   --code-ink: var(--plate-ink);
 
-  /* ---- the specular edge ----
-     `inset 0 1px 0 var(--specular)` on every raised surface. One line, and a
-     flat rectangle becomes an object. It is what stops the dark pane from
-     looking like a coloured div. */
+  /* ---- focus. One ring, everywhere: 2px of the verified green. ---- */
+  --focus-ring: color-mix(in srgb, var(--verified) 55%, transparent);
+
+  /* ---- the specular edge ---- */
   --specular: rgb(255 255 255 / .70);
   --specular-plate: rgb(255 255 255 / .05);
   --bevel-plate: rgb(0 0 0 / .28);
 
-  /* ---- composite elevation ----
-     Depth from stacking four nearly invisible layers, never one visible one.
-     No single alpha exceeds 6%. The negative spreads are what make it read as
-     occlusion UNDER the element rather than a halo around it. */
-  --shadow-border-base: 0 0 0 1px rgb(0 0 0 / .08);
+  /* ---- elevation. Hairlines do the separating; shadows stay whispered.
+     Cards never exceed 0 1px 2px at 5%. Overlays may stack soft layers. ---- */
+  --shadow: 0 1px 2px rgb(23 26 24 / .05);
+  --shadow-border-base: 0 0 0 1px rgb(23 26 24 / .07);
   --shadow-backing: 0 0 0 1px var(--surface-2);
   --shadow-menu:
     var(--shadow-border-base),
-    0 1px 1px rgb(0 0 0 / .02),
-    0 4px 8px -4px rgb(0 0 0 / .04),
-    0 16px 24px -8px rgb(0 0 0 / .06);
+    0 1px 1px rgb(23 26 24 / .02),
+    0 4px 8px -4px rgb(23 26 24 / .04),
+    0 16px 24px -8px rgb(23 26 24 / .06);
   --shadow-modal:
     var(--shadow-border-base),
-    0 1px 1px rgb(0 0 0 / .02),
-    0 8px 16px -4px rgb(0 0 0 / .05),
-    0 24px 32px -8px rgb(0 0 0 / .06);
-  --shadow: 0 1px 2px rgb(16 24 32 / .04);
+    0 1px 1px rgb(23 26 24 / .02),
+    0 8px 16px -4px rgb(23 26 24 / .05),
+    0 24px 32px -8px rgb(23 26 24 / .06);
 
-  /* ---- type: two families, zero webfonts ----
-     0 KB of bundle, and no network request from a compliance-sensitive machine.
-     The serif display face is RETIRED, including from the wordmark: this
-     product's identity is a specimen label, not a masthead. */
-  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", Roboto, sans-serif;
+  /* ---- type: three families, all self-hosted ----
+     @fontsource, ZERO third-party requests. The fonts must not be the thing
+     that falsifies "nothing touches our servers" on a compliance-audited
+     machine; a Google Fonts <link> would be exactly that.
+     STIX Two Text is the journal voice: wordmark and section headings ONLY.
+     IBM Plex Sans carries the interface. IBM Plex Mono carries every specimen:
+     file names, chips, badges, counts, code. */
+  --font-display: "STIX Two Text", "Times New Roman", serif;
+  --font-ui: "IBM Plex Sans", -apple-system, "Segoe UI", Roboto, sans-serif;
   --font-body: var(--font-ui);
-  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
-  --font-display: var(--font-ui);   /* retired; alias so nothing breaks */
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 
-  /* Fixed rem, ~1.15. A heading that shrinks inside a pane looks broken, not
-     responsive. Negative tracking begins at 17px; positive tracking exists only
-     at the two smallest steps. */
+  /* Fixed rem, 15px base. Display sizes per the brief: 22/18, used sparingly. */
   --t-micro: 0.6875rem;
   --text-xs: 0.75rem;
   --text-sm: 0.8125rem;
   --t-code: 0.8125rem;
-  --text-base: 0.9375rem;
+  --text-base: 0.9375rem;   /* 15px */
   --text-md: 1rem;
-  --text-lg: 1.0625rem;
-  --text-xl: 1.3125rem;
-  --text-2xl: 1.625rem;
+  --text-lg: 1.125rem;      /* 18px — display small */
+  --text-xl: 1.375rem;      /* 22px — display large */
+  --text-2xl: 1.375rem;     /* alias: nothing sits above the display ceiling */
 
   --leading-tight: 1.25;
-  --leading-normal: 1.5;
+  --leading-normal: 1.55;
   --leading-prose: 1.6;
   --leading-code: 1.5385;    /* 13px/20px, tuned for scanning depth */
 
-  /* ---- shape. Machined edges. Heavy rounding is the loudest signal of the
-          consumer register this product is explicitly not in. ---- */
-  --radius: 4px;
-  --radius-lg: 6px;
+  /* ---- shape: 6px controls, 10px cards ---- */
+  --radius: 6px;
+  --radius-lg: 10px;
   --space-1: .25rem; --space-2: .5rem; --space-3: .75rem;
   --space-4: 1rem; --space-5: 1.5rem; --space-6: 2rem; --space-8: 3rem;
 
   /* ---- motion ----
-     Four curves, and only four. Every duration scales by --motion-speed. */
+     150ms ease on hover and focus. No entrance animations: the product loads
+     into a task. Every duration scales by --motion-speed. */
   --motion-speed: 1;
   --ease-out-quad: cubic-bezier(.25, .46, .45, .94);   /* ~90% of state change */
   --ease-sheet:    cubic-bezier(.32, .72, 0, 1);       /* pane and Margin morphs */
-  --ease-swift:    cubic-bezier(.175, .885, .32, 1.1); /* overlays ONLY, 1% overshoot */
+  --ease-swift:    cubic-bezier(.175, .885, .32, 1.1); /* overlays ONLY */
   --spring-settle: linear(0,.2074,.5111,.7346,.8679,.9388,.9735,.9894,.9961,.9988,.9997,1);
   --ease-out: var(--ease-out-quad);                    /* back-compat alias */
 
   --dur-fast: calc(120ms * var(--motion-speed));
-  --dur: calc(160ms * var(--motion-speed));
+  --dur: calc(150ms * var(--motion-speed));
   --dur-sheet: calc(260ms * var(--motion-speed));
 
-  /* ASYMMETRIC HOVER, the highest-leverage pair in the system. Fading a hover
-     IN is the single most common reason a competent UI feels a notch cheap.
-     Separate tokens so nobody can accidentally unify them. */
+  /* ASYMMETRIC HOVER. In is instant, out is eased; fading a hover IN is the
+     single most common reason a competent UI feels a notch cheap. */
   --speed-hl-in: 0s;
   --speed-hl-out: calc(150ms * var(--motion-speed));
 
@@ -158,41 +176,6 @@
   --z-backdrop: 300;
   --z-modal: 400;
   --z-toast: 500;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --paper: #171B1F;
-    --surface: #1B2126;
-    --surface-deep: #212930;
-    --surface-2: #1F272D;
-
-    /* plate, plate-edge and plate-ink do NOT change. That is the point. */
-
-    --ink: #E6EBEF;          /* 13.4:1 */
-    --ink-soft: #A3AEB7;     /*  7.2:1 */
-    --ink-faint: #8B96A0;    /*  5.3:1 */
-    --ink-inv: #141A1F;
-
-    --accent: #7FB2E5;       /*  7.5:1 */
-    --accent-ink: #9CC6F0;
-    --accent-wash: #17293A;
-
-    --mark: #7C8892;
-
-    --danger: #FF9E96;       /*  8.3:1 */
-    --danger-wash: #331B1A;
-    --warn: #E8B15C;         /*  8.8:1 */
-    --warn-wash: #2A2114;
-    --ok: #6FCB9F;
-    --ok-wash: #14271D;
-
-    --hairline: #262D33;
-    --specular: rgb(255 255 255 / .06);
-
-    --shadow-border-base: 0 0 0 1px rgb(255 255 255 / .10);
-    --shadow: 0 1px 2px rgb(0 0 0 / .4);
-  }
 }
 
 /* ---- numerics and ligatures ----
@@ -207,6 +190,12 @@
 }
 [data-num], .stat { font-variant-numeric: tabular-nums; }
 body { font-synthesis: none; -webkit-font-smoothing: antialiased; }
+
+/* ---- focus: visible on EVERY interactive element, restyled never removed ---- */
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
 
 /* Reduced motion uses .01 rather than 0 so transitionend still fires and the
    run-state machine cannot deadlock. */
