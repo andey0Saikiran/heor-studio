@@ -91,7 +91,7 @@ function sqlAdherence(ctx: SqlCtx, an: AdherenceAnalysis, suffix: string): SqlMo
   for (const note of ADHERENCE_METHOD_NOTES) L.push(`--   * ${note}`);
 
   const C: string[] = [];
-  C.push(`WITH cohort AS (SELECT enrolid, index_date FROM ${wp}_cohort),`);
+  C.push(`WITH cohort AS (SELECT enrolid, index_date FROM ${ctx.cohortT}),`);
   C.push(`fills_raw AS (   -- dispensings of the measured drug, per cohort member`);
   C.push(`  SELECT c.enrolid, c.index_date, f.fill_date AS fill_start, f.days_supply`);
   C.push(`  FROM cohort c`);

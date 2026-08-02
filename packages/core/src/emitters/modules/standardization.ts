@@ -150,7 +150,7 @@ function sqlStandardization(ctx: SqlCtx, an: StandardizationAnalysis, suffix: st
 
   L.push(`DROP TABLE IF EXISTS ${out};`);
   L.push(`CREATE TABLE ${out} AS`);
-  L.push(`WITH cohort AS (SELECT enrolid, index_date FROM ${wp}_cohort),`);
+  L.push(`WITH cohort AS (SELECT enrolid, index_date FROM ${ctx.cohortT}),`);
   L.push(`ae AS (SELECT enrolid, event_date FROM ${wp}_events WHERE code_list_id = '${an.outcomeDefinition.codeListId}'${setting.enforce ? ` AND setting = '${setting.enforce}'` : ""}),`);
   L.push(`prevalent AS (   -- washout: ${describeWindow(WASHOUT)}`);
   L.push(`  SELECT DISTINCT c.enrolid`);

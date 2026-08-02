@@ -38,7 +38,10 @@ import type {
   TrendSpec,
 } from "../spec/types";
 import type { StudySpec } from "../spec/types";
-import { survivalOutcome, daysSupplyCleaningFor } from "../spec/types";
+import {
+  survivalOutcome, daysSupplyCleaningFor,
+  ICD10_TRANSITION_DATE, findCodeList, icdEraCounts, lookbackReach,
+} from "../spec/types";
 import { CONVENTIONAL_STRATA } from "./psstrat-core";
 import type { LedgerAttribution, LedgerInflation, MemberMonthOptions } from "./ledger";
 
@@ -1167,13 +1170,25 @@ export function resourceUseParity(
  *  Weighted comorbidity index
  * ================================================================== */
 
-/** Score-band labels from inclusive lower bounds, e.g. [0,1,3] -> 0 / 1-2 / 3+. */
+/**
+ * Score-band labels from inclusive lower bounds, e.g. [0,1,3] -> 0 / 1-2 / 3+.
+ *
+ * A band whose bounds go NEGATIVE is spelled with the word "to" rather than a
+ * hyphen. `[-10, 0]` would otherwise label as "-10--1", which puts a SQL
+ * line-comment opener INSIDE a string literal: perfectly legal to the database
+ * and quietly destructive to every naive comment stripper downstream — this
+ * project's own fingerprint included, which truncated the rest of the line and
+ * lost the band it was scraping. Positive bands keep the hyphen they have
+ * always had, so no index that never used a negative weight changes its labels.
+ */
 export function scoreBandLabels(lowers: number[]): Array<{ lower: number; label: string }> {
   const b = [...lowers].sort((x, y) => x - y);
-  return b.map((lo, i) => ({
-    lower: lo,
-    label: i === b.length - 1 ? `${lo}+` : b[i + 1] - lo === 1 ? `${lo}` : `${lo}-${b[i + 1] - 1}`,
-  }));
+  return b.map((lo, i) => {
+    if (i === b.length - 1) return { lower: lo, label: `${lo}+` };
+    const hi = b[i + 1] - 1;
+    if (hi === lo) return { lower: lo, label: `${lo}` };
+    return { lower: lo, label: lo < 0 || hi < 0 ? `${lo} to ${hi}` : `${lo}-${hi}` };
+  });
 }
 
 /** The parameter set a comorbidity-index twin must consume identically. */
@@ -1189,6 +1204,95 @@ export interface ComorbidityIndexParity {
   /** what supersession actually does, so the stamp cannot imply more than the code does */
   supersessionEffect: "withholds_weight_keeps_prevalence";
   medianEstimator: "percentile_cont_equivalent";
+  /**
+   * DECLARED ONLY WHEN A WEIGHT IS NEGATIVE, so the absence of the key is
+   * itself the claim "every weight in this index is positive".
+   *
+   * Present, it names the negatively-weighted conditions and the most negative
+   * total they can produce, and asserts the score is NOT clamped anywhere.
+   * That last one is the thing worth stamping: a clamp at zero leaves a
+   * perfectly ordinary-looking distribution and a mean that is wrong for
+   * exactly the patients the negative weights were introduced to describe.
+   */
+  negativeWeights?: { conditions: string[]; scoreFloor: number; scoreClamped: false };
+  /**
+   * DECLARED ONLY WHEN THE LOOKBACK CROSSES 1 OCTOBER 2015. Present, it carries
+   * the era coverage of every condition's code list, so the SAS program itself
+   * records what readiness checked rather than the reader having to re-run it.
+   */
+  icdTransition?: { date: string; reachesBack: string; eraCoverage: string[] };
+}
+
+/** Conditions whose weight is negative, and the floor they imply.
+ *
+ *  Supersession only WITHHOLDS a weight, and withholding a negative one RAISES
+ *  the score — so the sum of the negative weights is the most negative total
+ *  the index can produce, and it is the bound readiness holds the lowest score
+ *  band to. */
+export function negativeWeightPlan(
+  an: ComorbidityIndexAnalysis,
+): { conditions: string[]; scoreFloor: number; scoreClamped: false } | undefined {
+  const neg = an.conditions.filter((c) => Number.isFinite(c.weight) && c.weight < 0);
+  if (neg.length === 0) return undefined;
+  return {
+    conditions: neg.map((c) => `${c.id}:${c.weight}`),
+    scoreFloor: neg.reduce((n, c) => n + c.weight, 0),
+    scoreClamped: false,
+  };
+}
+
+/** Era coverage of every condition list, when the lookback crosses the ICD
+ *  transition; undefined when it does not. */
+export function icdTransitionPlan(
+  spec: StudySpec,
+  an: ComorbidityIndexAnalysis,
+): { date: string; reachesBack: string; eraCoverage: string[] } | undefined {
+  const reach = lookbackReach(spec, an.lookback);
+  if (!reach.spansTransition) return undefined;
+  return {
+    date: ICD10_TRANSITION_DATE,
+    reachesBack: reach.reachesBack,
+    eraCoverage: an.conditions.map((c) => {
+      const l = findCodeList(spec, c.codeListId);
+      if (!l) return `${c.id}:missing_list`;
+      const e = icdEraCounts(l);
+      return `${c.id}:icd9=${e.icd9},icd10=${e.icd10}`;
+    }),
+  };
+}
+
+/**
+ * The ICD-era note the emitted program carries, ALWAYS, whenever this
+ * analysis's lookback can reach across 1 October 2015.
+ *
+ * Readiness refuses a single-era list that crosses the boundary. This is the
+ * other half: a reader holding the generated SAS six months from now never ran
+ * readiness, and nothing in a comorbidity table looks wrong when half a
+ * lookback silently matched nothing. So the program states the boundary, the
+ * rule, the date its own lookback reaches back to, and the era coverage of
+ * every list it queries.
+ *
+ * It is conditional on the window CROSSING the transition rather than
+ * unconditional, on the same principle as the coarsening notes: a study whose
+ * whole observation window sits on one side of the boundary has no era problem
+ * to warn about, and a warning that is always true of nothing is a warning
+ * readers learn to skip.
+ */
+export function comorbidityIcdEraNotes(spec: StudySpec, an: ComorbidityIndexAnalysis): string[] {
+  const plan = icdTransitionPlan(spec, an);
+  if (!plan) return [];
+  const out: string[] = [];
+  out.push(
+    `THE LOOKBACK CROSSES THE ICD-9 TO ICD-10 TRANSITION OF ${plan.date}. Claims dated before it carry ICD-9-CM codes (DXVER '9', or NULL in older deliveries); claims dated on or after it carry ICD-10-CM (DXVER '0'). A CODE ONLY EVER MATCHES CLAIMS FROM ITS OWN ERA, because DXVER separates them at query time`,
+  );
+  out.push(
+    `this analysis ascertains conditions back to ${plan.reachesBack} (earliest index date ${spec.indexEvent.indexPeriod.start}, latest ${spec.indexEvent.indexPeriod.end}), so both eras are inside its lookback`,
+  );
+  out.push(
+    `a condition whose code list carries only ONE era is ascertained only on that side of ${plan.date} and reads as ABSENT on the other - which is indistinguishable from a genuinely healthy stretch of history, and biases the index DOWNWARD for exactly the patients with the longest lookback. Nothing in the output would look wrong`,
+  );
+  out.push(`era coverage of the lists this program queries: ${plan.eraCoverage.join("; ")}`);
+  return out;
 }
 
 /** Spec options the comorbidity-index twins do NOT implement yet. */
@@ -1218,8 +1322,17 @@ export const COMORBIDITY_INDEX_METHOD_NOTES = [
 /** The parity record for a comorbidity-index twin, from consumed values. */
 export function comorbidityIndexParity(
   an: ComorbidityIndexAnalysis,
-  consumed: { pairs: Array<{ winner: string; loser: string }>; bands: Array<{ lower: number; label: string }> },
+  consumed: {
+    pairs: Array<{ winner: string; loser: string }>;
+    bands: Array<{ lower: number; label: string }>;
+    /** the spec, so the era coverage can be stamped when the lookback crosses
+     *  the ICD transition. Optional so callers that only have the analysis
+     *  (there are none today) still compile rather than silently omitting it. */
+    spec?: StudySpec;
+  },
 ): ComorbidityIndexParity {
+  const neg = negativeWeightPlan(an);
+  const icd = consumed.spec ? icdTransitionPlan(consumed.spec, an) : undefined;
   return {
     id: an.id,
     indexName: an.indexName,
@@ -1229,6 +1342,12 @@ export function comorbidityIndexParity(
     bands: consumed.bands.map((b) => b.label),
     supersessionEffect: "withholds_weight_keeps_prevalence",
     medianEstimator: "percentile_cont_equivalent",
+    /* Spread, not assigned: an index with only positive weights and a lookback
+     * clear of the transition stamps EXACTLY what it stamped before, so the
+     * byte-identity gate stays meaningful for every spec that never asked for
+     * either feature. */
+    ...(neg ? { negativeWeights: neg } : {}),
+    ...(icd ? { icdTransition: icd } : {}),
   };
 }
 

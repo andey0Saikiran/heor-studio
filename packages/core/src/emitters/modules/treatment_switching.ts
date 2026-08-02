@@ -85,7 +85,7 @@ function sqlSwitching(ctx: SqlCtx, an: TreatmentSwitchingAnalysis, suffix: strin
   for (const note of SWITCHING_METHOD_NOTES) L.push(`--   * ${note}`);
 
   const C: string[] = [];
-  C.push(`WITH cohort AS (SELECT enrolid, index_date FROM ${wp}_cohort),`);
+  C.push(`WITH cohort AS (SELECT enrolid, index_date FROM ${ctx.cohortT}),`);
   /* THE FROM-DRUG's coverage. Only its LAST covered day matters here, so the
    * full island merge is unnecessary: the maximum of (start + supply - 1) over
    * all its fills IS the last covered day, whatever the overlap structure. */

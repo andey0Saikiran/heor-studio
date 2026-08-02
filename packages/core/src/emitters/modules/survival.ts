@@ -169,7 +169,7 @@ function sqlSurvival(ctx: SqlCtx, an: SurvivalAnalysis, suffix: string): SqlModu
   C.push(`  SELECT c.enrolid, c.index_date, ${adminCensor} AS admin_censor, f.fu_date${p.grouped ? `, ${armExpr} AS arm` : ``}`);
   C.push(`  FROM atrisk c`);
   if (p.grouped) {
-    C.push(`  JOIN ${wp}_cohort ch ON ch.enrolid = c.enrolid`);
+    C.push(`  JOIN ${ctx.cohortT} ch ON ch.enrolid = c.enrolid`);
     if (viaNdc) {
       C.push(`  JOIN ${wp}_ndc_lookup nl`);
       C.push(`    ON nl.code_list_id = '${q(indexListId)}' AND nl.ndcnum = ch.index_code`);

@@ -42,7 +42,11 @@ import type { Ctx, ListKind, PulledList, SiteNaming } from "./sas-base";
 import { moduleAnalyses } from "./modules/registry";
 import { comorbidityScoreSasScore, comorbidityScoreSasSteps, indexAnalysisFor } from "./comorbidity";
 import { suppressionPolicy, suppressionSasFor, type SuppressionTarget } from "./suppression";
-import { ascertainmentWindow } from "./parity";
+import { ascertainmentWindow, parityStamp } from "./parity";
+import {
+  resolveSweeps, sasArmCohortTable, sweepArmCohortsSas, sweepParity, sweepSummarySas,
+  SWEEP_METHOD_NOTES,
+} from "./sweep";
 
 /* ================================================================== *
  *  small utilities
@@ -1673,12 +1677,11 @@ export const emitSas: SasEmitter = (spec: StudySpec, opts: EmitOptions): Generat
   // 080+ analysis modules (one program per enabled analysis), dispatched
   // through the module registry in spec order.
   const suppressTargets: SuppressionTarget[] = [];
-  let lastIdx = -1;
-  moduleAnalyses(spec.analyses).forEach(({ an, mod, multi }, i) => {
-    const num = String((8 + i) * 10).padStart(3, "0"); // 080, 090, 100, ...
+  let seq = 8;
+  moduleAnalyses(spec.analyses).forEach(({ an, mod, multi }) => {
+    const num = String(seq++ * 10).padStart(3, "0"); // 080, 090, 100, ...
     const suffix = multi ? `_${sasName(an.id).toLowerCase()}` : "";
     files.push(mod.sas(ctx, an as never, num, suffix));
-    lastIdx = i;
     const extras = mod.suppressionExtras?.(an as never);
     suppressTargets.push({
       table: ctx.tbl(`${num}_${mod.resultSlug}${suffix}`),
@@ -1689,10 +1692,115 @@ export const emitSas: SasEmitter = (spec: StudySpec, opts: EmitOptions): Generat
     });
   });
 
+  /* DECLARED SWEEPS — twin of the SQL pass, program for program. The arm's
+   * analysis is emitted by the target's OWN module with `finalCohort` repointed
+   * at the arm's cohort (a subgroup slice, or a copy of the whole cohort for a
+   * sensitivity arm, so the two kinds differ only where they declare they do). */
+  const sweeps = resolveSweeps(spec);
+  for (const s of sweeps) {
+    if (!s.emittable) {
+      const num = String(seq++ * 10).padStart(3, "0");
+      files.push({
+        path: `sas/${num}_sweep_${s.tag}.sas`,
+        language: "sas",
+        title: `${num} Sweep ${s.tag} (not emitted)`,
+        content: [
+          ...header(spec, `${num}_sweep_${s.tag}.sas`, [
+            `Declared sweep over "${s.plan.analysisId}" - NOT EMITTED.`,
+            `Reason: ${s.reason}.`,
+            `A declared sweep the bundle simply left out would be indistinguishable`,
+            `from a study that never declared one, so the file is emitted anyway.`,
+          ]),
+          `/* SWEEP NOT EMITTED: ${cmt(s.reason)} */`,
+          ``,
+        ].join("\n"),
+      });
+      continue;
+    }
+    const cohNum = String(seq++ * 10).padStart(3, "0");
+    files.push({
+      path: `sas/${cohNum}_swcoh_${s.tag}.sas`,
+      language: "sas",
+      title: `${cohNum} Sweep ${s.tag} arm cohorts`,
+      content: [
+        ...header(spec, `${cohNum}_swcoh_${s.tag}.sas`, [
+          `Arm cohorts for sweep "${s.tag}" over "${s.target.label}" (${s.target.kind}).`,
+          `One data set per declared arm: a SENSITIVITY arm gets the whole cohort,`,
+          `a SUBGROUP arm gets a slice. Nothing else differs between them.`,
+          `Twin of the SQL swcoh program (SQL twin is execution-verified; this SAS twin is parity-checked, not executed). Keep both in sync.`,
+        ]),
+        ...INCLUDE_SETUP,
+        ...sweepArmCohortsSas({
+          spec, s, num: cohNum,
+          finalCohort: ctx.finalCohort,
+          enrollTable: ctx.tbl("040_enroll"),
+          tbl: ctx.tbl,
+        }),
+      ].join("\n"),
+    });
+
+    const armTables: string[] = [];
+    for (const arm of s.arms) {
+      const num = String(seq++ * 10).padStart(3, "0");
+      const armCtx: Ctx = { ...ctx, finalCohort: sasArmCohortTable(ctx.tbl, cohNum, arm) };
+      files.push(s.mod.sas(armCtx, arm.analysis as never, num, arm.suffix));
+      const table = ctx.tbl(`${num}_${s.mod.resultSlug}${arm.suffix}`);
+      armTables.push(table);
+      const extras = s.mod.suppressionExtras?.(arm.analysis as never);
+      suppressTargets.push({
+        table,
+        shapeKey: s.mod.stampKind,
+        label: `${arm.analysis.label} (${arm.analysis.kind}) [sweep ${s.tag} arm ${arm.id}]`,
+        arm: { id: arm.id, kind: arm.kind, label: arm.label },
+        ...(extras?.maskCols.length ? { extraMaskCols: extras.maskCols } : {}),
+        ...(extras?.keepCols.length ? { extraKeepCols: extras.keepCols } : {}),
+      });
+    }
+
+    const sumNum = String(seq++ * 10).padStart(3, "0");
+    const outT = ctx.tbl(`${sumNum}_sweep_${s.tag}`);
+    files.push({
+      path: `sas/${sumNum}_sweep_${s.tag}.sas`,
+      language: "sas",
+      title: `${sumNum} Sweep ${s.tag} summary`,
+      content: [
+        ...header(spec, `${sumNum}_sweep_${s.tag}.sas`, [
+          `Sweep "${s.tag}" over "${s.target.label}": every declared arm, the range`,
+          `across them, and the direction verdict. Every row carries its arm id,`,
+          `its arm KIND (subgroup vs sensitivity) and its label.`,
+          `The primary arm is "${s.primaryArmId}", named in the spec before any`,
+          `estimate existed.`,
+          `SAS-PRIMARY: nothing.`,
+          `Twin of the SQL sweep program (SQL twin is execution-verified; this SAS twin is parity-checked, not executed). Keep both in sync.`,
+        ]),
+        `/* ${parityStamp("sweep", sweepParity(s))} */`,
+        ``,
+        `/* REVIEW - method notes (always emitted):`,
+        ...SWEEP_METHOD_NOTES.map((n) => `   * ${cmt(n)}`),
+        `*/`,
+        `/* ARMS, in declaration order:`,
+        ...s.arms.map((a) => `   * ${cmt(a.id)} (${a.kind}${a.isPrimary ? ", PRIMARY" : ""}): ${cmt(a.label)} - ${cmt(a.note)}`),
+        `*/`,
+        ``,
+        ...INCLUDE_SETUP,
+        `proc datasets lib=tz nolist nowarn;`,
+        `  delete ${outT.replace("tz.", "")};`,
+        `quit;`,
+        ``,
+        ...sweepSummarySas({ s, num: sumNum, cohNum, outT, armTables, tbl: ctx.tbl }),
+      ].join("\n"),
+    });
+    suppressTargets.push({
+      table: outT,
+      shapeKey: "sweep",
+      label: `Sweep ${s.tag} over ${s.target.label}`,
+    });
+  }
+
   /* Small-cell suppression (BR-DEL-004) — twin of the SQL pass. */
   const policy = suppressionPolicy(spec);
   if (policy.enabled && suppressTargets.length > 0) {
-    const num = String((8 + lastIdx + 1) * 10).padStart(3, "0");
+    const num = String(seq++ * 10).padStart(3, "0");
     const lines: string[] = [
       ...header(spec, `${num}_suppression.sas`, [
         `Small-cell suppression: mask cells below the disclosure threshold and`,

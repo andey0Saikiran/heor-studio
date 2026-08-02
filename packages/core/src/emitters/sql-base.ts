@@ -69,6 +69,21 @@ export interface Ctx {
   opts: EmitOptions;
   /** Work-table prefix (lower-cased study tag). */
   wp: string;
+  /**
+   * The cohort table every analysis module READS from. Normally
+   * `${wp}_cohort`, the spine's final cohort.
+   *
+   * It is a field rather than a derived string so a SUBGROUP SWEEP ARM can
+   * repoint it at a sliced cohort and re-emit the analysis through the SAME
+   * module — the SAS context has always had exactly this (`finalCohort`), and
+   * the asymmetry was the only thing standing between "the arm runs the same
+   * emitter" and "the arm runs a parallel implementation that can drift".
+   *
+   * Only READS are repointed. The spine still creates `${wp}_cohort` under its
+   * own name, and with the default value every module emits the byte-identical
+   * text it emitted before — which the snapshot gate enforces.
+   */
+  cohortT: string;
   /** Logical family key -> physical table name. */
   t: (key: string) => string;
 }

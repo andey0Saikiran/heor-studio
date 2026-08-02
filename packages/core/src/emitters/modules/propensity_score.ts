@@ -156,7 +156,7 @@ function sqlPropensityScore(ctx: SqlCtx, an: PropensityScoreAnalysis, suffix: st
   const needCci = p.balance.some((b) => b.axis === "comorbidity_index");
 
   const C: string[] = [];
-  C.push(`WITH cohort AS (SELECT enrolid, index_date, index_code FROM ${wp}_cohort),`);
+  C.push(`WITH cohort AS (SELECT enrolid, index_date, index_code FROM ${ctx.cohortT}),`);
   C.push(`demo AS (   -- enrollment segment in force at (or latest before) index; rn=1 wins`);
   C.push(`  SELECT c.enrolid, en.dobyr, en.sex, en.region, en.plantyp,`);
   C.push(`         ROW_NUMBER() OVER (PARTITION BY c.enrolid ORDER BY en.dtstart DESC, en.dtend DESC) AS rn`);

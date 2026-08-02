@@ -135,7 +135,7 @@ function sqlFineGray(ctx: SqlCtx, an: FineGrayAnalysis, suffix: string): SqlModu
   L.push(`-- against below is closed form and executed.`);
 
   const C: string[] = [];
-  C.push(`WITH cohort AS (SELECT enrolid, index_date FROM ${wp}_cohort),`);
+  C.push(`WITH cohort AS (SELECT enrolid, index_date FROM ${ctx.cohortT}),`);
   p.causes.forEach((c, i) => {
     const cs = outcomeSettingPlan(c.od, findCodeList(spec, c.od.codeListId)?.system ?? "icd10cm");
     C.push(`${i === 0 ? `ev AS (` : `  UNION ALL`}`);
@@ -162,7 +162,7 @@ function sqlFineGray(ctx: SqlCtx, an: FineGrayAnalysis, suffix: string): SqlModu
   C.push(`  SELECT c.enrolid, c.index_date, ${renderCensorSql(ctx, censor)} AS admin_censor,`);
   C.push(`         f.fu_date, f.cause, ${armExpr} AS arm`);
   C.push(`  FROM atrisk c`);
-  C.push(`  JOIN ${wp}_cohort ch ON ch.enrolid = c.enrolid`);
+  C.push(`  JOIN ${ctx.cohortT} ch ON ch.enrolid = c.enrolid`);
   if (viaNdc) {
     C.push(`  JOIN ${wp}_ndc_lookup nl`);
     C.push(`    ON nl.code_list_id = '${q(indexListId)}' AND nl.ndcnum = ch.index_code`);

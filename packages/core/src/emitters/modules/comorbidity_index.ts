@@ -43,6 +43,7 @@ import {
   supersessionPairs,
 } from "../comorbidity";
 import {
+  comorbidityIcdEraNotes,
   comorbidityIndexLimitations,
   comorbidityIndexParity,
   parityStamp,
@@ -57,13 +58,14 @@ const MEASURE = "comorbidity_index";
  * ================================================================== */
 
 function sqlComorbidityIndex(ctx: SqlCtx, an: ComorbidityIndexAnalysis, suffix: string): SqlModuleFile {
-  const { d, wp } = ctx;
+  const { d, wp, spec } = ctx;
   const out = `${wp}_cci${suffix}`;
   const pairs = supersessionPairs(an);
   const bands = scoreBandLabels(an.scoreBands);
+  const negWeights = an.conditions.filter((c) => c.weight < 0);
 
   const L: string[] = [];
-  L.push(`-- ${parityStamp("comorbidity_index", comorbidityIndexParity(an, { pairs, bands }))}`);
+  L.push(`-- ${parityStamp("comorbidity_index", comorbidityIndexParity(an, { pairs, bands, spec }))}`);
   const limits = comorbidityIndexLimitations(an);
   if (limits.length > 0) {
     L.push(`-- REVIEW - spec options this program does not implement yet:`);
@@ -71,11 +73,27 @@ function sqlComorbidityIndex(ctx: SqlCtx, an: ComorbidityIndexAnalysis, suffix: 
   }
   L.push(`-- REVIEW - method notes (always emitted):`);
   for (const note of COMORBIDITY_INDEX_METHOD_NOTES) L.push(`--   * ${note}`);
+  /* THE ICD-ERA NOTE. Always emitted when this analysis's lookback can reach
+   * across 1 October 2015 — readiness refuses a single-era list there, but the
+   * person reading this SQL in six months never ran readiness. */
+  const eraNotes = comorbidityIcdEraNotes(spec, an);
+  if (eraNotes.length > 0) {
+    L.push(`-- REVIEW - ICD-9 to ICD-10 TRANSITION (always emitted when the lookback crosses it):`);
+    for (const note of eraNotes) L.push(`--   * ${note}`);
+  }
+  /* NEGATIVE WEIGHTS. Legal (van Walraven's Elixhauser summary uses them), and
+   * worth saying out loud: the score below is a signed sum, is never clamped,
+   * and the band ladder is what keeps a negative total out of the "0" band. */
+  if (negWeights.length > 0) {
+    L.push(`-- REVIEW - NEGATIVE WEIGHTS (always emitted when the index carries one):`);
+    L.push(`--   * ${negWeights.map((c) => `${q(c.id)} = ${c.weight}`).join(", ")}. A negative weight is not a data error - conditioned on everything else in the index, those patients really do fare better - and the total below is a SIGNED sum that is NEVER clamped at zero.`);
+    L.push(`--   * the lowest declared score band starts at ${an.scoreBands[0]}, and the most negative total these weights can produce is ${negWeights.reduce((n, c) => n + c.weight, 0)}. Supersession only WITHHOLDS a weight, so withholding a negative one RAISES the score.`);
+  }
   L.push(`-- The weights and code lists below come from the REVIEWED SPEC, not from`);
   L.push(`-- this generator. "${q(an.indexName)}" is the label the analyst attached to them.`);
 
   L.push(d.createTableAs(out));
-  L.push(`WITH cohort AS (SELECT enrolid, index_date FROM ${wp}_cohort),`);
+  L.push(`WITH cohort AS (SELECT enrolid, index_date FROM ${ctx.cohortT}),`);
   // ONE implementation of the scoring, shared with Table 1 and the SMD table
   // (emitters/comorbidity.ts) — three copies would be three chances to disagree.
   const score = comorbidityScoreSqlCtes(ctx, { wp, an, cohortCte: "cohort" });
@@ -159,6 +177,7 @@ function sasComorbidityIndex(ctx: SasCtx, an: ComorbidityIndexAnalysis, num: str
   const pairs = supersessionPairs(an);
   const bands = scoreBandLabels(an.scoreBands);
   const limits = comorbidityIndexLimitations(an);
+  const negWeights = an.conditions.filter((c) => c.weight < 0);
   const label = an.label.replace(/"/g, "'");
   // same shared scorer the SQL twin and (later) Table 1 / SMD use
   const score = comorbidityScoreSasSteps(ctx, { an, num, cohT, evOf: ctx.evOf });
@@ -171,7 +190,7 @@ function sasComorbidityIndex(ctx: SasCtx, an: ComorbidityIndexAnalysis, num: str
       `REVIEWED SPEC - this program implements the algebra, not the research.`,
       `Twin of the SQL cci program (SQL twin is execution-verified; this SAS twin is parity-checked, not executed). Keep both in sync.`,
     ]),
-    `/* ${parityStamp("comorbidity_index", comorbidityIndexParity(an, { pairs, bands }))} */`,
+    `/* ${parityStamp("comorbidity_index", comorbidityIndexParity(an, { pairs, bands, spec }))} */`,
     ``,
   ];
   if (limits.length > 0) {
@@ -181,6 +200,26 @@ function sasComorbidityIndex(ctx: SasCtx, an: ComorbidityIndexAnalysis, num: str
     `/* REVIEW - method notes (always emitted):`,
     ...COMORBIDITY_INDEX_METHOD_NOTES.map((n) => `   * ${cmt(n)}`),
     `*/`,
+  );
+  // twin of the SQL note — same helper, so the two cannot disagree about which
+  // studies cross the transition or what each list covers
+  const eraNotes = comorbidityIcdEraNotes(spec, an);
+  if (eraNotes.length > 0) {
+    lines.push(
+      `/* REVIEW - ICD-9 to ICD-10 TRANSITION (always emitted when the lookback crosses it):`,
+      ...eraNotes.map((n) => `   * ${cmt(n)}`),
+      `*/`,
+    );
+  }
+  if (negWeights.length > 0) {
+    lines.push(
+      `/* REVIEW - NEGATIVE WEIGHTS (always emitted when the index carries one):`,
+      `   * ${cmt(negWeights.map((c) => `${c.id} = ${c.weight}`).join(", "))}. A negative weight is not a data error - conditioned on everything else in the index, those patients really do fare better - and the total below is a SIGNED sum that is NEVER clamped at zero.`,
+      `   * the lowest declared score band starts at ${an.scoreBands[0]}, and the most negative total these weights can produce is ${negWeights.reduce((n, c) => n + c.weight, 0)}. Supersession only WITHHOLDS a weight, so withholding a negative one RAISES the score.`,
+      `*/`,
+    );
+  }
+  lines.push(
     ``,
     ...INCLUDE_SETUP,
     `proc datasets lib=tz nolist nowarn;`,

@@ -43,7 +43,10 @@ export interface RateCoreSqlInput {
  */
 export function rateCoreSqlCtes(ctx: SqlCtx, i: RateCoreSqlInput): string[] {
   const L: string[] = [];
-  L.push(`WITH cohort AS (SELECT enrolid, index_date FROM ${i.wp}_cohort),`);
+  /* ctx.cohortT, not `${i.wp}_cohort`: a subgroup sweep arm repoints the cohort
+   * READ so the arm runs this identical chain over a slice. Default value is
+   * `${wp}_cohort`, so unswept output is byte-identical. */
+  L.push(`WITH cohort AS (SELECT enrolid, index_date FROM ${ctx.cohortT}),`);
   L.push(
     `ae AS (SELECT enrolid, event_date FROM ${i.wp}_events WHERE code_list_id = '${q(i.codeListId)}'` +
       (i.settingEnforce ? ` AND setting = '${i.settingEnforce}'` : ``) +

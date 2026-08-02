@@ -357,7 +357,8 @@ export function ledgerSqlCtes(ctx: SqlCtx, i: LedgerInput): string[] {
   const p = i.prefix ?? "";
   const coh = i.cohortCte ?? `${p}cohort`;
   const L: string[] = [];
-  if (!i.cohortCte) L.push(`WITH ${coh} AS (SELECT enrolid, index_date FROM ${i.wp}_cohort),`);
+  // ctx.cohortT so a subgroup sweep arm can slice the cohort this reads.
+  if (!i.cohortCte) L.push(`WITH ${coh} AS (SELECT enrolid, index_date FROM ${ctx.cohortT}),`);
 
   /* Observed days: the window intersected with enrollment. Every rate below
    * divides by this, so a member observed for half the window does not look

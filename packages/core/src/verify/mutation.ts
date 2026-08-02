@@ -38,6 +38,7 @@ import { GOLD_F_SPEC, GOLD_F_OPTS } from "./fixture-f";
 import { GOLD_G_SPEC, GOLD_G_OPTS } from "./fixture-g";
 import { GOLD_H_SPEC, GOLD_H_OPTS } from "./fixture-h";
 import { GOLD_I_SPEC, GOLD_I_OPTS } from "./fixture-i";
+import { GOLD_J_SPEC, GOLD_J_OPTS } from "./fixture-j";
 import type { StudySpec } from "../spec/types";
 import type { Check } from "./run";
 
@@ -70,7 +71,7 @@ interface Mutation {
    * stratification and no E-value, so every corruption of those would land on a
    * program that never asked for them.
    */
-  source?: "A" | "F" | "G" | "H" | "I";
+  source?: "A" | "F" | "G" | "H" | "I" | "J";
   /**
    * Set when the mutation is DELIBERATELY not idempotent, with the reason.
    *
@@ -510,6 +511,100 @@ const MUTATIONS: Mutation[] = [
     name: "SQL comorbidity lookback widened (365 -> 730 days)",
     kind: "comorbidity_index", lang: "sql",
     apply: (t) => t.replace(/\(c\.index_date - 365\)/g, "(c.index_date - 730)"),
+  },
+  /* ---- negative weights: the failure modes that only exist once a weight can
+   * be below zero, and that every twin was blind to until Wave 3 ------------- */
+  {
+    /* THE CLAMP. With only positive weights GREATEST(score, 0) is a no-op and
+     * nobody would ever notice it; with a negative weight it silently rewrites
+     * every negative patient to zero. The mean rises, the lowest band empties,
+     * and the table is otherwise perfect. Gold A carries the same expression, so
+     * this is caught on a spec that never asked for a negative weight either. */
+    name: "SQL comorbidity score silently CLAMPED at zero (negative totals rewritten to 0)",
+    kind: "comorbidity_index", lang: "sql",
+    apply: (t) => t.replace(
+      /COALESCE\(SUM\(a\.weight_applied\), 0\) AS score/g,
+      "GREATEST(COALESCE(SUM(a.weight_applied), 0), 0) AS score",
+    ),
+  },
+  {
+    name: "SAS comorbidity score silently CLAMPED at zero (the same defect, other twin)",
+    kind: "comorbidity_index", lang: "sas",
+    apply: (t) => t.replace(
+      /coalesce\(sum\(b\.weight_applied\), 0\) as score/g,
+      "max(coalesce(sum(b.weight_applied), 0), 0) as score",
+    ),
+  },
+  {
+    /* A NEGATIVE WEIGHT FLIPPED POSITIVE. Every patient carrying it moves by 14
+     * points and the index still looks like an index. Needs Gold J, which is the
+     * only fixture with a negative weight to corrupt. */
+    name: "SQL van Walraven drug-abuse weight loses its sign (-7 -> 7)",
+    kind: "comorbidity_index", lang: "sql", source: "J",
+    apply: (t) => t.replace(/'drug' AS cond_id, '([^']*)' AS cond_label, -7 AS weight/g, "'drug' AS cond_id, '$1' AS cond_label, 7 AS weight"),
+  },
+  {
+    /* THE SUPERSEDED CONDITION LOSES ITS PREVALENCE AS WELL AS ITS WEIGHT, in
+     * the SAS twin. The SQL twin's version of this is above; both are needed,
+     * because the whole point of the rule is that a scoring convention must not
+     * be allowed to hide a clinical fact in EITHER language. */
+    name: "SAS condition prevalence counts only UNSUPERSEDED patients",
+    kind: "comorbidity_index", lang: "sas",
+    apply: (t) => t.replace(
+      /left join work\._(\w+)_has as h on h\.cond_id = cd\.cond_id/g,
+      "left join work._$1_applied as h on h.cond_id = cd.cond_id and h.weight_applied ne 0",
+    ),
+  },
+  /* ---- sweeps: every one of these leaves a complete, well-formed summary ---- */
+  {
+    /* AN ARM IS DROPPED. The table still has a range, a primary estimate and a
+     * direction verdict — computed over two arms instead of three, with the
+     * disagreeing one gone. Nothing about the output looks short. */
+    name: "SQL sweep drops the disagreeing arm from the arm table",
+    kind: "sweep", lang: "sql", source: "J",
+    apply: (t) => t.replace(/\n  UNION ALL\n  SELECT CAST\('fem' AS VARCHAR\) AS sw_arm_id[^\n]*/g, ""),
+  },
+  {
+    /* THE PRIMARY ARM IS CHOSEN AFTER THE FACT. Replacing the pre-declared
+     * predicate with "whichever arm has the largest effect" is the single most
+     * consequential corruption in this file: it produces a study whose primary
+     * analysis was selected by its own result, and the table it emits is
+     * indistinguishable from an honest one. */
+    name: "SQL sweep reassigns the primary arm to whichever has the largest effect",
+    kind: "sweep", lang: "sql", source: "J",
+    apply: (t) => t.replace(
+      /SELECT sw_est AS primary_est FROM arms WHERE sw_arm_id = '[^']*'/g,
+      "SELECT sw_est AS primary_est FROM arms ORDER BY sw_est DESC LIMIT 1",
+    ),
+  },
+  {
+    /* THE DIRECTION WARNING IS SUPPRESSED. Every arm is still reported and the
+     * range is still right; the one row that says the sign flips now says it
+     * does not. */
+    name: "SQL sweep suppresses the direction-disagreement verdict (always 0)",
+    kind: "sweep", lang: "sql", source: "J",
+    apply: (t) => t.replace(/CASE WHEN n_above > 0 AND n_below > 0 THEN 1 ELSE 0 END/g, "0"),
+  },
+  {
+    name: "SAS sweep suppresses the direction-disagreement verdict (the same defect, other twin)",
+    kind: "sweep", lang: "sas", source: "J",
+    apply: (t) => t.replace(/estimate = \(n_above > 0 and n_below > 0\)/g, "estimate = 0"),
+  },
+  {
+    /* A SUBGROUP RELABELLED AS A SENSITIVITY CHECK. The number does not move at
+     * all; only the claim attached to it does, from "the effect differs between
+     * populations" to "the effect is stable under a different method". */
+    name: "SAS sweep relabels the subgroup arm as a sensitivity check",
+    kind: "sweep", lang: "sas", source: "J",
+    apply: (t) => t.replace(/sw_arm_kind = 'subgroup'; sw_arm_label/g, "sw_arm_kind = 'sensitivity'; sw_arm_label"),
+  },
+  {
+    /* THE ARM READS THE WRONG ROW of its own analysis's result table. A risk
+     * ratio where an odds ratio belongs is the same order of magnitude, on the
+     * same scale, about the same null. */
+    name: "SQL sweep reads the risk ratio where the odds ratio was declared",
+    kind: "sweep", lang: "sql", source: "J",
+    apply: (t) => t.replace(/AND statistic = 'odds_ratio'\) AS sw_est/g, "AND statistic = 'risk_ratio') AS sw_est"),
   },
   {
     name: "SQL resource-use window shortened (364 -> 180 days)",
@@ -1280,6 +1375,7 @@ export function mutationChecks(): Check[] {
     { name: "G", spec: GOLD_G_SPEC, opts: GOLD_G_OPTS },
     { name: "H", spec: GOLD_H_SPEC, opts: GOLD_H_OPTS },
     { name: "I", spec: GOLD_I_SPEC, opts: GOLD_I_OPTS },
+    { name: "J", spec: GOLD_J_SPEC, opts: GOLD_J_OPTS },
   ].map(({ name, spec, opts }) => {
     const sas = emitSas(spec, opts);
     return {

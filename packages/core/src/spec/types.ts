@@ -633,6 +633,175 @@ export interface CompetingRisksAnalysis extends AnalysisCommon {
  * occupancy, because a band holding one arm only is a positivity violation that
  * a balance table will not show you.
  */
+/**
+ * SUBGROUPS AND SENSITIVITY SWEEPS — the same machinery, two different claims.
+ *
+ * A SUBGROUP re-runs an analysis within a slice of the cohort. A SENSITIVITY
+ * ARM re-runs it on the whole cohort under a different methodological choice.
+ * They share the mechanics and they are NOT interchangeable as evidence, so the
+ * results contract labels which is which and the program never merges them into
+ * one table of numbers.
+ *
+ * WHY THIS IS DANGEROUS ENOUGH TO NEED A CONTRACT. Run an analysis eight ways
+ * and report the one that reached significance and you have done nothing but
+ * multiply your own false-positive rate. That is the single most common way an
+ * observational claims study misleads, and it does not look like fraud from the
+ * inside: each individual run is defensible.
+ *
+ * Three properties make a sweep honest, and all three are enforced here:
+ *
+ *   1. EVERY ARM IS DECLARED UP FRONT, in the spec, before the code exists.
+ *   2. EVERY ARM IS REPORTED, including the ones that disagree with the primary
+ *      result. A sweep is only informative when the reader sees the spread, and
+ *      the emitted program refuses to drop an arm.
+ *   3. THE PRIMARY ARM IS NAMED IN ADVANCE, so "the primary analysis" cannot be
+ *      chosen after the estimates are in.
+ *
+ * The program additionally reports the RANGE across arms and, where the arms
+ * disagree in DIRECTION, says so plainly: an effect whose sign flips under a
+ * different gap length is not a robust finding under any threshold.
+ */
+export interface SweepPlan {
+  /** the analysis every arm re-runs */
+  analysisId: string;
+  /** which arm is primary. Named here so it cannot be chosen afterwards. */
+  primaryArmId: string;
+  arms: SweepArm[];
+}
+
+export type SweepArm =
+  | {
+      kind: "subgroup";
+      id: string;
+      label: string;
+      /** the cohort slice. A baseline characteristic and the value to hold. */
+      baselineId: string;
+      /** for categorical baselines: the level to keep */
+      level?: string;
+      /** for continuous baselines: keep [min, max), either bound optional */
+      min?: number;
+      max?: number;
+    }
+  | {
+      kind: "sensitivity";
+      id: string;
+      label: string;
+      /** what this arm changes. Exactly ONE at a time: an arm that moves two
+       *  knobs cannot attribute a difference to either of them. */
+      vary: SweepVariation;
+    };
+
+/** One methodological knob, moved on its own. */
+export type SweepVariation =
+  | { param: "lookback_days"; value: number }
+  | { param: "followup_days"; value: number }
+  | { param: "grace_period_days"; value: number }
+  | { param: "permissible_gap_days"; value: number }
+  | { param: "washout_days"; value: number }
+  | { param: "exposure_definition"; value: "intention_to_treat" | "on_treatment" };
+
+/**
+ * The analysis kinds a sweep can TARGET, and the one number each arm is
+ * compared on.
+ *
+ * A sweep is only meaningful when every arm produces the SAME quantity, so the
+ * quantity is named here rather than chosen per arm — an arm that reported a
+ * different statistic would make the range across arms a comparison of unlike
+ * things.
+ *
+ * `nullValue` is what "no effect" means on that quantity: 0 for a difference,
+ * 1 for a ratio, and NULL for a quantity that HAS no null. That last case is
+ * not an oversight. A rate, a prevalence or a mean score is not a contrast, so
+ * it has no direction to agree or disagree about, and the emitted program says
+ * exactly that instead of inventing a reference point. Only a target with a
+ * null value gets a direction-disagreement verdict.
+ *
+ * A kind absent from this table is REFUSED as a sweep target by name. That is
+ * deliberate: the alternative is a summary table whose "estimate" column means
+ * something different for every analysis it was pointed at.
+ */
+export interface SweepStatistic {
+  /** result-table row selector: the component this statistic lives under */
+  component?: string;
+  /** result-table row selector: the statistic name */
+  statistic?: string;
+  /** result-table row selector: the stratum, for stratified tables */
+  stratum?: string;
+  /** the column carrying the value */
+  valueCol: string;
+  /** the value at which the quantity says "no effect", or null when it has none */
+  nullValue: number | null;
+  /** how a reader should read the span across arms */
+  scale: "difference" | "ratio" | "level";
+  /** what the number IS, in the emitted prose */
+  label: string;
+}
+
+export const SWEEP_TARGET_STATISTICS: Record<string, SweepStatistic> = {
+  regression: {
+    component: "crude",
+    valueCol: "estimate",
+    nullValue: 1,
+    scale: "ratio",
+    label: "the CRUDE closed-form effect (the adjusted estimate is SAS-primary and NULL in the SQL twin, so it cannot be the quantity every arm is compared on)",
+  },
+  iptw_outcome: {
+    component: "effect",
+    statistic: "risk_difference",
+    valueCol: "estimate",
+    nullValue: 0,
+    scale: "difference",
+    label: "the weighted risk difference",
+  },
+  incidence_rate: {
+    stratum: "Overall",
+    valueCol: "rate_per_1000py",
+    nullValue: null,
+    scale: "level",
+    label: "the overall incidence rate",
+  },
+  comorbidity_index: {
+    component: "index",
+    valueCol: "score_mean",
+    nullValue: null,
+    scale: "level",
+    label: "the mean index score over the cohort",
+  },
+};
+
+/**
+ * Which analysis kinds each sensitivity parameter is a REAL knob for.
+ *
+ * The list is what the emitters actually read, not what sounds plausible. A
+ * parameter that no emitter consumes for the target kind would produce an arm
+ * whose code is byte-identical to the primary arm's — two identical numbers
+ * presented as a sensitivity analysis, which is worse than no sensitivity
+ * analysis because it reads as reassurance.
+ */
+export const SWEEP_PARAM_TARGET_KINDS: Record<SweepVariation["param"], ReadonlySet<string>> = {
+  lookback_days: new Set(["comorbidity_index"]),
+  washout_days: new Set(["regression", "iptw_outcome", "incidence_rate", "cumulative_incidence"]),
+  followup_days: new Set(["regression", "iptw_outcome", "incidence_rate", "cumulative_incidence"]),
+  grace_period_days: new Set(["adherence"]),
+  permissible_gap_days: new Set(["adherence", "treatment_switching"]),
+  /* NOTHING reads it. No emitted module carries an intention-to-treat vs
+   * on-treatment switch; the nearest declaration is the person-time censoring
+   * rule, which is a different field with different consequences. Refused by
+   * name rather than accepted and ignored. */
+  exposure_definition: new Set([]),
+};
+
+/** Baseline kinds a SUBGROUP arm can slice on, and how.
+ *
+ *  These are exactly the per-member values the cohort spine derives in BOTH
+ *  twins: the demographic columns of the enrollment segment in force at index,
+ *  plus age at index. A slice on anything else would need a value the emitters
+ *  would have to invent, which is the same refusal declared bandings answer. */
+export const SWEEP_SUBGROUP_CATEGORICAL_KINDS: ReadonlySet<string> = new Set([
+  "sex", "region", "plan_type", "year",
+]);
+export const SWEEP_SUBGROUP_CONTINUOUS_KINDS: ReadonlySet<string> = new Set(["age"]);
+
 export interface CovariateBanding {
   /** the continuous baseline characteristic being coarsened */
   baselineId: string;
@@ -1434,6 +1603,8 @@ export interface StudySpec {
   comparisons: Comparison[];
   /** The analysis request list; references the catalogs above by id. */
   analyses: Analysis[];
+  /** declared subgroup and sensitivity sweeps over named analyses */
+  sweeps?: SweepPlan[];
   /** Small-cell suppression policy for released tables (BR-DEL-004). Omitted
    *  means ON at the default threshold — a disclosure control that has to be
    *  switched on is one that gets forgotten. */
@@ -1444,6 +1615,59 @@ export interface StudySpec {
 
 export function findCodeList(spec: StudySpec, id: string): CodeList | undefined {
   return spec.codeLists.find((c) => c.id === id);
+}
+
+/* ---------- the ICD-9 to ICD-10 transition, 1 October 2015 ----------
+ *
+ * ONE implementation, because readiness and the emitted program have to agree
+ * about it exactly. Readiness REFUSES a single-era list whose lookback crosses
+ * the boundary; the emitted program carries the same finding as an always-on
+ * note for the reader who has the SAS six months later and never ran readiness.
+ * Two copies of this rule would be two chances for the refusal and the note to
+ * disagree about which study crosses it.
+ */
+export const ICD10_TRANSITION_DATE = "2015-10-01";
+
+/** How many codes of each era a list carries.
+ *
+ *  An icd10cm list may legitimately carry numeric-leading ICD-9 codes retained
+ *  for the pre-transition era, which is exactly how a study spans it — so the
+ *  era is read from the CODE, with the list's declared system as the fallback.
+ *  Same rule the events extraction uses to split the DXVER predicate, so the
+ *  count here is the count of codes that can actually match. */
+export function icdEraCounts(list: CodeList): { icd9: number; icd10: number } {
+  let icd9 = 0, icd10 = 0;
+  for (const e of list.codes) {
+    const code = e.code.trim().toUpperCase().replace(/\./g, "");
+    if (code.length === 0) continue;
+    if (list.system === "icd9cm" || /^[0-9]/.test(code)) icd9++;
+    else icd10++;
+  }
+  return { icd9, icd10 };
+}
+
+/** The earliest claim date a pre-index lookback can reach, and whether the
+ *  window crosses the transition. */
+export function lookbackReach(
+  spec: StudySpec,
+  lookback: RelativeWindow,
+): { reachesBack: string; indexEnd: string; spansTransition: boolean } {
+  const lb = lookback.start;
+  const idxStart = spec.indexEvent.indexPeriod.start;
+  const reachesBack =
+    lb === "anytime_before"
+      ? "1900-01-01"
+      : (() => {
+          const d = new Date(`${idxStart}T00:00:00Z`);
+          d.setUTCDate(d.getUTCDate() + (typeof lb === "number" ? lb : 0));
+          return d.toISOString().slice(0, 10);
+        })();
+  const indexEnd = spec.indexEvent.indexPeriod.end;
+  return {
+    reachesBack,
+    indexEnd,
+    spansTransition: reachesBack < ICD10_TRANSITION_DATE && indexEnd >= ICD10_TRANSITION_DATE,
+  };
 }
 
 export function unverifiedCodeCount(spec: StudySpec): number {
@@ -1772,7 +1996,54 @@ export function validateAnalyses(spec: StudySpec): string[] {
         const ids = new Set(a.conditions.map((c) => c.id));
         for (const c of a.conditions) {
           requireCodeList(c.codeListId, `${w} condition "${c.id}"`);
-          if (!(c.weight > 0)) problems.push(`${w}: condition "${c.id}" has weight ${c.weight} — a weight must be > 0 or the condition contributes nothing.`);
+          /* NEGATIVE WEIGHTS ARE LEGAL, and refusing them made this engine
+           * Charlson-only in practice while claiming to be general.
+           *
+           * van Walraven's Elixhauser summary carries negative weights by
+           * construction: drug abuse -7 and depression -3 in the mortality
+           * index, with more negatives in the readmission variant. They are not
+           * a data error. Conditioned on everything else in the index, those
+           * patients really do die less, mostly because the population carrying
+           * the flag is younger and admitted for something more survivable.
+           *
+           * ZERO is the meaningless weight, not a negative one: a condition
+           * weighted 0 contributes nothing to the score and should either be
+           * given a weight or dropped, so that is what this now refuses. A
+           * superseded condition still reports its prevalence either way. */
+          if (c.weight === 0)
+            problems.push(
+              `${w}: condition "${c.id}" has weight 0, so it contributes nothing to the score. Give it a weight, or drop it and report its prevalence through baseline[] instead. (Negative weights ARE allowed — van Walraven's Elixhauser summary uses them.)`,
+            );
+          if (!Number.isFinite(c.weight))
+            problems.push(`${w}: condition "${c.id}" has weight ${c.weight}, which is not a finite number.`);
+
+          /* THE ICD-9 TO ICD-10 TRANSITION, 1 October 2015.
+           *
+           * This is the quietest way a comorbidity index goes wrong on
+           * MarketScan. A lookback that reaches across the transition needs
+           * BOTH era code sets, because DXVER separates them at query time and
+           * a code only ever matches claims from its own era. A list carrying
+           * only ICD-10 codes finds NOTHING before October 2015 and reports the
+           * condition as absent, which is indistinguishable from a genuinely
+           * healthy lookback and biases the index DOWNWARD for exactly the
+           * patients with the longest history.
+           *
+           * A study indexing in 2016 with a 365-day lookback reaches back to
+           * 2015 and crosses it. Nothing about the resulting numbers looks
+           * wrong. */
+          const list = findCodeList(spec, c.codeListId);
+          const era = list ? icdEraCounts(list) : null;
+          if (era && (era.icd9 === 0 || era.icd10 === 0)) {
+            /* Earliest date the lookback can reach: the earliest index date,
+             * shifted back by the lookback. "anytime_before" reaches forever. */
+            const { reachesBack, spansTransition } = lookbackReach(spec, a.lookback);
+            if (spansTransition) {
+              const has = era.icd9 > 0 ? "ICD-9 only" : "ICD-10 only";
+              problems.push(
+                `${w}: condition "${c.id}" has ${has} codes, but its lookback reaches back to ${reachesBack}, which crosses the 1 October 2015 ICD-9 to ICD-10 transition. DXVER separates the eras at query time, so these codes match NOTHING on the other side of it and the condition reads as absent rather than unascertained. That biases the index downward for exactly the patients with the longest history, and no output would look wrong. Add the other era's codes to "${c.codeListId}".`,
+              );
+            }
+          }
           for (const sup of c.supersedes ?? []) {
             if (!ids.has(sup)) problems.push(`${w}: condition "${c.id}" supersedes "${sup}", which is not one of conditions[].`);
             if (sup === c.id) problems.push(`${w}: condition "${c.id}" supersedes itself.`);
@@ -1790,6 +2061,31 @@ export function validateAnalyses(spec: StudySpec): string[] {
         if (a.scoreBands.length === 0) problems.push(`${w}: scoreBands[] is empty — no distribution would be reported.`);
         if (a.scoreBands.some((b, i) => i > 0 && b <= a.scoreBands[i - 1]))
           problems.push(`${w}: scoreBands must be strictly increasing lower bounds.`);
+
+        /* THE BAND FLOOR, once a weight can be negative.
+         *
+         * The band CASE is a descending ladder of `score >= lower` tests with
+         * the FIRST band as the ELSE arm, so everything below the lowest
+         * declared bound falls into it. With only positive weights that arm is
+         * unreachable from below and the shape is harmless. With a negative
+         * weight it stops being harmless: a patient scoring -10 against bands
+         * starting at 0 is reported inside the band LABELLED "0", which is a
+         * clamp at zero in the released distribution even though the stored
+         * score is correct. The mean would be right and the distribution wrong,
+         * which is the worst combination to debug.
+         *
+         * The bound is the sum of the negative weights: that is the most
+         * negative score the index can produce (supersession only WITHHOLDS a
+         * weight, and withholding a negative one raises the score). Checked
+         * only when a negative weight exists, so no index that never asked for
+         * one changes its verdict. */
+        {
+          const negSum = a.conditions.reduce((n, c) => (Number.isFinite(c.weight) && c.weight < 0 ? n + c.weight : n), 0);
+          if (negSum < 0 && a.scoreBands.length > 0 && a.scoreBands[0] > negSum)
+            problems.push(
+              `${w}: the lowest score band starts at ${a.scoreBands[0]}, but the negative weights in this index can produce a score as low as ${negSum}. Everything below the lowest band falls into it, so a patient scoring ${negSum} would be reported inside the band labelled from ${a.scoreBands[0]} — the score itself stays correct and the DISTRIBUTION silently clamps. Start scoreBands at ${negSum} or below.`,
+            );
+        }
         break;
       }
       case "regression": {
@@ -2180,5 +2476,142 @@ export function validateAnalyses(spec: StudySpec): string[] {
         break;
     }
   }
+  problems.push(...validateSweeps(spec));
+  return problems;
+}
+
+/* ---------- subgroup and sensitivity sweeps ---------- */
+
+/**
+ * Every way a declared sweep can be wrong before any code exists.
+ *
+ * The refusals here are not style. A sweep is the single easiest way for an
+ * honest analyst to publish a false positive, and every check below closes a
+ * route by which the emitted program would have produced a complete,
+ * plausible-looking table that answered a different question:
+ *
+ *   - an arm pointing at nothing runs nothing and shrinks the sweep silently;
+ *   - a primary arm that is not one of the arms means "the primary analysis"
+ *     is decided after the estimates, which is the whole thing the contract
+ *     exists to prevent;
+ *   - a parameter no emitter reads for the target kind produces an arm whose
+ *     code is IDENTICAL to the primary arm's, so it reports the same number
+ *     twice and reads as robustness;
+ *   - a `level` on a continuous baseline (or bounds on a categorical one)
+ *     slices on a comparison the spine cannot make, and an empty slice is an
+ *     arm with no subjects rather than an error.
+ */
+export function validateSweeps(spec: StudySpec): string[] {
+  const problems: string[] = [];
+  const plans = spec.sweeps ?? [];
+  const seenPlan = new Set<string>();
+
+  plans.forEach((plan, pi) => {
+    const w = `Sweep ${pi + 1} (analysis "${plan.analysisId}")`;
+
+    const target = spec.analyses.find((a) => a.id === plan.analysisId && a.enabled);
+    if (!target) {
+      problems.push(
+        `${w}: analysisId "${plan.analysisId}" does not name an ENABLED analysis. Every arm re-runs that analysis, so there is nothing for this sweep to run — and an unresolved target would emit a summary table with no arms in it.`,
+      );
+    } else {
+      const stat = SWEEP_TARGET_STATISTICS[target.kind];
+      if (!stat) {
+        problems.push(
+          `${w}: analysis "${target.id}" is kind "${target.kind}", which declares no designated sweep statistic. A sweep compares one quantity across arms, and this kind's result table has no single number every arm would be reporting — the summary's "estimate" column would mean something different in each row. Sweepable kinds: ${Object.keys(SWEEP_TARGET_STATISTICS).sort().join(", ")}.`,
+        );
+      }
+      const planKey = `${plan.analysisId}`;
+      if (seenPlan.has(planKey)) {
+        // Two plans on one analysis are legal (one subgroup plan, one
+        // sensitivity plan); they are only noted so the arm-table names, which
+        // carry the plan ordinal, are traceable back to the right plan.
+      }
+      seenPlan.add(planKey);
+    }
+
+    if (plan.arms.length === 0) {
+      problems.push(
+        `${w}: arms[] is empty. A sweep with no arms emits a summary of nothing while still carrying the word "sensitivity analysis" into the deliverable.`,
+      );
+    }
+
+    const armIds = new Set<string>();
+    for (const arm of plan.arms) {
+      const aw = `${w} arm "${arm.id}"`;
+      if (!arm.id || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(arm.id))
+        problems.push(`${aw}: arm ids become table-name suffixes, so they must be slugs (letters/digits/_/-).`);
+      if (armIds.has(arm.id))
+        problems.push(
+          `${aw}: duplicate arm id. Arm ids name the result rows AND the arm's own result table, so two arms sharing one id would overwrite each other and the sweep would report fewer arms than it declared.`,
+        );
+      armIds.add(arm.id);
+
+      if (arm.kind === "subgroup") {
+        const b = findBaseline(spec, arm.baselineId);
+        if (!b) {
+          problems.push(
+            `${aw}: subgroup slices on baseline "${arm.baselineId}", which is not in baseline[]. There is nothing to slice on, so the arm would run on the whole cohort while being labelled a subgroup.`,
+          );
+          continue;
+        }
+        const hasLevel = arm.level !== undefined;
+        const hasBounds = arm.min !== undefined || arm.max !== undefined;
+        if (!hasLevel && !hasBounds)
+          problems.push(
+            `${aw}: neither level nor min/max is set, so the slice is the WHOLE cohort. That is the primary analysis wearing a subgroup label.`,
+          );
+        if (hasLevel && hasBounds)
+          problems.push(
+            `${aw}: sets both a level and numeric bounds. One baseline is sliced one way; which of the two the program used would depend on emission order.`,
+          );
+        const isCat = SWEEP_SUBGROUP_CATEGORICAL_KINDS.has(b.kind);
+        const isCont = SWEEP_SUBGROUP_CONTINUOUS_KINDS.has(b.kind);
+        if (!isCat && !isCont) {
+          problems.push(
+            `${aw}: baseline "${b.id}" is kind "${b.kind}", which the cohort spine derives no per-member value for in both twins. A subgroup can slice on ${[...SWEEP_SUBGROUP_CATEGORICAL_KINDS].sort().join(", ")} (by level) or ${[...SWEEP_SUBGROUP_CONTINUOUS_KINDS].sort().join(", ")} (by min/max); anything else would need a value the emitters would have to invent.`,
+          );
+        } else {
+          if (hasLevel && isCont)
+            problems.push(
+              `${aw}: "${b.id}" is CONTINUOUS (kind "${b.kind}"), so a single level cannot name a slice of it — an exact-match on a continuous value selects almost nobody. Use min/max, which are left-closed and right-open.`,
+            );
+          if (hasBounds && isCat)
+            problems.push(
+              `${aw}: "${b.id}" is CATEGORICAL (kind "${b.kind}"), so min/max would impose an ORDER on values that have none — the bounds would have to compare region codes as numbers. Use level.`,
+            );
+        }
+        if (arm.min !== undefined && !Number.isFinite(arm.min))
+          problems.push(`${aw}: min is ${arm.min}, which is not a finite number.`);
+        if (arm.max !== undefined && !Number.isFinite(arm.max))
+          problems.push(`${aw}: max is ${arm.max}, which is not a finite number.`);
+        if (arm.min !== undefined && arm.max !== undefined && arm.min >= arm.max)
+          problems.push(
+            `${aw}: the slice is [${arm.min}, ${arm.max}), which is EMPTY. An arm with no subjects still appears in the sweep, and an empty arm's missing estimate reads as a null result.`,
+          );
+      } else {
+        const v = arm.vary;
+        const allowed = SWEEP_PARAM_TARGET_KINDS[v.param];
+        if (target && allowed && !allowed.has(target.kind)) {
+          const where = allowed.size === 0
+            ? `no emitted module reads it at all — there is no intention-to-treat vs on-treatment switch in this project, and the nearest declaration is the person-time censoring rule, which is a different field`
+            : `it is a knob for ${[...allowed].sort().join(", ")}`;
+          problems.push(
+            `${aw}: sensitivity parameter "${v.param}" is meaningless for a ${target.kind} analysis — ${where}. Overriding it would re-emit code IDENTICAL to the primary arm's, so the arm would report the same number twice and read as robustness.`,
+          );
+        }
+        if (v.param !== "exposure_definition") {
+          if (!Number.isFinite(v.value) || (v.value as number) < 0)
+            problems.push(`${aw}: "${v.param}" is ${JSON.stringify(v.value)}; a day count must be a finite number >= 0.`);
+        }
+      }
+    }
+
+    if (!armIds.has(plan.primaryArmId))
+      problems.push(
+        `${w}: primaryArmId "${plan.primaryArmId}" is not one of the arms (${[...armIds].join(", ") || "none declared"}). Naming the primary arm in the spec is the ONLY thing that stops "the primary analysis" from being whichever arm reached significance, so an unresolved one is not a typo — it is the contract failing open.`,
+      );
+  });
+
   return problems;
 }

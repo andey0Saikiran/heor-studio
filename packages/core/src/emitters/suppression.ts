@@ -61,6 +61,15 @@ export interface SuppressionShape {
   keepCols: string[];
   /** deterministic tiebreaker when two cells are equally small */
   tieBreakCol: string;
+  /** Columns carrying the SWEEP ARM identity, for a table whose rows span arms.
+   *
+   *  Every other result table belongs to exactly one arm (or to none), so the
+   *  contract attaches its arm identity as a literal from the emitter. A sweep
+   *  summary is the one table whose rows are per-arm, so the contract has to
+   *  read the identity out of the table itself — and a reader must never be
+   *  able to mistake a subgroup row for a sensitivity row, which is why the
+   *  KIND travels with the id rather than being inferable from the label. */
+  armCols?: { id: string; kind: string; label: string };
   /** A THIRD identity column for the results contract, for tables whose rows
    *  are not identified by two labels.
    *
@@ -350,6 +359,31 @@ export const SUPPRESSION_SHAPES: Record<string, SuppressionShape> = {
     keepCols: ["ord", "method"],
     tieBreakCol: "statistic",
   },
+  sweep: {
+    /* The estimates ARE the disclosive quantity here, exactly as in every other
+     * effect table: an odds ratio computed on a subgroup of three is as
+     * identifying as the cells it came from, and a sweep's whole purpose is to
+     * cut the cohort several ways.
+     *
+     * The METHOD text is kept, and that is a deliberate call: it carries the
+     * direction-disagreement verdict, the multiplicity warning and the name of
+     * the pre-declared primary arm. A released table that masked "these arms
+     * disagree in direction" while showing the rest would be suppressing the
+     * FINDING rather than the person, which inverts the point of the control.
+     *
+     * Grouping is by (measure, component) rather than by arm: within one
+     * component the rows are siblings of each other, and the range rows are
+     * derived from the arm rows, so a lone masked arm estimate is recoverable
+     * from the min/max unless complementary suppression reaches it. */
+    labelCols: ["measure", "arm_id", "arm_kind", "arm_label", "component", "statistic"],
+    groupCols: ["measure", "component"],
+    countCol: "estimate",
+    maskCols: ["estimate"],
+    keepCols: ["ord", "method"],
+    armCols: { id: "arm_id", kind: "arm_kind", label: "arm_label" },
+    rowDetailCol: "arm_id",
+    tieBreakCol: "statistic",
+  },
   table1: {
     labelCols: ["ord", "characteristic", "category"],
     groupCols: ["characteristic"],
@@ -374,6 +408,11 @@ export interface SuppressionTarget {
    *  columns, which is what keeps the emitted pass byte-identical for them. */
   extraMaskCols?: string[];
   extraKeepCols?: string[];
+  /** The SWEEP ARM this table belongs to, when it is one arm's own run of an
+   *  analysis. Carried as literals into the results contract so a reader of the
+   *  tidy long table can never mistake a subgroup arm's estimate for the
+   *  primary result — the table name alone does not say which is which. */
+  arm?: { id: string; kind: string; label: string };
 }
 
 export function shapeFor(shapeKey: string): SuppressionShape | undefined {
@@ -540,8 +579,26 @@ export function suppressionSasFor(t: SuppressionTarget, p: SuppressionPolicy, wo
  * without needing to re-derive the policy, and cannot accidentally print a
  * value that was supposed to be masked.
  */
-export function resultsContractSql(targets: SuppressionTarget[], p: SuppressionPolicy): string[] {
+export function resultsContractSql(
+  targets: SuppressionTarget[],
+  p: SuppressionPolicy,
+  opts?: {
+    /**
+     * Carry the sweep-arm identity columns.
+     *
+     * Set only when the spec DECLARES a sweep. The three columns are the whole
+     * reason the contract had to grow: without them a subgroup arm's estimate
+     * and the primary result are two rows of identical shape, and a report
+     * writer reading the tidy table has nothing to tell them apart. With no
+     * sweep declared there are no arms to name, and the contract emits exactly
+     * the text it emitted before — which is what keeps the byte-identity gate
+     * meaningful for every study that never asked for a sweep.
+     */
+    arms?: boolean;
+  },
+): string[] {
   const out: string[] = [];
+  const lit = (v: string) => `'${v.replace(/'/g, "''")}'`;
   out.push(`DROP TABLE IF EXISTS ${RESULTS_TABLE_PLACEHOLDER};`);
   out.push(`CREATE TABLE ${RESULTS_TABLE_PLACEHOLDER} AS`);
   const blocks: string[] = [];
@@ -552,11 +609,26 @@ export function resultsContractSql(targets: SuppressionTarget[], p: SuppressionP
     // time-indexed table adds a third (see rowDetailCol)
     const [rowGroup, rowLevel] = s.labelCols.slice(-2);
     const rowDetail = s.rowDetailCol ? `CAST(${s.rowDetailCol} AS VARCHAR)` : `CAST(NULL AS VARCHAR)`;
+    /* Three sources, in order: the table's own arm columns (a sweep summary,
+     * whose rows are per-arm), the literals the emitter attached (one arm's own
+     * run of an analysis), or NULL (a result that belongs to no arm). */
+    const armCols = s.armCols
+      ? [`CAST(${s.armCols.id} AS VARCHAR)`, `CAST(${s.armCols.kind} AS VARCHAR)`, `CAST(${s.armCols.label} AS VARCHAR)`]
+      : t.arm
+        ? [`CAST(${lit(t.arm.id)} AS VARCHAR)`, `CAST(${lit(t.arm.kind)} AS VARCHAR)`, `CAST(${lit(t.arm.label)} AS VARCHAR)`]
+        : [`CAST(NULL AS VARCHAR)`, `CAST(NULL AS VARCHAR)`, `CAST(NULL AS VARCHAR)`];
     for (const stat of s.maskCols) {
       blocks.push(
         [
           `SELECT '${t.table}' AS table_id,`,
           `       '${t.label.replace(/'/g, "''")}' AS analysis_label,`,
+          ...(opts?.arms
+            ? [
+                `       ${armCols[0]} AS arm_id,`,
+                `       ${armCols[1]} AS arm_kind,`,
+                `       ${armCols[2]} AS arm_label,`,
+              ]
+            : []),
           `       CAST(${rowGroup} AS VARCHAR) AS row_group,`,
           `       CAST(${rowLevel} AS VARCHAR) AS row_level,`,
           `       ${rowDetail} AS row_detail,`,

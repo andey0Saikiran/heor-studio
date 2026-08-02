@@ -277,7 +277,7 @@ function sqlRegression(ctx: SqlCtx, an: RegressionAnalysis, suffix: string): Sql
   L.push(`         CASE WHEN dm.sex = '1' THEN 1.0 ELSE 0.0 END AS sex_male${tail.length > 0 ? `,` : ``}`);
   tail.forEach((line, i) => L.push(`${line}${i < tail.length - 1 ? `,` : ``}`));
   L.push(`  FROM (SELECT a.enrolid, a.index_date, ${armExpr} AS arm FROM atrisk a`);
-  L.push(`        JOIN ${wp}_cohort ch ON ch.enrolid = a.enrolid`);
+  L.push(`        JOIN ${ctx.cohortT} ch ON ch.enrolid = a.enrolid`);
   if (viaNdc) {
     L.push(`        JOIN ${wp}_ndc_lookup nl`);
     L.push(`          ON nl.code_list_id = '${q(indexListId)}' AND nl.ndcnum = ch.index_code`);

@@ -23,8 +23,10 @@ import { GOLD_F_SPEC, GOLD_F_OPTS, EXPECTED_F, fixtureFSeedSql } from "./fixture
 import { GOLD_G_SPEC, GOLD_G_OPTS, EXPECTED_G, fixtureGSeedSql } from "./fixture-g";
 import { GOLD_H_SPEC, GOLD_H_OPTS, EXPECTED_H, fixtureHSeedSql } from "./fixture-h";
 import { GOLD_I_SPEC, GOLD_I_OPTS, EXPECTED_I, fixtureISeedSql } from "./fixture-i";
+import { GOLD_J_SPEC, GOLD_J_OPTS, EXPECTED_J, fixtureJSeedSql } from "./fixture-j";
 import { eValueSql, nearestNullLimitSql } from "../emitters/evalue-core";
-import { EMITTABLE_ANALYSIS_KINDS } from "../spec/types";
+import { EMITTABLE_ANALYSIS_KINDS, specReadiness } from "../spec/types";
+import { checkSpecShape } from "../spec/shape";
 import type { StudySpec, EmitOptions } from "../index";
 
 export interface Check {
@@ -1557,6 +1559,502 @@ export async function verifyGoldI(): Promise<Check[]> {
 
   out.push(...sasSqlParityChecks(GOLD_I_SPEC, GOLD_I_OPTS));
   out.push(...sasStructureChecks(emitSas(GOLD_I_SPEC, GOLD_I_OPTS)));
+  return out;
+}
+
+/**
+ * Gold Case J — negative index weights, the ICD-9/ICD-10 transition, and two
+ * declared sweeps. Every value asserted here is hand-derived in the header of
+ * verify/fixture-j.ts, BEFORE the modules were run.
+ */
+export async function verifyGoldJ(): Promise<Check[]> {
+  const { db, ok, steps } = await seedAndRun(GOLD_J_SPEC, GOLD_J_OPTS, fixtureJSeedSql());
+  const out: Check[] = [];
+  if (!ok) {
+    return [{
+      name: "Gold Case J executes",
+      status: "fail",
+      detail: steps.filter((x) => !x.ok).map((x) => `${x.path}: ${x.error}`).join(" | "),
+    }];
+  }
+  const eq = (name: string, got: number | null | undefined, want: number) =>
+    out.push({ name, status: Number(got) === want ? "pass" : "fail", detail: `expected ${want}, got ${got}` });
+  const approx = (name: string, got: number, want: number, tol = 0.00001) =>
+    out.push({ name, status: Math.abs(got - want) <= tol ? "pass" : "fail", detail: `expected ${want}±${tol}, got ${got}` });
+  const push = (name: string, cond: boolean, detail: string) =>
+    out.push({ name, status: cond ? "pass" : "fail", detail });
+
+  eq("J: cohort N = 16", await scalar<number>(db, "SELECT count(*)::int FROM tz_j_cohort"), EXPECTED_J.cohortN);
+
+  /* ================= PART A: THE INDEX WITH NEGATIVE WEIGHTS ================= */
+  const x = EXPECTED_J.index;
+  const cciRow = async (table: string, component: string, category?: string) =>
+    (
+      await rows<{ patients: number; weight: number | null; score_mean: number | null; score_sd: number | null; score_median: number | null; score_max: number | null }>(
+        db,
+        `SELECT patients, weight::float8, score_mean::float8, score_sd::float8, score_median::float8, score_max::float8` +
+          ` FROM ${table} WHERE component = '${component}'${category ? ` AND category = '${category}'` : ""}`,
+      )
+    )[0];
+
+  approx("J: index mean = 10/16 = 0.625 (a SIGNED sum, not clamped)",
+    Number((await cciRow("tz_j_cci", "index"))?.score_mean), x.scoreMean);
+  eq("J: index median = 0", Number((await cciRow("tz_j_cci", "index"))?.score_median), x.scoreMedian);
+  eq("J: index max = 12", Number((await cciRow("tz_j_cci", "index"))?.score_max), x.scoreMax);
+  approx("J: index sample SD = sqrt(311.75/15)", Number((await cciRow("tz_j_cci", "index"))?.score_sd), x.scoreSd, 0.0001);
+
+  /* THE NEGATIVE TOTAL, read from the released distribution rather than inferred
+   * from the mean. A clamp at zero would leave the mean plausible-looking and
+   * empty this band, so the band count is the assertion that bites. */
+  push(
+    "J: the lowest score band holds the two NEGATIVE-scoring patients, so a negative total is not clamped into the 0 band",
+    Number((await cciRow("tz_j_cci", "score_band", x.bandLabels[0]))?.patients) === x.bandCounts[0],
+    `band "${x.bandLabels[0]}" holds ${(await cciRow("tz_j_cci", "score_band", x.bandLabels[0]))?.patients}, expected ${x.bandCounts[0]}`,
+  );
+  for (let i = 0; i < x.bandLabels.length; i++) {
+    eq(`J: score band "${x.bandLabels[i]}" holds ${x.bandCounts[i]}`,
+      Number((await cciRow("tz_j_cci", "score_band", x.bandLabels[i]))?.patients), x.bandCounts[i]);
+  }
+
+  /* SUPERSESSION: the weight is withheld, the PREVALENCE is not. P2 has both
+   * mets and tumr and scores 12 rather than 16. */
+  eq("J: metastatic cancer prevalence = 1", Number((await cciRow("tz_j_cci", "condition", "Metastatic cancer"))?.patients), x.metsPrevalence);
+  eq("J: and the SUPERSEDED solid tumour still reports its prevalence = 1",
+    Number((await cciRow("tz_j_cci", "condition", "Solid tumour without metastasis"))?.patients), x.tumrPrevalence);
+  push(
+    "J: P2 scores 12, not 16 — the superseded weight is withheld while its prevalence stands",
+    Number((await cciRow("tz_j_cci", "index"))?.score_max) === 12,
+    `max score ${(await cciRow("tz_j_cci", "index"))?.score_max}; 16 would mean the hierarchy did not apply`,
+  );
+  /* THE ERA CHECK. chf is ascertained through an ICD-9 claim (P1) and an ICD-10
+   * one (P5); a broken era branch reports 1 rather than 2. */
+  eq("J: congestive heart failure prevalence = 2 — ONE patient per ICD era",
+    Number((await cciRow("tz_j_cci", "condition", "Congestive heart failure"))?.patients), x.chfPrevalence);
+  eq("J: drug abuse (weight -7) prevalence = 1", Number((await cciRow("tz_j_cci", "condition", "Drug abuse"))?.patients), x.drugPrevalence);
+  eq("J: depression (weight -3) prevalence = 3", Number((await cciRow("tz_j_cci", "condition", "Depression"))?.patients), x.deprPrevalence);
+  approx("J: the negative weights reach the result table as negative numbers",
+    Number((await cciRow("tz_j_cci", "condition", "Drug abuse"))?.weight), -7);
+
+  /* THE ALWAYS-ON NOTES, in BOTH twins' emitted text. A reader holding the SAS
+   * in six months never ran readiness, so the program has to say this itself. */
+  {
+    const sqlCci = emitSql(GOLD_J_SPEC, "postgres", GOLD_J_OPTS).find((f) => /07_cci/.test(f.path))?.content ?? "";
+    const sasCci = emitSas(GOLD_J_SPEC, GOLD_J_OPTS).find((f) => /080_cci/.test(f.path))?.content ?? "";
+    for (const [lang, text] of [["sql", sqlCci], ["sas", sasCci]] as const) {
+      push(
+        `J: the ${lang} twin names the ICD transition date and the era rule, always`,
+        /ICD-9 TO ICD-10 TRANSITION OF 2015-10-01/.test(text)
+          && /A CODE ONLY EVER MATCHES CLAIMS FROM ITS OWN ERA/.test(text),
+        text.includes("2015-10-01") ? "found the transition note" : "no transition note in the emitted program",
+      );
+      push(
+        `J: the ${lang} twin reports each condition list's era coverage, so the reader need not re-run readiness`,
+        /era coverage of the lists this program queries: chf:icd9=1,icd10=1/.test(text),
+        "era coverage line",
+      );
+      push(
+        `J: the ${lang} twin says the score is a SIGNED sum that is never clamped at zero`,
+        /NEGATIVE WEIGHTS/.test(text) && /NEVER clamped at zero/.test(text),
+        "negative-weight note",
+      );
+    }
+  }
+
+  /* ================= PART B: SWEEP 1, THE DIRECTION FLIP ================= */
+  const sw = async (table: string, component: string, statistic: string, armId?: string) =>
+    (
+      await rows<{ estimate: number | null; method: string; arm_kind: string; arm_label: string }>(
+        db,
+        `SELECT estimate::float8, method, arm_kind, arm_label FROM ${table}` +
+          ` WHERE component = '${component}' AND statistic = '${statistic}'${armId ? ` AND arm_id = '${armId}'` : ""}`,
+      )
+    )[0];
+  const s1 = EXPECTED_J.sweep1;
+
+  eq("J/s1: 3 arms declared", Number((await sw("tz_j_sweep_s1", "design", "arms_declared"))?.estimate), s1.armsDeclared);
+  eq("J/s1: 3 arms reported", Number((await sw("tz_j_sweep_s1", "design", "arms_reported"))?.estimate), s1.armsReported);
+  eq("J/s1: 0 arms missing", Number((await sw("tz_j_sweep_s1", "design", "arms_missing"))?.estimate), s1.armsMissing);
+  {
+    const ids = await rows<{ arm_id: string }>(db, `SELECT DISTINCT arm_id FROM tz_j_sweep_s1 WHERE component = 'arm' ORDER BY arm_id`);
+    push(
+      "J/s1: EVERY declared arm appears in the output, including the one that disagrees",
+      JSON.stringify(ids.map((r) => r.arm_id).sort()) === JSON.stringify([...s1.armIds].sort()),
+      `got ${ids.map((r) => r.arm_id).join(",")}`,
+    );
+  }
+  /* THE KIND, on every row. A subgroup and a sensitivity arm are different
+   * claims, and a reader must not have to infer which is which from a label. */
+  for (let i = 0; i < s1.armIds.length; i++) {
+    const r = await sw("tz_j_sweep_s1", "arm", "estimate", s1.armIds[i]);
+    push(
+      `J/s1: arm "${s1.armIds[i]}" is labelled ${s1.armKinds[i]} on its own result row`,
+      r?.arm_kind === s1.armKinds[i],
+      `got arm_kind=${r?.arm_kind}`,
+    );
+  }
+
+  approx("J/s1: primary arm (washout 365) OR = 20/12 = 5/3",
+    Number((await sw("tz_j_sweep_s1", "arm", "estimate", "base"))?.estimate), s1.baseOr);
+  approx("J/s1: washout-730 arm OR = 16/9",
+    Number((await sw("tz_j_sweep_s1", "arm", "estimate", "w730"))?.estimate), s1.w730Or);
+  approx("J/s1: female subgroup OR = 1/9 — the OPPOSITE side of the null",
+    Number((await sw("tz_j_sweep_s1", "arm", "estimate", "fem"))?.estimate), s1.femOr);
+  eq("J/s1: the primary arm reproduces the un-swept analysis exactly",
+    Number((await rows<{ e: number }>(db, `SELECT estimate::float8 AS e FROM tz_j_glm WHERE component = 'crude' AND statistic = 'odds_ratio'`))[0]?.e),
+    s1.baseAnalysisOr);
+
+  eq("J/s1: arm sizes — base 16", Number((await sw("tz_j_sweep_s1", "arm", "arm_n", "base"))?.estimate), s1.armN.base);
+  eq("J/s1: arm sizes — female slice 8", Number((await sw("tz_j_sweep_s1", "arm", "arm_n", "fem"))?.estimate), s1.armN.fem);
+  eq("J/s1: exactly one arm is flagged primary",
+    Number((await scalar<number>(db, `SELECT SUM(estimate)::int FROM tz_j_sweep_s1 WHERE statistic = 'is_primary'`))), 1);
+  eq("J/s1: and it is the arm the SPEC named",
+    Number((await sw("tz_j_sweep_s1", "arm", "is_primary", s1.primaryArmId))?.estimate), 1);
+  {
+    const p = await sw("tz_j_sweep_s1", "design", "primary_arm");
+    push(
+      "J/s1: the program says the primary arm was named BEFORE the estimates existed",
+      /named in the spec before the estimates existed/.test(p?.method ?? "")
+        && (p?.method ?? "").includes(`"${s1.primaryArmId}"`),
+      (p?.method ?? "no row").slice(0, 120),
+    );
+  }
+
+  approx("J/s1: range min = 1/9", Number((await sw("tz_j_sweep_s1", "range", "estimate_min"))?.estimate), s1.estimateMin);
+  approx("J/s1: range max = 16/9", Number((await sw("tz_j_sweep_s1", "range", "estimate_max"))?.estimate), s1.estimateMax);
+  approx("J/s1: span = 16/9 - 1/9 = 5/3", Number((await sw("tz_j_sweep_s1", "range", "estimate_span"))?.estimate), s1.estimateSpan);
+  approx("J/s1: primary estimate = 5/3", Number((await sw("tz_j_sweep_s1", "range", "primary_estimate"))?.estimate), s1.primaryEstimate);
+  {
+    const span = await sw("tz_j_sweep_s1", "range", "estimate_span");
+    push(
+      "J/s1: and the span is called out as NOT a confidence interval",
+      /NOT a confidence interval/.test(span?.method ?? "") && /no coverage property/.test(span?.method ?? ""),
+      (span?.method ?? "no row").slice(0, 120),
+    );
+  }
+
+  eq("J/s1: 2 arms above the null", Number((await sw("tz_j_sweep_s1", "direction", "arms_above_null"))?.estimate), s1.armsAboveNull);
+  eq("J/s1: 1 arm below it", Number((await sw("tz_j_sweep_s1", "direction", "arms_below_null"))?.estimate), s1.armsBelowNull);
+  const dis = await sw("tz_j_sweep_s1", "direction", "direction_disagreement");
+  eq("J/s1: the arms DISAGREE in direction", Number(dis?.estimate), s1.directionDisagreement);
+  push(
+    "J/s1: and the program says a sign that flips is not robust under ANY threshold",
+    /ARMS DISAGREE IN DIRECTION/.test(dis?.method ?? "")
+      && /NOT ROBUST UNDER ANY THRESHOLD/.test(dis?.method ?? ""),
+    (dis?.method ?? "no row").slice(0, 140),
+  );
+  eq("J/s1: the female arm's own direction row reads -1",
+    Number((await sw("tz_j_sweep_s1", "arm", "direction", "fem"))?.estimate), -1);
+  eq("J/s1: the primary arm's reads +1",
+    Number((await sw("tz_j_sweep_s1", "arm", "direction", "base"))?.estimate), 1);
+
+  approx("J/s1: familywise error if uncorrected = 1 - 0.95^3",
+    Number((await sw("tz_j_sweep_s1", "design", "familywise_error_if_uncorrected"))?.estimate), s1.familywise);
+  {
+    const fw = await sw("tz_j_sweep_s1", "design", "familywise_error_if_uncorrected");
+    push(
+      "J/s1: and it says plainly that a sweep multiplies the false-positive rate",
+      /A SWEEP MULTIPLIES THE FALSE-POSITIVE RATE/.test(fw?.method ?? ""),
+      (fw?.method ?? "no row").slice(0, 120),
+    );
+  }
+  {
+    const vp = await sw("tz_j_sweep_s1", "arm", "varied_parameter", "w730");
+    push(
+      "J/s1: the sensitivity arm names its ONE varied knob and says only one moved",
+      Number(vp?.estimate) === 730 && /SENSITIVITY: washout_days = 730/.test(vp?.method ?? "")
+        && /Exactly ONE knob moved/.test(vp?.method ?? ""),
+      `estimate=${vp?.estimate}; ${(vp?.method ?? "").slice(0, 90)}`,
+    );
+    const sl = await sw("tz_j_sweep_s1", "arm", "varied_parameter", "fem");
+    push(
+      "J/s1: the subgroup arm names its SLICE and says a subgroup is not a robustness check",
+      sl?.estimate === null && /SUBGROUP SLICE: Sex = Female/.test(sl?.method ?? "")
+        && /not a robustness check/.test(sl?.method ?? ""),
+      `estimate=${sl?.estimate}; ${(sl?.method ?? "").slice(0, 90)}`,
+    );
+  }
+
+  /* ================= PART B: SWEEP 2, A TARGET WITH NO NULL ================= */
+  const s2 = EXPECTED_J.sweep2;
+  approx("J/s2: primary arm (lookback 365) mean score = 10/16",
+    Number((await sw("tz_j_sweep_s2", "arm", "estimate", "lb365"))?.estimate), s2.lb365Mean);
+  approx("J/s2: lookback 120 mean = 13/16 — a SHORTER lookback RAISED the index",
+    Number((await sw("tz_j_sweep_s2", "arm", "estimate", "lb120"))?.estimate), s2.lb120Mean);
+  approx("J/s2: female subgroup mean = 6/8",
+    Number((await sw("tz_j_sweep_s2", "arm", "estimate", "fem"))?.estimate), s2.femMean);
+  push(
+    "J/s2: the shorter lookback moved the mean UP, which only negative weights allow",
+    Number((await sw("tz_j_sweep_s2", "arm", "estimate", "lb120"))?.estimate) >
+      Number((await sw("tz_j_sweep_s2", "arm", "estimate", "lb365"))?.estimate),
+    `lb120 ${(await sw("tz_j_sweep_s2", "arm", "estimate", "lb120"))?.estimate} vs lb365 ${(await sw("tz_j_sweep_s2", "arm", "estimate", "lb365"))?.estimate}`,
+  );
+  approx("J/s2: span = 0.8125 - 0.625", Number((await sw("tz_j_sweep_s2", "range", "estimate_span"))?.estimate), s2.estimateSpan);
+  {
+    const d2 = await sw("tz_j_sweep_s2", "direction", "direction_disagreement");
+    push(
+      "J/s2: NO direction verdict is claimed — a mean score is a level, not a contrast",
+      d2?.estimate === null && /NO DIRECTION VERDICT IS POSSIBLE/.test(d2?.method ?? "")
+        && /level rather than a contrast/.test(d2?.method ?? ""),
+      `estimate=${d2?.estimate}; ${(d2?.method ?? "").slice(0, 110)}`,
+    );
+    const a2 = await sw("tz_j_sweep_s2", "arm", "direction", "lb120");
+    push(
+      "J/s2: and no arm claims a direction either",
+      a2?.estimate === null && /has no null value/.test(a2?.method ?? ""),
+      `estimate=${a2?.estimate}; ${(a2?.method ?? "").slice(0, 90)}`,
+    );
+  }
+
+  /* ================= THE RESULTS CONTRACT ================= */
+  {
+    const contract = await rows<{ arm_id: string | null; arm_kind: string | null; n: number }>(
+      db,
+      `SELECT arm_kind, COUNT(*)::int AS n FROM tz_j_results GROUP BY arm_kind ORDER BY arm_kind`,
+    );
+    const kinds = new Set(contract.map((r) => r.arm_kind));
+    push(
+      "J: the results contract carries arm_kind, so a subgroup arm's estimate cannot be read as the primary result",
+      kinds.has("subgroup") && kinds.has("sensitivity"),
+      `arm kinds in the contract: ${[...kinds].map((k) => k ?? "NULL").join(", ")}`,
+    );
+    const sweepRows = await rows<{ arm_id: string; arm_kind: string }>(
+      db,
+      `SELECT DISTINCT arm_id, arm_kind FROM tz_j_results WHERE table_id = 'tz_j_sweep_s1' AND arm_kind <> 'plan' ORDER BY arm_id`,
+    );
+    push(
+      "J: and the sweep summary's own rows carry their arm identity per row, not as one table-level label",
+      sweepRows.length === 3 && sweepRows.some((r) => r.arm_kind === "subgroup"),
+      `got ${sweepRows.map((r) => `${r.arm_id}:${r.arm_kind}`).join(", ")}`,
+    );
+  }
+  /* The three columns appear ONLY when a sweep is declared. A study that never
+   * asked for one must emit the contract it emitted before. */
+  {
+    const jSup = emitSql(GOLD_J_SPEC, "postgres", GOLD_J_OPTS).find((f) => /suppression/.test(f.path))?.content ?? "";
+    const aSup = emitSql(GOLD_A_SPEC, "postgres", GOLD_A_OPTS).find((f) => /suppression/.test(f.path))?.content ?? "";
+    push(
+      "J: the arm columns are conditional — Gold A declares no sweep and its contract is unchanged",
+      /AS arm_kind/.test(jSup) && !/AS arm_kind/.test(aSup),
+      `J has arm columns: ${/AS arm_kind/.test(jSup)}; A has them: ${/AS arm_kind/.test(aSup)}`,
+    );
+  }
+
+  out.push(...sasSqlParityChecks(GOLD_J_SPEC, GOLD_J_OPTS));
+  out.push(...sasStructureChecks(emitSas(GOLD_J_SPEC, GOLD_J_OPTS)));
+  out.push(...goldJRefusals());
+  return out;
+}
+
+/**
+ * The refusals Gold J exists to prove, run against CLONES of its spec.
+ *
+ * Every one of them is a spec that would otherwise emit a complete,
+ * well-formed, entirely wrong deliverable — which is why they are refused at
+ * readiness rather than warned about in the output.
+ */
+export function goldJRefusals(): Check[] {
+  const out: Check[] = [];
+  const clone = (): StudySpec => JSON.parse(JSON.stringify(GOLD_J_SPEC));
+  const refuses = (name: string, mutate: (s: StudySpec) => void, needle: string) => {
+    const s = clone();
+    mutate(s);
+    const problems = specReadiness(s).problems;
+    const hit = problems.find((p) => p.includes(needle));
+    out.push({
+      name: `J refusal: ${name}`,
+      status: hit ? "pass" : "fail",
+      detail: hit ? hit.slice(0, 150) : `NOT REFUSED — problems were: ${problems.join(" | ").slice(0, 200) || "(none)"}`,
+    });
+  };
+
+  out.push({
+    name: "J refusal: the gold spec itself is READY (so every refusal below is caused by its own mutation)",
+    status: specReadiness(GOLD_J_SPEC).ready ? "pass" : "fail",
+    detail: specReadiness(GOLD_J_SPEC).problems.join(" | ") || "no open problems",
+  });
+
+  /* ---- the comorbidity index ---- */
+  refuses(
+    "a condition list carrying ONE era, on a lookback that crosses 1 Oct 2015",
+    (s) => {
+      const l = s.codeLists.find((c) => c.id === "cci_chf")!;
+      l.codes = l.codes.filter((c) => !/^\d/.test(c.code)); // drop the ICD-9 side
+    },
+    "crosses the 1 October 2015 ICD-9 to ICD-10 transition",
+  );
+  refuses(
+    "the SAME single-era list when nothing else changes is caught for the ICD-10-only side too",
+    (s) => {
+      const l = s.codeLists.find((c) => c.id === "cci_depr")!;
+      l.codes = l.codes.filter((c) => /^\d/.test(c.code)); // drop the ICD-10 side
+    },
+    "has ICD-9 only codes",
+  );
+  refuses(
+    "a weight of ZERO (which contributes nothing) — while a NEGATIVE one is legal",
+    (s) => {
+      const a = s.analyses.find((z) => z.id === "j_vw")!;
+      if (a.kind === "comorbidity_index") a.conditions[0].weight = 0;
+    },
+    "has weight 0, so it contributes nothing",
+  );
+  refuses(
+    "a score band floor ABOVE the most negative score the weights can produce",
+    (s) => {
+      const a = s.analyses.find((z) => z.id === "j_vw")!;
+      if (a.kind === "comorbidity_index") a.scoreBands = [0, 7];
+    },
+    "the DISTRIBUTION silently clamps",
+  );
+  /* The negative weights themselves must NOT be refused — that refusal is what
+   * made the engine Charlson-only while claiming to be general. */
+  out.push({
+    name: "J refusal: a NEGATIVE weight is accepted (the whole point of the wave)",
+    status: specReadiness(GOLD_J_SPEC).problems.every((p) => !/weight -7|weight -3/.test(p)) ? "pass" : "fail",
+    detail: "van Walraven's drug abuse (-7) and depression (-3) pass readiness",
+  });
+
+  /* ---- sweeps ---- */
+  refuses(
+    "an analysisId naming no enabled analysis",
+    (s) => { s.sweeps![0].analysisId = "not_an_analysis"; },
+    "does not name an ENABLED analysis",
+  );
+  refuses(
+    "a target analysis kind with no designated sweep statistic",
+    (s) => {
+      s.sweeps![0].analysisId = "j_attrition";
+      s.sweeps![0].arms = [{ kind: "subgroup", id: "fem", label: "Female", baselineId: "b_sex", level: "Female" }];
+      s.sweeps![0].primaryArmId = "fem";
+    },
+    "declares no designated sweep statistic",
+  );
+  refuses(
+    "a primaryArmId that is not one of the arms",
+    (s) => { s.sweeps![0].primaryArmId = "not_an_arm"; },
+    "is not one of the arms",
+  );
+  refuses(
+    "duplicate arm ids",
+    (s) => { s.sweeps![0].arms[1].id = "base"; },
+    "duplicate arm id",
+  );
+  refuses(
+    "empty arms[]",
+    (s) => { s.sweeps![0].arms = []; },
+    "arms[] is empty",
+  );
+  refuses(
+    "a subgroup naming a baseline that does not exist",
+    (s) => {
+      const arm = s.sweeps![0].arms[2];
+      if (arm.kind === "subgroup") arm.baselineId = "b_nonexistent";
+    },
+    "is not in baseline[]",
+  );
+  refuses(
+    "a subgroup with neither level nor min/max",
+    (s) => {
+      const arm = s.sweeps![0].arms[2];
+      if (arm.kind === "subgroup") delete arm.level;
+    },
+    "neither level nor min/max is set",
+  );
+  refuses(
+    "a LEVEL on a continuous baseline",
+    (s) => {
+      const arm = s.sweeps![0].arms[2];
+      if (arm.kind === "subgroup") { arm.baselineId = "b_age"; arm.level = "46"; }
+    },
+    "is CONTINUOUS",
+  );
+  refuses(
+    "MIN/MAX on a categorical baseline",
+    (s) => {
+      const arm = s.sweeps![0].arms[2];
+      if (arm.kind === "subgroup") { delete arm.level; arm.min = 1; arm.max = 2; }
+    },
+    "is CATEGORICAL",
+  );
+  refuses(
+    "an EMPTY numeric slice",
+    (s) => {
+      const arm = s.sweeps![0].arms[2];
+      if (arm.kind === "subgroup") { arm.baselineId = "b_age"; delete arm.level; arm.min = 60; arm.max = 60; }
+    },
+    "which is EMPTY",
+  );
+  refuses(
+    "permissible_gap_days on a regression — a knob that analysis does not have",
+    (s) => {
+      const arm = s.sweeps![0].arms[1];
+      if (arm.kind === "sensitivity") arm.vary = { param: "permissible_gap_days", value: 30 };
+    },
+    `sensitivity parameter "permissible_gap_days" is meaningless for a regression analysis`,
+  );
+  refuses(
+    "permissible_gap_days on an incidence_rate — the same refusal, on the kind the doc names",
+    (s) => {
+      s.analyses.push({
+        id: "j_inc", label: "Incidence", kind: "incidence_rate", enabled: true,
+        outcomeDefinition: { codeListId: "ae_dx", minClaims: 1, setting: "outpatient", diagnosisPosition: "any" },
+        washout: { start: -365, end: 0, includesIndex: true },
+        personTimeRule: { start: "index", censorAt: ["outcome", "disenrollment", "study_end"] },
+        rateMultiplier: 1000, recurrence: "first_only", ciMethod: "poisson_byar", stratifyBy: [],
+        caseStatus: "incident", denominatorRule: "person_time",
+      });
+      s.sweeps![0].analysisId = "j_inc";
+      s.sweeps![0].arms = [
+        { kind: "sensitivity", id: "g30", label: "Gap 30", vary: { param: "permissible_gap_days", value: 30 } },
+      ];
+      s.sweeps![0].primaryArmId = "g30";
+    },
+    `sensitivity parameter "permissible_gap_days" is meaningless for a incidence_rate analysis`,
+  );
+  refuses(
+    "exposure_definition, which no emitted module reads",
+    (s) => {
+      const arm = s.sweeps![0].arms[1];
+      if (arm.kind === "sensitivity") arm.vary = { param: "exposure_definition", value: "on_treatment" };
+    },
+    "no emitted module reads it at all",
+  );
+
+  /* A sweep the emitter CANNOT build must still appear in the bundle, saying so.
+   * A declared sweep the bundle silently omits is indistinguishable from a study
+   * that never declared one. */
+  {
+    const s = clone();
+    s.sweeps![0].primaryArmId = "not_an_arm";
+    const files = emitSql(s, "postgres", GOLD_J_OPTS);
+    const notEmitted = files.find((f) => /sweep_s1/.test(f.path));
+    out.push({
+      name: "J refusal: an unbuildable sweep is emitted as a NOT EMITTED file rather than dropped",
+      status: notEmitted !== undefined && /SWEEP NOT EMITTED/.test(notEmitted.content) ? "pass" : "fail",
+      detail: notEmitted ? notEmitted.content.split("\n").find((l) => /NOT EMITTED/.test(l))?.slice(0, 140) ?? "" : "no file emitted for the declared sweep",
+    });
+  }
+
+  /* The structural gate must accept a sweep-carrying spec: the MCP server and
+   * the chat both go through checkSpecShape, and a kind of field it does not
+   * know is rejected before readiness ever sees it. */
+  {
+    const shape = checkSpecShape(JSON.parse(JSON.stringify(GOLD_J_SPEC)));
+    out.push({
+      name: "J: the structural gate accepts a spec carrying sweeps",
+      status: shape.ok ? "pass" : "fail",
+      detail: shape.ok ? "untrusted JSON with sweeps[] reaches readiness" : shape.problems.join(" | ").slice(0, 200),
+    });
+    const bad = JSON.parse(JSON.stringify(GOLD_J_SPEC)) as { sweeps: Array<{ arms: Array<Record<string, unknown>> }> };
+    bad.sweeps[0].arms[0] = { kind: "sensitivity", id: "x", label: "x", vary: { param: "washout_days", value: "365" } };
+    const badShape = checkSpecShape(bad);
+    out.push({
+      name: "J: and it REFUSES a sweep whose varied value is a string rather than a number",
+      status: !badShape.ok && badShape.problems.some((p) => /vary\.value/.test(p)) ? "pass" : "fail",
+      detail: badShape.problems.join(" | ").slice(0, 160) || "accepted a string where a day count belongs",
+    });
+  }
+
   return out;
 }
 

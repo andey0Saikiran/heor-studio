@@ -156,7 +156,7 @@ function sqlGFormula(ctx: SqlCtx, an: GFormulaAnalysis, suffix: string): SqlModu
   const wc = windowConds(an.washout, "a.event_date", "c.index_date", d);
 
   const C: string[] = [];
-  C.push(`WITH cohort AS (SELECT enrolid, index_date, index_code FROM ${wp}_cohort),`);
+  C.push(`WITH cohort AS (SELECT enrolid, index_date, index_code FROM ${ctx.cohortT}),`);
   C.push(`ae AS (SELECT enrolid, event_date FROM ${wp}_events WHERE code_list_id = '${q(clid)}'` +
     (setting.enforce ? ` AND setting = '${setting.enforce}'` : ``) + `),`);
   C.push(`prevalent AS (   -- washout: ${describeWindow(an.washout)}`);

@@ -39,6 +39,7 @@ import { GOLD_F_SPEC, GOLD_F_OPTS } from "./fixture-f";
 import { GOLD_G_SPEC, GOLD_G_OPTS } from "./fixture-g";
 import { GOLD_H_SPEC, GOLD_H_OPTS } from "./fixture-h";
 import { GOLD_I_SPEC, GOLD_I_OPTS } from "./fixture-i";
+import { GOLD_J_SPEC, GOLD_J_OPTS } from "./fixture-j";
 import type { Analysis, StudySpec } from "../spec/types";
 import type { EmitOptions } from "../emitters/types";
 import {
@@ -81,6 +82,7 @@ export function fingerprintCoverageChecks(): Check[] {
     { name: "G", spec: GOLD_G_SPEC, opts: GOLD_G_OPTS },
     { name: "H", spec: GOLD_H_SPEC, opts: GOLD_H_OPTS },
     { name: "I", spec: GOLD_I_SPEC, opts: GOLD_I_OPTS },
+    { name: "J", spec: GOLD_J_SPEC, opts: GOLD_J_OPTS },
   ];
   const emitted = GOLD_SPECS.map((g) => ({
     name: g.name,
@@ -192,6 +194,76 @@ export function fingerprintCoverageChecks(): Check[] {
         expSpecific.length >= 1
           ? `${expSpecific.length} kind-specific stamp value(s) asserted against the emitted code (${expSpecific.join(", ")})`
           : `expectedFromStamp("${stampKind}") returns no KIND-SPECIFIC expectation (only ${Object.keys(exp).join(", ") || "nothing"}) — the PARITY stamp is never compared to what the code actually does`,
+    });
+  }
+
+  /* STAMPED PROGRAMS THAT ARE NOT ANALYSIS MODULES.
+   *
+   * The loop above walks ANALYSIS_MODULES, so a stamped program emitted by the
+   * emitter directly — a sweep summary is the first — would carry a PARITY stamp
+   * that nothing in this guard ever looked at, and would read as covered by
+   * being invisible. That is the exact blind spot this file exists to close, so
+   * the non-module stamp kinds are enumerated and held to the same four
+   * requirements. */
+  const NON_MODULE_STAMP_KINDS: Array<{ kind: string; why: string }> = [
+    { kind: "sweep", why: "emitted per declared sweep plan by emitSql/emitSas, not by a module" },
+  ];
+  for (const { kind, why } of NON_MODULE_STAMP_KINDS) {
+    const label = `${kind} (non-module stamp; ${why})`;
+    checks.push({
+      name: `coverage ${label}: has a suppression shape`,
+      status: SUPPRESSION_SHAPES[kind] ? "pass" : "fail",
+      detail: SUPPRESSION_SHAPES[kind]
+        ? "results cannot skip disclosure control"
+        : `no SUPPRESSION_SHAPES["${kind}"] — this program's results would ship UNSUPPRESSED`,
+    });
+    checks.push({
+      name: `coverage ${label}: has a pinned CI-constant profile`,
+      status: hasConstantProfile(kind) ? "pass" : "fail",
+      detail: hasConstantProfile(kind)
+        ? "a mistyped statistical constant is detectable"
+        : `no EXPECTED_CONSTANTS["${kind}"]`,
+    });
+    let sq: ReturnType<typeof firstOf>;
+    let sa: ReturnType<typeof firstOf>;
+    let source = "";
+    for (const g of emitted) {
+      const a = firstOf(g.sql, kind);
+      const b = firstOf(g.sas, kind);
+      if (a && b) { sq = a; sa = b; source = g.name; break; }
+    }
+    if (!sq || !sa) {
+      checks.push({
+        name: `coverage ${label}: exercised by a gold spec`,
+        status: "fail",
+        detail: `no ${kind} program emitted in BOTH languages by any gold spec — add one to a fixture so its coverage is measurable`,
+      });
+      continue;
+    }
+    checks.push({
+      name: `coverage ${label}: exercised by a gold spec`,
+      status: "pass",
+      detail: `emitted in both languages by Gold Case ${source}`,
+    });
+    for (const [lang, prog] of [["sql", sq], ["sas", sa]] as const) {
+      const fp = fingerprint(kind, lang, prog.content, lang === "sas" ? setup : "");
+      const n = Object.keys(fp).length;
+      checks.push({
+        name: `coverage ${label}: ${lang} fingerprint is non-trivial`,
+        status: n >= MIN_FINGERPRINT_KEYS ? "pass" : "fail",
+        detail: n >= MIN_FINGERPRINT_KEYS
+          ? `${n} values scraped from the ${lang} twin's own code`
+          : `only ${n} value(s) scraped — this kind falls through the ${lang} fingerprint switch and is effectively UNVERIFIED`,
+      });
+    }
+    const exp = expectedFromStamp(kind, sq.stamp);
+    const expSpecific = Object.keys(exp).filter((k) => !STAMP_SHARED_KEYS.has(k));
+    checks.push({
+      name: `coverage ${label}: stamp is cross-checked against the code`,
+      status: expSpecific.length >= 1 ? "pass" : "fail",
+      detail: expSpecific.length >= 1
+        ? `${expSpecific.length} kind-specific stamp value(s) asserted against the emitted code (${expSpecific.join(", ")})`
+        : `expectedFromStamp("${kind}") returns no KIND-SPECIFIC expectation`,
     });
   }
 

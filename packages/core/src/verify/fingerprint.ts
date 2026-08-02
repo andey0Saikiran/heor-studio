@@ -984,23 +984,88 @@ function sqlFingerprint(kind: string, raw: string): Fingerprint {
       /* The index IS its weights and its hierarchy. A dropped supersession or a
        * shifted weight produces a score that is wrong by a plausible amount on
        * every patient at once, so both are scraped in order. */
-      const conds = [...sql.matchAll(/SELECT '([^']+)' AS cond_id, '.*' AS cond_label, (\d+) AS weight, (\d+) AS cond_ord/g)];
+      /* `-?\d+(\.\d+)?`, not `\d+`. A NEGATIVE weight is legal (van Walraven's
+       * Elixhauser summary uses them), and the old integer-only pattern simply
+       * did not match a condition whose weight was -7 — so that condition fell
+       * out of the scraped list entirely and the fingerprint compared a SHORTER
+       * list against a shorter list, agreeing perfectly while being blind to
+       * every negatively-weighted condition in the index. */
+      const WEIGHT = String.raw`-?\d+(?:\.\d+)?`;
+      const conds = [...sql.matchAll(new RegExp(String.raw`SELECT '([^']+)' AS cond_id, '.*' AS cond_label, (${WEIGHT}) AS weight, (\d+) AS cond_ord`, "g"))];
       put(fp, "condition_ids", conds.map((m) => m[1]).join(","));
       put(fp, "condition_weights", conds.map((m) => m[2]).join(","));
+      put(fp, "negative_weights", conds.filter((m) => Number(m[2]) < 0).map((m) => `${m[1]}:${m[2]}`).join(","));
       put(fp, "supersessions",
         [...sql.matchAll(/SELECT '([^']+)' AS winner, '([^']+)' AS loser/g)].map((m) => `${m[1]}>${m[2]}`).join(","));
       put(fp, "lookback_lower_days", sqlLookbackOffset(sql));
       // The hierarchy must WITHHOLD the weight, not delete the condition.
       put(fp, "hierarchy_withholds_weight", /THEN 0 ELSE cd\.weight END AS weight_applied/i.test(sql) ? "yes" : "no");
+      /* THE SCORE IS A SIGNED SUM AND IS NEVER CLAMPED. With only positive
+       * weights a GREATEST(..., 0) around it is a no-op and nobody would
+       * notice; with a negative weight it silently rewrites every negative
+       * patient to zero, which raises the mean, empties the lowest band, and
+       * leaves a table that looks entirely ordinary. */
+      put(fp, "score_clamped_at_zero",
+        /(?:GREATEST|MAX)\s*\(\s*COALESCE\(SUM\(a\.weight_applied\)/i.test(sql) ? "yes" : "no");
       /* Condition prevalence must come from `has` (everyone who HAS it), not
        * from `applied` (whose weight survived) — otherwise a superseded
        * condition silently reads as absent. */
       put(fp, "superseded_prevalence_kept", /FROM cond cd LEFT JOIN has h ON h\.cond_id = cd\.cond_id/i.test(sql) ? "yes" : "no");
       // Zeros count: the mean is over the cohort, not over the affected.
       put(fp, "zeros_included", /FROM cohort c LEFT JOIN applied a/i.test(sql) ? "yes" : "no");
-      put(fp, "score_bands", (sql.match(/WHEN score >= (\d+) THEN '[^']*'/g) ?? []).map((m) => (/(\d+)/.exec(m) ?? [])[1]).join(","));
+      // negative lower bounds too: the bands are what keep a negative total out
+      // of the band labelled 0, so a pattern that skipped them was blind to the
+      // exact defect the band-floor rule exists to prevent
+      put(fp, "score_bands",
+        [...sql.matchAll(/WHEN score >= (-?\d+(?:\.\d+)?) THEN '[^']*'/g)].map((m) => m[1]).join(","));
+      /* THE LOWEST BAND IS THE `ELSE` ARM, so it has no `score >=` test and the
+       * list above can never contain it. That is fine when every weight is
+       * positive and nothing can fall below the floor; with a negative weight
+       * the floor band is where the negative totals LIVE, and it was the one
+       * bound in the whole ladder that nothing scraped. Its label is pinned
+       * here and cross-checked against the stamp's first band. */
+      put(fp, "score_band_floor_label", grab(sql, [/ELSE '((?:[^']|'')*)' END AS band,/]));
       put(fp, "quantile_probabilities",
         [...new Set((sql.match(/PERCENTILE_CONT\(([\d.]+)\)/gi) ?? []).map((m) => (/([\d.]+)/.exec(m) ?? [])[1]))].sort().join(","));
+      break;
+    }
+    case "sweep": {
+      /* A SWEEP'S FINGERPRINT IS ITS ARM LIST. Every failure this file exists to
+       * catch has the same shape here: the program still emits a well-formed
+       * summary table with a range and a verdict, and the only thing wrong is
+       * WHICH arms went into it, or which arm was called primary, or whether
+       * the direction test ran at all. None of that shows up in a number. */
+      const arms = [...sql.matchAll(
+        /SELECT CAST\('([^']*)' AS VARCHAR\) AS sw_arm_id, CAST\('([^']*)' AS VARCHAR\) AS sw_arm_kind, CAST\('(?:[^']|'')*' AS VARCHAR\) AS sw_arm_label, CAST\((\d+) AS NUMERIC\) AS sw_arm_ord, CAST\('([^']*)' AS VARCHAR\) AS sw_param, (?:CAST\((-?[\d.]+|NULL) AS NUMERIC\)) AS sw_param_value, CAST\('([^']*)' AS VARCHAR\) AS sw_slice/g,
+      )];
+      put(fp, "sweep_arm_ids", arms.map((m) => m[1]).join("|"));
+      put(fp, "sweep_arm_kinds", arms.map((m) => m[2]).join("|"));
+      put(fp, "sweep_arm_ords", arms.map((m) => m[3]).join("|"));
+      put(fp, "sweep_arm_params", arms.map((m) => m[4]).join("|"));
+      put(fp, "sweep_arm_param_values", arms.map((m) => (m[5] === "NULL" ? "" : m[5])).join("|"));
+      put(fp, "sweep_arm_slices", arms.map((m) => m[6]).join("|"));
+      put(fp, "sweep_arm_count", String(arms.length));
+      /* THE PRE-DECLARED PRIMARY ARM, read from the one place the program
+       * selects it. A mutation that replaces this predicate with "whichever arm
+       * has the largest effect" leaves the table's shape untouched. */
+      put(fp, "sweep_primary_arm", grab(sql, [/WHERE sw_arm_id = '([^']*)'/i]));
+      // which row of the arm's own result table each arm is read from
+      put(fp, "sweep_target_component", grab(sql, [/\(SELECT \w+ FROM \S+ WHERE component = '([^']*)'/i]));
+      put(fp, "sweep_target_statistic", grab(sql, [/AND statistic = '([^']*)'\) AS sw_est/i]));
+      put(fp, "sweep_target_stratum", grab(sql, [/\(SELECT \w+ FROM \S+ WHERE stratum = '([^']*)'\) AS sw_est/i]));
+      put(fp, "sweep_value_column", grab(sql, [/\(SELECT (\w+) FROM \S+ WHERE (?:component|statistic|stratum) = /i]));
+      // the null value the direction test compares against, or NONE
+      put(fp, "sweep_null_value",
+        grab(sql, [/SUM\(CASE WHEN sw_est IS NOT NULL AND sw_est > (-?[\d.]+) THEN 1 ELSE 0 END\)/i]) ?? "NONE");
+      put(fp, "sweep_direction_test",
+        /SUM\(CASE WHEN sw_est IS NOT NULL AND sw_est > -?[\d.]+ THEN 1 ELSE 0 END\).*AS n_above/is.test(sql)
+        && /CASE WHEN n_above > 0 AND n_below > 0 THEN 1 ELSE 0 END/i.test(sql) ? "yes" : "no");
+      put(fp, "sweep_range_reported",
+        /MIN\(sw_est\) AS est_min, MAX\(sw_est\) AS est_max/i.test(sql) && /est_max - est_min/i.test(sql) ? "yes" : "no");
+      put(fp, "sweep_multiplicity_reported",
+        /POWER\(0\.95, (\d+)\)/i.test(sql) ? "yes" : "no");
+      put(fp, "sweep_arm_accounting",
+        /SUM\(CASE WHEN sw_est IS NULL THEN 1 ELSE 0 END\)/i.test(sql) && /COUNT\(\*\)\s*AS NUMERIC\)?\s*AS n_reported|COUNT\(\*\)\) AS n_reported/i.test(sql.replace(/CAST\(/gi, "")) ? "yes" : "no");
       break;
     }
     case "resource_use": {
@@ -1582,17 +1647,55 @@ function sasFingerprint(kind: string, rawSas: string, setup: string): Fingerprin
       break;
     }
     case "comorbidity_index": {
-      const conds = [...sas.matchAll(/cond_id = "([^"]+)"; cond_label = "[^"]*"; weight = (\d+); cond_ord = (\d+)/g)];
+      // negative weights and negative band bounds, scraped from this twin's own
+      // text — see the SQL case for what an integer-only pattern hid
+      const SAS_WEIGHT = String.raw`-?\d+(?:\.\d+)?`;
+      const conds = [...sas.matchAll(new RegExp(String.raw`cond_id = "([^"]+)"; cond_label = "[^"]*"; weight = (${SAS_WEIGHT}); cond_ord = (\d+)`, "g"))];
       put(fp, "condition_ids", conds.map((m) => m[1]).join(","));
       put(fp, "condition_weights", conds.map((m) => m[2]).join(","));
+      put(fp, "negative_weights", conds.filter((m) => Number(m[2]) < 0).map((m) => `${m[1]}:${m[2]}`).join(","));
       put(fp, "supersessions",
         [...sas.matchAll(/winner = "([^"]+)"; loser = "([^"]+)"/g)].map((m) => `${m[1]}>${m[2]}`).join(","));
       put(fp, "lookback_lower_days", sasLookbackOffset(sas));
       put(fp, "hierarchy_withholds_weight", /then 0 else cd\.weight end as weight_applied/i.test(sas) ? "yes" : "no");
       put(fp, "superseded_prevalence_kept", /left join work\._\w+_has as h on h\.cond_id = cd\.cond_id/i.test(sas) ? "yes" : "no");
       put(fp, "zeros_included", /left join work\._\w+_applied as b/i.test(sas) ? "yes" : "no");
-      put(fp, "score_bands", (sas.match(/score >= (\d+) then do/gi) ?? []).map((m) => (/(\d+)/.exec(m) ?? [])[1]).join(","));
+      put(fp, "score_clamped_at_zero",
+        /max\s*\(\s*coalesce\(sum\(b\.weight_applied\)/i.test(sas) ? "yes" : "no");
+      put(fp, "score_bands",
+        [...sas.matchAll(/score >= (-?\d+(?:\.\d+)?) then do/gi)].map((m) => m[1]).join(","));
+      // the ELSE arm's label, this twin's own text — see the SQL case
+      put(fp, "score_band_floor_label", grab(sas, [/else do; band = "([^"]*)"; band_ord = 0; end;/i]));
       put(fp, "quantile_probabilities", /pctldef=5/i.test(sas) && /median\s*=/i.test(sas) ? "0.5" : "");
+      break;
+    }
+    case "sweep": {
+      // The same arm list, scraped from the SAS twin's own data steps.
+      const armBlocks = [...sas.matchAll(
+        /sw_arm_id = '((?:[^']|'')*)'; sw_arm_kind = '([^']*)'; sw_arm_label = '(?:[^']|'')*';\s*\n\s*sw_arm_ord = (\d+); sw_param = '([^']*)';\s*\n\s*sw_param_value = (-?[\d.]+|\.);\s*\n\s*sw_slice = '([^']*)'/g,
+      )];
+      put(fp, "sweep_arm_ids", armBlocks.map((m) => m[1]).join("|"));
+      put(fp, "sweep_arm_kinds", armBlocks.map((m) => m[2]).join("|"));
+      put(fp, "sweep_arm_ords", armBlocks.map((m) => m[3]).join("|"));
+      put(fp, "sweep_arm_params", armBlocks.map((m) => m[4]).join("|"));
+      put(fp, "sweep_arm_param_values", armBlocks.map((m) => (m[5] === "." ? "" : m[5])).join("|"));
+      put(fp, "sweep_arm_slices", armBlocks.map((m) => m[6]).join("|"));
+      put(fp, "sweep_arm_count", String(armBlocks.length));
+      put(fp, "sweep_primary_arm", grab(sas, [/where sw_arm_id = '([^']*)'/i]));
+      put(fp, "sweep_target_component", grab(sas, [/where component = '([^']*)'/i]));
+      put(fp, "sweep_target_statistic", grab(sas, [/where component = '[^']*' and statistic = '([^']*)'/i]));
+      put(fp, "sweep_target_stratum", grab(sas, [/where stratum = '([^']*)'/i]));
+      put(fp, "sweep_value_column", grab(sas, [/select (\w+) as sw_est/i]));
+      put(fp, "sweep_null_value",
+        grab(sas, [/sum\(sw_est ne \. and sw_est > (-?[\d.]+)\) as n_above/i]) ?? "NONE");
+      put(fp, "sweep_direction_test",
+        /sum\(sw_est ne \. and sw_est > -?[\d.]+\) as n_above/i.test(sas)
+        && /estimate = \(n_above > 0 and n_below > 0\)/i.test(sas) ? "yes" : "no");
+      put(fp, "sweep_range_reported",
+        /min\(sw_est\) as est_min, max\(sw_est\) as est_max/i.test(sas) && /est_max - est_min/i.test(sas) ? "yes" : "no");
+      put(fp, "sweep_multiplicity_reported", /0\.95\*\*(\d+)/i.test(sas) ? "yes" : "no");
+      put(fp, "sweep_arm_accounting",
+        /sum\(sw_est = \.\) as n_missing/i.test(sas) && /count\(\*\) as n_reported/i.test(sas) ? "yes" : "no");
       break;
     }
     case "resource_use": {
@@ -2123,6 +2226,60 @@ export function expectedFromStamp(kind: string, stamp: Record<string, unknown>):
       }
       if (stamp.medianEstimator === "percentile_cont_equivalent") exp.quantile_probabilities = "0.5";
       exp.zeros_included = "yes";
+      /* THE SCORE IS NEVER CLAMPED, whether or not this index carries a negative
+       * weight. Asserted unconditionally because a clamp is never right: with
+       * only positive weights it is invisible, so one introduced there would sit
+       * undetected until the first index that actually needed a negative one. */
+      exp.score_clamped_at_zero = "no";
+      /* NEGATIVE WEIGHTS are stamped only when present, so the ABSENCE of the
+       * key is itself the claim "every weight in this index is positive" — and
+       * the code must then contain no negative weight either. */
+      const neg = stamp.negativeWeights as { conditions?: unknown } | undefined;
+      exp.negative_weights = Array.isArray(neg?.conditions) ? (neg.conditions as string[]).join(",") : "";
+      /* The FLOOR band, from the stamp's own band list. With a negative weight
+       * this is the band the negative totals land in, and it is the only bound
+       * of the ladder the `score >=` scrape cannot see. */
+      if (Array.isArray(stamp.bands) && (stamp.bands as string[]).length > 0)
+        exp.score_band_floor_label = (stamp.bands as string[])[0];
+      break;
+    }
+    case "sweep": {
+      /* The stamp names every arm, in declaration order, with its kind and its
+       * one difference. The code must contain exactly that list: a dropped arm,
+       * a reordered one, a subgroup relabelled as a sensitivity check, or a
+       * varied value that does not match the declaration all show up here and
+       * nowhere else in the output. */
+      const list = (v: unknown) => (Array.isArray(v) ? (v as unknown[]).map(String).join("|") : "");
+      if (Array.isArray(stamp.armIds)) {
+        exp.sweep_arm_ids = list(stamp.armIds);
+        exp.sweep_arm_count = String((stamp.armIds as unknown[]).length);
+        exp.sweep_arm_ords = (stamp.armIds as unknown[]).map((_a, i) => String(i + 1)).join("|");
+      }
+      if (Array.isArray(stamp.armKinds)) exp.sweep_arm_kinds = list(stamp.armKinds);
+      if (Array.isArray(stamp.armParams)) exp.sweep_arm_params = list(stamp.armParams);
+      if (Array.isArray(stamp.armParamValues)) exp.sweep_arm_param_values = list(stamp.armParamValues);
+      if (Array.isArray(stamp.armSlices)) exp.sweep_arm_slices = list(stamp.armSlices);
+      if (typeof stamp.primaryArmId === "string") exp.sweep_primary_arm = stamp.primaryArmId;
+      /* WHICH ROW OF THE ARM'S TABLE, and which column of it. Both are stamped
+       * because reading the right column of the wrong row (or the wrong column
+       * of the right one) gives a summary that is complete, well-formed and
+       * about something else. An empty selector is itself a claim: this target's
+       * row is identified by its component alone. */
+      if (typeof stamp.valueColumn === "string") exp.sweep_value_column = stamp.valueColumn;
+      if (typeof stamp.selectorStatistic === "string")
+        exp.sweep_target_statistic = stamp.selectorStatistic === "" ? "ABSENT" : stamp.selectorStatistic;
+      if (typeof stamp.statisticComponent === "string" && stamp.statisticComponent !== "")
+        exp.sweep_target_component = stamp.statisticComponent;
+      if (typeof stamp.nullValue === "string") exp.sweep_null_value = stamp.nullValue === "none" ? "NONE" : stamp.nullValue;
+      /* The three things the stamp CLAIMS the program does. Each is a property
+       * of the emitted code and each would be invisible in the numbers: a sweep
+       * with no range still reports every arm, and a sweep with no direction
+       * test still reports a range. */
+      if (stamp.reportsEveryArm === true) exp.sweep_arm_accounting = "yes";
+      if (stamp.reportsRange === true) exp.sweep_range_reported = "yes";
+      if (stamp.reportsMultiplicity === true) exp.sweep_multiplicity_reported = "yes";
+      if (stamp.reportsDirection === "yes") exp.sweep_direction_test = "yes";
+      if (stamp.reportsDirection === "no_null_value") exp.sweep_direction_test = "no";
       break;
     }
     case "resource_use": {
@@ -2327,6 +2484,17 @@ const EXPECTED_CONSTANTS: Record<string, Record<"sql" | "sas", ConstantProfileSp
     /* No interval anywhere — the index reports a mean, an SD and a median, none
      * of which is a confidence interval. A z here would mean an interval was
      * added to a weighted score without saying so. */
+    sql: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
+    sas: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
+  },
+  sweep: {
+    /* NO INTERVAL ANYWHERE, and that is the substantive claim rather than an
+     * omission. The range across arms is not a confidence interval — it has no
+     * coverage property at all — so a z appearing here would mean somebody
+     * attached sampling uncertainty to a spread produced by analysis choices,
+     * which is the single most inviting mistake this module could make. Each
+     * arm's OWN interval lives in that arm's own program, where the estimator
+     * that produced it is. */
     sql: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
     sas: { z: 0, z2_half: 0, z2: 0, z2_quarter: 0 },
   },

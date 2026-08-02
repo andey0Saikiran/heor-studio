@@ -210,7 +210,7 @@ function sqlIncidence(ctx: SqlCtx, an: IncidenceRateAnalysis, suffix: string): S
   L.push(`-- Washout addendum: how the at-risk denominator was reached.`);
   L.push(`DROP TABLE IF EXISTS ${out}_washout;`);
   L.push(`CREATE TABLE ${out}_washout AS`);
-  L.push(`WITH cohort AS (SELECT enrolid, index_date FROM ${wp}_cohort),`);
+  L.push(`WITH cohort AS (SELECT enrolid, index_date FROM ${ctx.cohortT}),`);
   L.push(`ae AS (SELECT enrolid, event_date FROM ${wp}_events WHERE code_list_id = '${q(clid)}'${setting.enforce ? ` AND setting = '${setting.enforce}'` : ""}),`);
   L.push(`prevalent AS (`);
   L.push(`  SELECT DISTINCT c.enrolid FROM cohort c JOIN ae a ON a.enrolid = c.enrolid`);

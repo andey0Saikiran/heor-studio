@@ -146,7 +146,7 @@ function sqlCox(ctx: SqlCtx, an: CoxAnalysis, suffix: string): SqlModuleFile {
   C.push(`s0 AS (   -- censoring: ${censor.applied.join(" / ")}${censor.dataCut ? ` / data cut ${censor.dataCut}` : ``}`);
   C.push(`  SELECT c.enrolid, c.index_date, ${renderCensorSql(ctx, censor)} AS admin_censor, f.fu_date, ${armExpr} AS arm`);
   C.push(`  FROM atrisk c`);
-  C.push(`  JOIN ${wp}_cohort ch ON ch.enrolid = c.enrolid`);
+  C.push(`  JOIN ${ctx.cohortT} ch ON ch.enrolid = c.enrolid`);
   if (viaNdc) {
     C.push(`  JOIN ${wp}_ndc_lookup nl`);
     C.push(`    ON nl.code_list_id = '${q(indexListId)}' AND nl.ndcnum = ch.index_code`);

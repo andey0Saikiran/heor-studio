@@ -41,7 +41,11 @@ import type {
 import { assertSafeIdent, assertSafeNaming } from "./types";
 import { q, oneLine, makeDialect, windowConds, describeWindow } from "./sql-base";
 import { suppressionPolicy, suppressionSqlFor, resultsContractSql, RESULTS_TABLE_PLACEHOLDER, type SuppressionTarget } from "./suppression";
-import { ascertainmentWindow } from "./parity";
+import { ascertainmentWindow, parityStamp } from "./parity";
+import {
+  resolveSweeps, sqlArmCohortTable, sweepArmCohortsSql, sweepParity, sweepSummarySql,
+  SWEEP_METHOD_NOTES,
+} from "./sweep";
 import { EMITTER_VERSION, stableHash } from "../provenance";
 import type { Ctx } from "./sql-base";
 import { moduleAnalyses } from "./modules/registry";
@@ -1431,6 +1435,7 @@ export const emitSql: SqlEmitter = (spec, dialect, opts) => {
     d,
     opts,
     wp: opts.tag.toLowerCase(),
+    cohortT: `${opts.tag.toLowerCase()}_cohort`,
     t: (key) => physicalTable(opts.naming, key),
   };
 
@@ -1541,11 +1546,14 @@ export const emitSql: SqlEmitter = (spec, dialect, opts) => {
     suppressTargets.push({ table: `${ctx.wp}_table1`, shapeKey: "table1", label: "Baseline characteristics (Table 1)" });
   }
 
-  let lastNum = 6;
-  moduleAnalyses(spec.analyses).forEach(({ an, mod, multi }, i) => {
+  /* ONE file-number sequence for the modules, the sweeps and the suppression
+   * pass. It replaced `7 + i` and a separate `lastNum + 1`, which could not stay
+   * in step once sweeps started emitting files between the two — and a
+   * duplicated file number is a bundle whose programs run in the wrong order. */
+  let seq = 7;
+  moduleAnalyses(spec.analyses).forEach(({ an, mod, multi }) => {
     const suffix = multi ? `_${an.id.toLowerCase().replace(/[^a-z0-9]+/g, "_")}` : "";
-    const num = String(7 + i).padStart(2, "0");
-    lastNum = 7 + i;
+    const num = String(seq++).padStart(2, "0");
     const f = mod.sql(ctx, an as never, suffix);
     // the module returns a bare title; the emitter owns the file number so the
     // displayed title always matches the actual NN_slug filename
@@ -1560,11 +1568,84 @@ export const emitSql: SqlEmitter = (spec, dialect, opts) => {
     });
   });
 
+  /* DECLARED SWEEPS. One arm-cohort program per plan, then one program PER ARM
+   * emitted by the target analysis's own module (the arm's spec transform, or
+   * its sliced cohort, is the only difference), then the summary that reads
+   * every arm back and reports the range and the direction verdict.
+   *
+   * Emitting each arm as its own numbered file rather than folding them into
+   * one is the point: the arm's program IS the module's output, so there is no
+   * place for a parallel implementation to live. */
+  const sweeps = resolveSweeps(spec);
+  for (const s of sweeps) {
+    if (!s.emittable) {
+      const num = String(seq++).padStart(2, "0");
+      files.push(mk(num, `sweep_${s.tag}`, `${num} Sweep ${s.tag} (not emitted)`,
+        `declared sweep over "${s.plan.analysisId}" — NOT EMITTED`, [],
+        [`Sweep NOT EMITTED: ${oneLine(s.reason)}.`,
+         `Readiness refuses this spec; the file is emitted anyway so the bundle cannot`,
+         `omit a declared sweep silently.`],
+        `-- SWEEP NOT EMITTED: ${oneLine(s.reason)}\n` +
+        `-- A declared sweep that the bundle simply left out would be indistinguishable\n` +
+        `-- from a study that never declared one. Resolve the spec and regenerate.\n`));
+      continue;
+    }
+    const cohNum = String(seq++).padStart(2, "0");
+    files.push(mk(cohNum, `swcoh_${s.tag}`, `${cohNum} Sweep ${s.tag} arm cohorts`,
+      `one cohort per declared arm of "${s.target.id}"`, [],
+      [`Sweep "${s.tag}" over ${oneLine(s.target.label)} (${s.target.kind}); ${s.arms.length} arm(s).`,
+       `A SENSITIVITY arm's cohort is the whole cohort; a SUBGROUP arm's is a slice.`],
+      sweepArmCohortsSql(ctx, s)));
+
+    const armTables: string[] = [];
+    for (const arm of s.arms) {
+      const num = String(seq++).padStart(2, "0");
+      const armCtx: Ctx = { ...ctx, cohortT: sqlArmCohortTable(ctx, arm) };
+      const f = s.mod.sql(armCtx, arm.analysis as never, arm.suffix);
+      const table = `${ctx.wp}_${f.slug}`;
+      armTables.push(table);
+      files.push(mk(num, f.slug, `${num} ${f.title} [arm ${arm.id}]`, f.subtitle, [],
+        [...f.extra,
+         `SWEEP ARM "${arm.id}" (${arm.kind}) of sweep "${s.tag}": ${oneLine(arm.label)}.`,
+         oneLine(arm.note),
+         `Reads cohort ${armCtx.cohortT}. Emitted by the SAME module as the analysis it varies.`],
+        f.body));
+      const extras = s.mod.suppressionExtras?.(arm.analysis as never);
+      suppressTargets.push({
+        table,
+        shapeKey: s.mod.stampKind,
+        label: `${arm.analysis.label} (${arm.analysis.kind}) [sweep ${s.tag} arm ${arm.id}]`,
+        arm: { id: arm.id, kind: arm.kind, label: arm.label },
+        ...(extras?.maskCols.length ? { extraMaskCols: extras.maskCols } : {}),
+        ...(extras?.keepCols.length ? { extraKeepCols: extras.keepCols } : {}),
+      });
+    }
+
+    const sumNum = String(seq++).padStart(2, "0");
+    const sumBody: string[] = [];
+    sumBody.push(`-- ${parityStamp("sweep", sweepParity(s))}`);
+    sumBody.push(`-- REVIEW - method notes (always emitted):`);
+    for (const n of SWEEP_METHOD_NOTES) sumBody.push(`--   * ${n}`);
+    sumBody.push(`-- ARMS, in declaration order:`);
+    for (const a of s.arms) sumBody.push(`--   * ${a.id} (${a.kind}${a.isPrimary ? ", PRIMARY" : ""}): ${oneLine(a.label)} — ${oneLine(a.note)}`);
+    sumBody.push(sweepSummarySql(ctx, s, armTables));
+    files.push(mk(sumNum, `sweep_${s.tag}`, `${sumNum} Sweep ${s.tag} summary`,
+      `every arm of "${s.target.id}", its range, and the direction verdict`, [],
+      [`Primary arm "${s.primaryArmId}", named in the spec before any estimate existed.`,
+       `${s.arms.length} arm(s); each row carries its arm id, arm KIND and label.`],
+      sumBody.join("\n")));
+    suppressTargets.push({
+      table: `${ctx.wp}_sweep_${s.tag}`,
+      shapeKey: "sweep",
+      label: `Sweep ${s.tag} over ${s.target.label}`,
+    });
+  }
+
   /* Small-cell suppression — the last step, because it reads every result table
    * the study produced (BR-DEL-004). */
   const policy = suppressionPolicy(spec);
   if (policy.enabled && suppressTargets.length > 0) {
-    const num = String(lastNum + 1).padStart(2, "0");
+    const num = String(seq++).padStart(2, "0");
     const body: string[] = [];
     for (const t of suppressTargets) body.push(...suppressionSqlFor(t, policy));
     body.push(`-- ${"-".repeat(74)}`);
@@ -1574,8 +1655,10 @@ export const emitSql: SqlEmitter = (spec, dialect, opts) => {
     body.push(`-- and the rule attached, so a shell can print "<${policy.threshold}" without`);
     body.push(`-- re-deriving the policy — and cannot print a value that should be masked.`);
     body.push(`-- ${"-".repeat(74)}`);
+    /* The arm columns appear only when the spec declares a sweep — there are no
+     * arms to name otherwise, and the contract stays byte-identical. */
     body.push(
-      ...resultsContractSql(suppressTargets, policy).map((l) =>
+      ...resultsContractSql(suppressTargets, policy, { arms: sweeps.length > 0 }).map((l) =>
         l.replace(new RegExp(RESULTS_TABLE_PLACEHOLDER, "g"), `${ctx.wp}_results`),
       ),
     );

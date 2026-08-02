@@ -20,6 +20,7 @@ import { emitSql } from "../emitters/sql";
 import { emitSas } from "../emitters/sas";
 import { parseParityStamps } from "../emitters/parity";
 import { STAMP_KIND_BY_ANALYSIS } from "../emitters/modules/registry";
+import { sweepStampCounts } from "../emitters/sweep";
 import {
   fingerprint,
   expectedFromStamp,
@@ -161,11 +162,18 @@ export function sasSqlParityChecks(spec: StudySpec, opts: EmitOptions): Check[] 
     }
   }
 
-  const expected = spec.analyses.filter((a) => a.enabled && STAMP_KIND_BY_ANALYSIS[a.kind]).length;
+  /* A DECLARED SWEEP ADDS STAMPED PROGRAMS: one per arm (the target analysis
+   * re-emitted by its own module) plus one summary. Counting only spec.analyses
+   * would make this check fail on every swept spec — and, worse, would have made
+   * it PASS if an arm silently went missing, because the total would then be
+   * whatever the emitters happened to produce. */
+  const { armStamps, summaryStamps } = sweepStampCounts(spec);
+  const expected =
+    spec.analyses.filter((a) => a.enabled && STAMP_KIND_BY_ANALYSIS[a.kind]).length + armStamps + summaryStamps;
   checks.push({
-    name: "parity: every stamped-module analysis appears in BOTH languages",
+    name: "parity: every stamped-module analysis and sweep arm appears in BOTH languages",
     status: sqlStamps.length === expected && sasStamps.length === expected ? "pass" : "fail",
-    detail: `expected=${expected}, sql stamps=${sqlStamps.length}, sas stamps=${sasStamps.length}`,
+    detail: `expected=${expected} (${expected - armStamps - summaryStamps} analyses + ${armStamps} sweep arms + ${summaryStamps} sweep summaries), sql stamps=${sqlStamps.length}, sas stamps=${sasStamps.length}`,
   });
 
   const sasByKey = new Map(sasStamps.map((s) => [stampKey(s), s]));

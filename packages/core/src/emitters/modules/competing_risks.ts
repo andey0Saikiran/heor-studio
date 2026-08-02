@@ -113,7 +113,7 @@ function sqlCompetingRisks(ctx: SqlCtx, an: CompetingRisksAnalysis, suffix: stri
   for (const note of COMPETING_RISKS_METHOD_NOTES) L.push(`--   * ${note}`);
 
   const C: string[] = [];
-  C.push(`WITH cohort AS (SELECT enrolid, index_date FROM ${wp}_cohort),`);
+  C.push(`WITH cohort AS (SELECT enrolid, index_date FROM ${ctx.cohortT}),`);
   /* Every cause's events, from its OWN code list, tagged with its cause code.
    * A single UNION so the "first event of ANY cause" is one MIN over one set —
    * computing per-cause firsts and combining them afterwards is how a subject

@@ -52,7 +52,7 @@ const LEDGER_SETTINGS = new Set(["inpatient", "ed", "outpatient", "pharmacy"]);
 const COST_FIELDS = new Set(["paytot", "netpay"]);
 
 /** Generous DoS caps — real studies sit far below these. */
-const MAX = { codeLists: 200, codesPerList: 5000, criteria: 200, baseline: 200, analyses: 100, stratifiers: 25 };
+const MAX = { codeLists: 200, codesPerList: 5000, criteria: 200, baseline: 200, analyses: 100, stratifiers: 25, sweeps: 25, sweepArms: 25 };
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 /** Slug ids flow into file names (codelists/{id}.csv) and SAS/SQL names. */
@@ -362,7 +362,13 @@ function checkAnalysis(p: Problems, v: unknown, path: string): void {
         needStr(p, c, "id", cp, { nonEmpty: true });
         needStr(p, c, "label", cp);
         needStr(p, c, "codeListId", cp, { nonEmpty: true });
-        needNum(p, c, "weight", cp, { min: 0 });
+        /* NO LOWER BOUND. van Walraven's Elixhauser summary carries negative
+         * weights by construction (drug abuse -7, depression -3), so `min: 0`
+         * here was refusing at the boundary the very index the engine claims to
+         * support — and refusing it with a shape error, which reads as
+         * malformed JSON rather than as a rule. Zero and non-finite weights are
+         * refused by readiness, where the reason can be stated. */
+        needNum(p, c, "weight", cp);
         if (c.supersedes !== undefined) {
           if (!Array.isArray(c.supersedes)) p.push(`${cp}.supersedes`, "expected an array of condition ids");
           else c.supersedes.forEach((x, k) => need(p, `${cp}.supersedes[${k}]`, isStr(x), `expected a condition id string, got ${typeOf(x)}`));
@@ -583,6 +589,44 @@ function checkAnalysis(p: Problems, v: unknown, path: string): void {
   }
 }
 
+/* ---------- sweeps ---------- */
+
+const SWEEP_ARM_KINDS = new Set(["subgroup", "sensitivity"]);
+const SWEEP_PARAMS = new Set([
+  "lookback_days", "followup_days", "grace_period_days",
+  "permissible_gap_days", "washout_days", "exposure_definition",
+]);
+const EXPOSURE_DEFINITIONS = new Set(["intention_to_treat", "on_treatment"]);
+
+function checkSweepPlan(p: Problems, v: unknown, path: string): void {
+  if (!isObj(v)) { p.push(path, `expected a SweepPlan object, got ${typeOf(v)}`); return; }
+  needStr(p, v, "analysisId", path, { nonEmpty: true });
+  needStr(p, v, "primaryArmId", path, { nonEmpty: true });
+  if (!Array.isArray(v.arms)) { p.push(`${path}.arms`, `expected an array of arms, got ${typeOf(v.arms)}`); return; }
+  if (v.arms.length > MAX.sweepArms) { p.push(`${path}.arms`, `more than ${MAX.sweepArms} arms`); return; }
+  v.arms.forEach((a, j) => {
+    const ap = `${path}.arms[${j}]`;
+    if (!isObj(a)) { p.push(ap, `expected a SweepArm object, got ${typeOf(a)}`); return; }
+    if (!needEnum(p, a, "kind", ap, SWEEP_ARM_KINDS)) return;
+    needStr(p, a, "id", ap, { nonEmpty: true });
+    // arm ids become table-name suffixes in BOTH twins
+    if (isStr(a.id) && !SLUG.test(a.id)) p.push(`${ap}.id`, `must be a slug (letters/digits/_/-), got ${JSON.stringify(a.id)}`);
+    needSafeText(p, a, "label", ap, { nonEmpty: true, maxLen: 120 });
+    if (a.kind === "subgroup") {
+      needStr(p, a, "baselineId", ap, { nonEmpty: true });
+      if (a.level !== undefined) needSafeText(p, a, "level", ap, { nonEmpty: true, maxLen: 80 });
+      if (a.min !== undefined) needNum(p, a, "min", ap);
+      if (a.max !== undefined) needNum(p, a, "max", ap);
+    } else {
+      const vary = a.vary;
+      if (!isObj(vary)) { p.push(`${ap}.vary`, `expected {param, value}, got ${typeOf(vary)}`); return; }
+      if (!needEnum(p, vary, "param", `${ap}.vary`, SWEEP_PARAMS)) return;
+      if (vary.param === "exposure_definition") needEnum(p, vary, "value", `${ap}.vary`, EXPOSURE_DEFINITIONS);
+      else needNum(p, vary, "value", `${ap}.vary`, { min: 0, max: 36525 });
+    }
+  });
+}
+
 /* ---------- entry point ---------- */
 
 /**
@@ -740,6 +784,16 @@ export function checkSpecShape(raw: unknown): { ok: boolean; problems: string[] 
   /* analyses */
   const analyses = needArr(p, raw, "analyses", "spec", MAX.analyses);
   if (analyses) analyses.forEach((a, i) => checkAnalysis(p, a, `analyses[${i}]`));
+
+  /* sweeps — optional, and therefore exactly the kind of field that reaches an
+     emitter unchecked. Every value below lands in generated code: arm ids
+     become table-name suffixes, labels are printed into SQL "--" comments and
+     SAS block comments, levels become quoted literals in a WHERE clause. */
+  if (raw.sweeps !== undefined) {
+    if (!Array.isArray(raw.sweeps)) p.push("sweeps", `expected an array, got ${typeOf(raw.sweeps)}`);
+    else if (raw.sweeps.length > MAX.sweeps) p.push("sweeps", `more than ${MAX.sweeps} sweep plans`);
+    else raw.sweeps.forEach((s, i) => checkSweepPlan(p, s, `sweeps[${i}]`));
+  }
 
   return { ok: p.list.length === 0, problems: p.list };
 }

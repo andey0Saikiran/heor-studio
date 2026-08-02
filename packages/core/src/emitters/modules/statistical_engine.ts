@@ -136,13 +136,13 @@ function sqlStatisticalEngine(ctx: SqlCtx, an: StatisticalEngineAnalysis, suffix
     body.push(`  -- NDC. The arm label is the drug-name PATTERN, recovered through the`);
     body.push(`  -- same lookup 01_ndc_lookup built.`);
     body.push(`  SELECT c.enrolid, c.index_date, nl.pattern AS arm`);
-    body.push(`  FROM ${wp}_cohort c`);
+    body.push(`  FROM ${ctx.cohortT} c`);
     body.push(`  JOIN ${wp}_ndc_lookup nl`);
     body.push(`    ON nl.code_list_id = '${sqlLit(indexListId)}' AND nl.ndcnum = c.index_code`);
     body.push(`  WHERE nl.pattern IN ('${sqlLit(refLevel)}', '${sqlLit(othLevel)}')`);
   } else {
     body.push(`  SELECT c.enrolid, c.index_date, c.index_code AS arm`);
-    body.push(`  FROM ${wp}_cohort c`);
+    body.push(`  FROM ${ctx.cohortT} c`);
     body.push(`  WHERE c.index_code IN ('${sqlLit(refLevel)}', '${sqlLit(othLevel)}')`);
   }
   body.push(`),`);
@@ -171,7 +171,7 @@ function sqlStatisticalEngine(ctx: SqlCtx, an: StatisticalEngineAnalysis, suffix
   body.push(`         CAST(${ageExpr} AS NUMERIC) AS age_val,`);
   body.push(`         CASE WHEN dm.sex = '1' THEN 1.0 ELSE 0.0 END AS sex_male${cciScoreCte ? "," : ""}`);
   if (cciScoreCte) body.push(`         CAST(COALESCE(cs.score, 0) AS NUMERIC) AS cci_val`);
-  body.push(`  FROM arms a JOIN ${wp}_cohort c ON c.enrolid = a.enrolid`);
+  body.push(`  FROM arms a JOIN ${ctx.cohortT} c ON c.enrolid = a.enrolid`);
   body.push(`              LEFT JOIN demo dm ON dm.enrolid = a.enrolid`);
   if (cciScoreCte) body.push(`              LEFT JOIN ${cciScoreCte} cs ON cs.enrolid = a.enrolid`);
   body.push(`)`);
@@ -214,7 +214,7 @@ function sqlStatisticalEngine(ctx: SqlCtx, an: StatisticalEngineAnalysis, suffix
     slug: `balance${suffix}`,
     title: `Covariate balance (SMD): ${oneLine(an.label)}`,
     subtitle: `standardized mean differences, ${refLevel} vs ${othLevel}`,
-    extra: [`Reads ${wp}_cohort (index_code = exposure arm) and enrollment demographics.`],
+    extra: [`Reads ${ctx.cohortT} (index_code = exposure arm) and enrollment demographics.`],
     body: body.join("\n"),
   };
 }

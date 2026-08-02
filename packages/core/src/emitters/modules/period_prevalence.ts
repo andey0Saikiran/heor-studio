@@ -94,7 +94,7 @@ function sqlPeriodPrevalence(ctx: SqlCtx, an: PeriodPrevalenceAnalysis, suffix: 
   L.push(`-- REVIEW - method notes (always emitted):`);
   for (const note of PERIOD_PREVALENCE_METHOD_NOTES) L.push(`--   * ${note}`);
   L.push(d.createTableAs(out));
-  L.push(`WITH cohort AS (SELECT enrolid, index_date FROM ${wp}_cohort),`);
+  L.push(`WITH cohort AS (SELECT enrolid, index_date FROM ${ctx.cohortT}),`);
   L.push(
     `ae AS (SELECT enrolid, event_date FROM ${wp}_events WHERE code_list_id = '${q(clid)}'` +
       (setting.enforce ? ` AND setting = '${setting.enforce}'` : ``) +
