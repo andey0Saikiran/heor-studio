@@ -421,6 +421,159 @@ export async function proposeSpecEdit(args: ProposeSpecEditArgs): Promise<Propos
   return { spec: sanitized, notes, forged, invalidated };
 }
 
+/**
+ * The chat turn. A message is EITHER a question or an instruction, and the tool
+ * that used to force every message into a spec edit could not tell them apart:
+ * "does this look right?" and "Hi" both came back as the red error "the model
+ * did not return a revised specification", because tool_choice made a spec edit
+ * the only legal output. The chat looked conversational and could not converse.
+ *
+ * Here the edit tool is OFFERED, not forced (tool_choice auto). The model
+ * answers a question in prose and reaches for the tool only when there is an
+ * actual change to make. A plain reply comes back as { kind: "reply" }; an edit
+ * runs the same two gates proposeSpecEdit does and comes back as
+ * { kind: "proposal" }. Nothing is applied until a human accepts the diff.
+ */
+export type ChatTurn =
+  | { kind: "reply"; text: string }
+  | { kind: "proposal"; proposal: ProposedSpecEdit };
+
+export async function converseOrEdit(args: ProposeSpecEditArgs): Promise<ChatTurn> {
+  const { apiKey, model, spec, instruction, history, onStatus } = args;
+  const status = (m: string): void => { if (onStatus) onStatus(m); };
+
+  const priorTurns = (history ?? []).map((h) => ({
+    role: h.role,
+    content: [{ type: "text", text: h.text }],
+  }));
+
+  const body = {
+    model,
+    max_tokens: MAX_TOKENS,
+    system: CHAT_SYSTEM_PROMPT,
+    messages: [
+      ...priorTurns,
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text:
+              `CURRENT SPECIFICATION:\n\`\`\`json\n${JSON.stringify(spec, null, 2)}\n\`\`\`\n\n` +
+              `MESSAGE FROM THE ANALYST:\n${instruction}\n\n` +
+              `If this asks for a change to the specification, make it with ${EDIT_TOOL}. ` +
+              `Otherwise just answer in plain text.`,
+          },
+        ],
+      },
+    ],
+    tools: [
+      {
+        name: EDIT_TOOL,
+        description:
+          "Submit the COMPLETE revised study specification, plus a short note " +
+          "describing what changed and anything you assumed. Use ONLY when the " +
+          "analyst asked for a change to the study; for a question, answer in text.",
+        input_schema: {
+          type: "object",
+          properties: {
+            spec: SPEC_JSON_SCHEMA,
+            notes: {
+              type: "string",
+              description:
+                "Plain-language summary of what you changed and why, including " +
+                "any assumption you made, or the reason you changed nothing.",
+            },
+          },
+          required: ["spec", "notes"],
+        },
+      },
+    ],
+    /* OFFERED, not forced. This one line is the whole fix. */
+    tool_choice: { type: "auto" },
+  };
+
+  status(`Asking ${model}…`);
+
+  let response: Response;
+  try {
+    response = await fetch(API_URL, {
+      method: "POST",
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    throw new Error(
+      "Could not reach the Anthropic API from your browser. This is almost " +
+        "always a network or blocking issue rather than a bad key: check your " +
+        "connection, and disable ad-blockers or privacy extensions for this " +
+        "page (they often block api.anthropic.com)."
+    );
+  }
+  if (!response.ok) throw new Error(await describeHttpError(response));
+
+  let data: unknown;
+  try {
+    data = await response.json();
+  } catch {
+    throw new Error("The Anthropic API returned a response that could not be parsed as JSON. Please try again.");
+  }
+
+  /* Did the model reach for the edit tool? */
+  const raw = pluckToolInputNamed(data, EDIT_TOOL);
+  if (raw === undefined || !isObject(raw)) {
+    /* No tool call: a conversational answer. Return its text. */
+    const text = pluckText(data);
+    if (text) return { kind: "reply", text };
+    const stopReason = isObject(data) ? str(data.stop_reason) : "";
+    if (stopReason === "max_tokens")
+      throw new Error("The reply ran out of space. Ask something more specific, or use a more capable model.");
+    throw new Error("The model returned an empty response. Please try again.");
+  }
+
+  status("Checking the proposal before showing it to you…");
+  const notes = str(raw.notes) || "(the model returned no note)";
+  const shape = checkSpecShape(raw.spec);
+  if (!shape.ok) {
+    throw new Error(
+      `The model's revised specification is not structurally valid, so it was discarded rather than shown:\n- ${shape.problems.join("\n- ")}`
+    );
+  }
+  const { spec: sanitized, forged, invalidated } = sanitizeProposal(spec, raw.spec as unknown as StudySpec);
+  status("Proposal ready for review.");
+  return { kind: "proposal", proposal: { spec: sanitized, notes, forged, invalidated } };
+}
+
+const CHAT_SYSTEM_PROMPT = [
+  `You are the assistant inside HEOR Studio, a tool that turns a reviewed study`,
+  `specification into deterministic SAS and SQL for MarketScan claims analyses.`,
+  ``,
+  `You do two things, and you decide which each message needs:`,
+  ``,
+  `1. ANSWER QUESTIONS about the current specification, the study design, what`,
+  `   the tool will and will not do, or claims-data methodology. Answer in plain`,
+  `   text, briefly and concretely. You can see the current spec; refer to what`,
+  `   is actually in it. If asked whether something is "right", say what you can`,
+  `   verify from the spec and what only the analyst can judge. Do not congratulate`,
+  `   or reassure; state what is there.`,
+  ``,
+  `2. REVISE THE SPECIFICATION when the analyst asks for a change. Then, and only`,
+  `   then, call ${EDIT_TOOL} with the COMPLETE revised spec. Everything in the`,
+  `   proposeSpecEdit contract still holds: whole spec every time, smallest change`,
+  `   consistent with the instruction, an honest refusal in "notes" over a`,
+  `   plausible guess, and NEVER set "reviewed" or "verified" true, because those`,
+  `   are a human's signature and code generation is gated on them.`,
+  ``,
+  `If a message is a greeting or small talk, answer in one line and, if the study`,
+  `still needs work, say what the next useful step is. Do not call the tool just`,
+  `to have called it: a message that asks for no change gets a text answer.`,
+].join("\n");
+
 /* ---------- HTTP error mapping ---------- */
 
 async function describeHttpError(response: Response): Promise<string> {
@@ -483,18 +636,33 @@ async function describeHttpError(response: Response): Promise<string> {
 /* ---------- response parsing ---------- */
 
 function pluckToolInput(data: unknown): unknown {
+  return pluckToolInputNamed(data, TOOL_NAME);
+}
+
+/** The input of the FIRST tool_use block with the given name, or undefined. */
+function pluckToolInputNamed(data: unknown, name: string): unknown {
   if (!isObject(data) || !Array.isArray(data.content)) return undefined;
   for (const block of data.content) {
     if (
       isObject(block) &&
       block.type === "tool_use" &&
-      block.name === TOOL_NAME &&
+      block.name === name &&
       isObject(block.input)
     ) {
       return block.input;
     }
   }
   return undefined;
+}
+
+/** All text blocks in the response, joined. Empty string if there are none. */
+function pluckText(data: unknown): string {
+  if (!isObject(data) || !Array.isArray(data.content)) return "";
+  return data.content
+    .filter((b): b is { type: "text"; text: string } => isObject(b) && b.type === "text" && typeof b.text === "string")
+    .map((b) => b.text)
+    .join("")
+    .trim();
 }
 
 /* ---------- normalization ---------- */

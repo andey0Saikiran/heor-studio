@@ -25,7 +25,7 @@ import type {
 } from "@heor-studio/core";
 import {
   changesRequiringRereview, confirmItem, diffSpecs, emitSas, emitSql, extractSpec,
-  listModels, planBundle, proposeSpecEdit, reviewProgress, reviewQueue, specReadiness,
+  listModels, planBundle, converseOrEdit, reviewProgress, reviewQueue, specReadiness,
   bundleFilename,
 } from "@heor-studio/core";
 import type { AppSettings } from "./SettingsModal";
@@ -234,16 +234,21 @@ export default function ChatShell(props: ChatShellProps) {
     if (!hasKey) { setError("Asking for a change needs your own API key. Open Settings to add one."); return; }
     setMsgs((m) => [...m, { id: nextId(), role: "user", kind: "text", text: instruction }]);
     setDraft("");
-    setBusy("Working out what that changes…");
+    setBusy("Thinking…");
     try {
       const history = msgs
         .filter((m): m is Extract<Msg, { kind: "text" }> => m.kind === "text")
         .slice(-6)
         .map((m) => ({ role: m.role, text: m.text }));
-      const proposal = await proposeSpecEdit({
+      const turn = await converseOrEdit({
         apiKey: settings.apiKey, model, spec, instruction, history, onStatus: setBusy,
       });
-      setMsgs((m) => [...m, { id: nextId(), role: "assistant", kind: "proposal", proposal }]);
+      /* A question gets an answer; only a change gets a proposal card. */
+      if (turn.kind === "reply") {
+        say(turn.text);
+      } else {
+        setMsgs((m) => [...m, { id: nextId(), role: "assistant", kind: "proposal", proposal: turn.proposal }]);
+      }
     } catch (e) {
       setError((e as Error).message);
       setDraft(instruction);
@@ -545,8 +550,10 @@ export default function ChatShell(props: ChatShellProps) {
                   : `${run.total.toLocaleString()} checks passed`}
               </span>
             ) : (
-              <span className="cs-verdict cs-verdict-live" role="status" data-num>
-                {run.phase === "loading" ? "loading engine…" : `${run.done.toLocaleString()} checks…`}
+              <span className="cs-verdict cs-verdict-live" role="status" aria-live="polite">
+                {run.phase === "loading"
+                  ? "Downloading Postgres…"
+                  : <>Running <span data-num>{run.done.toLocaleString()}</span> checks…</>}
               </span>
             )}
             <button type="button" className="btn btn-sm" onClick={() => void download()}>Download bundle</button>

@@ -141,7 +141,7 @@ alongside:
 ## Use it from Claude, or any MCP host
 
 ```bash
-npx -y @heor-studio/mcp
+npx -y heor-studio-mcp
 ```
 
 Seven deterministic tools: `search_codes`, `validate_spec`, `generate_code`,
@@ -153,7 +153,7 @@ leaves your machine on the keyless path.
 In Claude Desktop, add to `claude_desktop_config.json`:
 
 ```json
-{"mcpServers":{"heor-studio":{"command":"npx","args":["-y","@heor-studio/mcp"]}}}
+{"mcpServers":{"heor-studio":{"command":"npx","args":["-y","heor-studio-mcp"]}}}
 ```
 
 `generate_code` refuses to run without an explicit sign-off argument and without
