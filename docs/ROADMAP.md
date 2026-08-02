@@ -69,7 +69,7 @@ The blocker that held this back was a missing per-fill feeder. It is built:
 `<prefix>_fills`, one row per dispensing with days supply, emitted inside
 `02_events.sql` and **only when an enabled analysis needs it**, so every spec
 that does not ask for fills emits byte-identical code to before it existed
-(`verify/snapshot.ts` gates exactly that, over 1398 files).
+(`verify/snapshot.ts` gates exactly that, over 2721 files).
 
 Three things worth knowing about how it was built:
 
@@ -128,8 +128,8 @@ fills. The stockpiling closed form is unverified on those two shapes.
 ### 2. The rest of the causal family
 
 - matched-cohort designs (deterministic frequency matching, or imported match sets)
-- **propensity-score stratification** — still unbuilt, but the algebra and the
-  trap in it are now written down in `emitters/psstrat-core.ts`. Worth reading
+- **propensity-score stratification** — BUILT, wired into `modules/propensity_score.ts`.
+  The algebra and the trap in it are written down in `emitters/psstrat-core.ts`. Worth reading
   before reaching for stratification anywhere: **the conventional NTILE-into-
   quintiles recipe does not work on a saturated score.** The score is constant
   within a covariate cell, so NTILE cuts through tied groups and which subjects
@@ -141,8 +141,9 @@ fills. The stockpiling closed form is unverified on those two shapes.
   The file is deliberately NOT registered and NOT verified, and says so at the
   top: nothing has executed it against hand-derived truth, no fingerprint
   scrapes it, and no mutation proves the harness would notice it going wrong.
-- difference-in-differences, instrumental variables
-- negative-control outcomes, E-values
+- difference-in-differences, instrumental variables, interrupted time series,
+  self-controlled designs (SCCS, case-crossover)
+- negative-control outcomes and E-values: BUILT (Wave 2)
 
 ### 3. Long tail
 

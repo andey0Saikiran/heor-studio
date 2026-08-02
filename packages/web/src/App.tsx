@@ -191,8 +191,8 @@ function ProtocolStep({
           Protocol or SAP
         </h2>
         <p className="card-sub">
-          Bring your own key: extraction calls the LLM endpoint you configured in Settings, directly
-          from this browser, with your key. The document goes nowhere else.
+          Bring your own key: extraction calls Anthropic directly from this browser, with your
+          key. The document goes to Anthropic and nowhere else. There is no proxy setting.
         </p>
 
         <label
@@ -218,7 +218,7 @@ function ProtocolStep({
             }}
           />
           <span className="dropzone-primary">Drop a protocol PDF here, or click to choose</span>
-          <span>Read locally with FileReader; sent only to your configured endpoint.</span>
+          <span>Read locally with FileReader; sent only to Anthropic.</span>
         </label>
 
         {pdf && (

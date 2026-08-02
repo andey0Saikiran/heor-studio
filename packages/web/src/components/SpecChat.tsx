@@ -235,7 +235,7 @@ export default function SpecChat({
             <div className="sc-gate">
               <p className="sc-sub">
                 This needs your own API key, the same one extraction uses. It is sent from this
-                browser to the endpoint you configured, and nowhere else.
+                browser to Anthropic, and nowhere else.
               </p>
               <button type="button" className="sc-btn" onClick={onOpenSettings}>
                 Set API key in Settings

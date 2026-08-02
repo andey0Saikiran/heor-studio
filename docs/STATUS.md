@@ -5,11 +5,19 @@ running log of how it got that way, kept because the reasoning in it is worth
 more than the summary. Everything below the first section is HISTORICAL and was
 accurate when written; where it disagrees with ROADMAP.md, ROADMAP.md wins.
 
-## Current, 2026-07-31
+## Current, 2026-08-02
 
-**24 of the 69 planned analyses are built and verified. 1554 harness checks, 0
-failing.** That 69 was a planning number rather than a specification, and a
-meaningful slice of the remainder is refused by design rather than pending.
+**2526 harness checks across 22 groups, 0 failing**, measured by CI on GitHub's
+hardware at run 30731834003 rather than on a laptop. 20 registered analysis
+modules plus attrition and Table 1 from the spine. The byte-identity gate covers
+2721 emitted files.
+
+The old "N of 69" score is retired. That 69 was a planning number rather than a
+specification, a meaningful slice of the remainder is refused by design rather
+than pending, and the score drifted by a factor of three between edits because it
+was maintained by hand beside the thing it described. Measured against 48 real
+published MarketScan studies, a more useful figure is that 29 are partially
+expressible, 19 are not, and none is fully expressible today.
 
 Since the 2026-07-29 pause:
 
@@ -17,7 +25,7 @@ Since the 2026-07-29 pause:
   (PDC / MPR / stockpiled PDC), persistence and discontinuation, treatment
   switching vs add-on, and line of therapy all ship with both twins. Gold Cases
   F and G were built for them.
-- **A byte-identity gate** (`verify/snapshot.ts`) now covers 1737 emitted files
+- **A byte-identity gate** (`verify/snapshot.ts`) now covers 2721 emitted files
   across seven gold specs and three naming strategies. Spine changes have to
   prove they moved nothing.
 - **A correction surface** in the web app: "this looks wrong", anchored to a
@@ -164,7 +172,10 @@ Each has a real prerequisite — deliberately left for an awake session (see NIG
 
 ## Analysis Waves 1.6 + 2 (2026-07-28) — 8 analyses now verified
 
-**Score: 15 of 69 done, 4 partial. 2 gold cases.** Harness: **751 checks, 0 failing** (was 396).
+**Superseded.** The live figures are measured by CI, not maintained here: 2526 checks
+across 22 groups, 0 failing, and 2721 byte-identical emitted files, at run 30731834003.
+A hand-maintained count beside the thing it counts drifts; this one had drifted by a
+factor of three before anyone noticed.
 
 ### Calendar trend (`4758e5a`) — the 7th analysis
 Cochran-Armitage over calendar buckets. The statistic **z is closed form, computed

@@ -275,7 +275,7 @@ export default function ChatShell(props: ChatShellProps) {
           onChange={(e) => { void acceptFile(e.target.files?.[0]); e.target.value = ""; }} />
         <span className="cs-drop-primary">Drop your protocol or SAP here</span>
         <span className="cs-drop-sub">
-          Read in this browser and sent only to the endpoint you configured, with your key. It goes nowhere else.
+          Read in this browser and sent only to Anthropic, with your key. It goes nowhere else.
         </span>
       </label>
       <div className="cs-or">or</div>

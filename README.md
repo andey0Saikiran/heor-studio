@@ -26,7 +26,7 @@ re-implementation of the logic; the emitted text itself, run in real Postgres 16
 
 ```
 $ npm run verify
-2342 checks passing, 0 failing
+2526 checks across 22 groups, 0 failing
 ```
 
 Five mechanisms, each covering a gap the others cannot:
@@ -38,7 +38,7 @@ Five mechanisms, each covering a gap the others cannot:
 | **Mutation testing**: corrupt the output on purpose, assert the harness goes red | checks that pass for the wrong reason |
 | **PARITY stamps** | a twin silently dropping a spec parameter it claimed to consume |
 | **Readiness gates** | analyses that cannot be computed honestly, refused *before* code is generated |
-| **Byte-identity snapshot** over 2529 emitted files | a change to the shared spine quietly moving a number in a module nobody touched |
+| **Byte-identity snapshot** over 2721 emitted files | a change to the shared spine quietly moving a number in a module nobody touched |
 
 Ground truth is derived by hand as exact fractions *before* anything is executed:
 incidence of 3 cases over 2425 person-days with a Byar CI of (90.82, 1320.24); a
@@ -72,8 +72,8 @@ A refusal that explains itself is more useful than a number nobody can defend.
 
 ## What is built
 
-**22 analysis modules**, each with SAS and SQL twins, hand-derived gold truth and
-mutation coverage:
+**20 analysis modules**, plus attrition and Table 1 from the cohort spine, each with
+SAS and SQL twins, hand-derived gold truth and mutation coverage:
 
 - **Descriptive epidemiology**: incidence rate (person-time, Byar CI), point and
   period prevalence, cumulative incidence (Wilson), direct standardization,
@@ -85,18 +85,29 @@ mutation coverage:
   negative binomial, gamma-log, OLS
 - **Survival**: Kaplan-Meier with Greenwood and log-rank, Cox proportional
   hazards, competing-risks CIF (Aalen-Johansen), Fine-Gray subdistribution
-- **Causal**: propensity scores (IPTW), weighted outcome models (Hájek estimator
-  with a sandwich variance), the g-formula and AIPW
+- **Causal**: propensity scores (IPTW and stratification), weighted outcome models
+  (Hájek estimator with a sandwich variance), the g-formula and AIPW, negative
+  control outcomes and E-values
+- **Treatment patterns**: adherence (PDC, MPR, stockpiled PDC), persistence and
+  discontinuation, switching reported as a band across rules rather than one
+  number, and line of therapy, which carries no estimate in the definitional slot
+  and says why
+- **Cohort description**: Elixhauser alongside Charlson, subgroup and sensitivity
+  sweeps, cost attribution, PPPM, CPI adjustment and declared quantile definitions
+- **Mortality**: linked mortality with a required ascertainment date and linked
+  flag, so "did not die" stays distinct from "could not be observed to die"
 
 Plus derivation-aware small-cell suppression, a tidy long-format results contract,
 provenance stamping, and an MCP server exposing the whole thing to Claude and
 other MCP hosts.
 
-**Not built**: see [`docs/ROADMAP.md`](docs/ROADMAP.md). The largest gap is
-treatment patterns and adherence (PDC/MPR, persistence, switching,
-line-of-therapy), which is a routine HEOR ask. Matched-cohort designs, PS
-stratification, difference-in-differences and instrumental variables are also
-unbuilt.
+**Not built**: see [`docs/ROADMAP.md`](docs/ROADMAP.md). Difference-in-differences,
+interrupted time series, self-controlled designs, matched-cohort designs and
+instrumental variables are unbuilt. Measured against 48 published MarketScan
+studies, the binding gaps are non-demographic covariates in adjusted models, an
+on-treatment clock for time-to-discontinuation endpoints, exposures with more than
+two levels, and composite outcome grammar such as "one inpatient or two
+outpatient".
 
 ---
 
@@ -148,13 +159,18 @@ API key; the emitters themselves are deterministic and offline.
 
 Split. `packages/core` and `packages/web` are **AGPL-3.0-only**, so improvements
 to the emitters stay available to the analysts who depend on them, including when
-the software is offered over a network. `packages/mcp` is **Apache-2.0** so hosts
-can integrate without taking on copyleft obligations for their own code. See
-[LICENSE](LICENSE).
+the software is offered over a network. The `packages/mcp` SOURCE is
+**Apache-2.0** so hosts can integrate without taking on copyleft obligations for
+their own code. The PUBLISHED artifact bundles `core`, so the distributed package
+is a combined work governed by **AGPL-3.0-only**, and its package.json declares
+that. Code you generate with this tool is yours and carries no license condition
+from this project. See [LICENSE](LICENSE).
 
 ## Status
 
-Working and useful; actively paused. [`docs/STATUS.md`](docs/STATUS.md) is a
+Working and actively developed. Every number above is measured by CI on GitHub's
+hardware, not on a laptop; the run is public.
+[`docs/STATUS.md`](docs/STATUS.md) is a
 running engineering log, and the entries worth reading are the ones where the
 harness caught defects in *itself*: a coverage guard that had been passing
 vacuously for three shipped modules, a positivity claim that was false in one

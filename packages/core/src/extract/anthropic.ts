@@ -79,7 +79,21 @@ export function listModels(): ModelOption[] {
   ];
 }
 
-const API_URL = "https://api.anthropic.com/v1/messages";
+/**
+ * The ONLY endpoint this package ever calls.
+ *
+ * Exported so the UI can display it rather than restate it. The settings modal
+ * used to offer an "API base URL" field that was collected, defaulted, persisted
+ * and reset, and read by nothing: every request went here regardless, while three
+ * separate strings told the analyst their document was "sent only to the endpoint
+ * you configured". Someone at a shop that mandates an LLM gateway would have set
+ * the proxy precisely because policy forbade a direct vendor call, seen no error,
+ * and sent the protocol and their key straight to this address.
+ *
+ * A displayed constant that is the same object as the called constant cannot lie.
+ */
+export const ANTHROPIC_ENDPOINT = "https://api.anthropic.com/v1/messages";
+const API_URL = ANTHROPIC_ENDPOINT;
 const TOOL_NAME = "submit_study_spec";
 const MAX_TOKENS = 16000;
 

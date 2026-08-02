@@ -1,21 +1,17 @@
 import { useEffect, useMemo, useRef } from "react";
-import { listModels } from "@heor-studio/core";
+import { listModels, ANTHROPIC_ENDPOINT } from "@heor-studio/core";
 
 /** Connection settings for the user's own LLM endpoint (BYOK). */
 export interface AppSettings {
   apiKey: string;
   model: string;
-  baseUrl: string;
   /** Explicit opt-in: persist the API key to localStorage. */
   persistKey: boolean;
 }
 
-export const DEFAULT_BASE_URL = "https://api.anthropic.com";
-
 export const DEFAULT_SETTINGS: AppSettings = {
   apiKey: "",
   model: "",
-  baseUrl: DEFAULT_BASE_URL,
   persistKey: false,
 };
 
@@ -31,7 +27,6 @@ export function loadSettings(): AppSettings {
     return {
       apiKey: typeof p.apiKey === "string" ? p.apiKey : "",
       model: typeof p.model === "string" ? p.model : "",
-      baseUrl: typeof p.baseUrl === "string" && p.baseUrl ? p.baseUrl : DEFAULT_BASE_URL,
       persistKey: p.persistKey === true,
     };
   } catch {
@@ -39,12 +34,11 @@ export function loadSettings(): AppSettings {
   }
 }
 
-/** Persists model/baseUrl always; the API key only with explicit opt-in. */
+/** Persists the model always; the API key only with explicit opt-in. */
 export function saveSettings(s: AppSettings): void {
   try {
     const toStore: Partial<AppSettings> = {
       model: s.model,
-      baseUrl: s.baseUrl,
       persistKey: s.persistKey,
     };
     if (s.persistKey) toStore.apiKey = s.apiKey;
@@ -178,31 +172,16 @@ export default function SettingsModal({ settings, onChange, onClose }: SettingsM
         </div>
 
         <div className="field">
-          <label className="field-label" htmlFor="set-baseurl">
-            API base URL
-          </label>
-          <input
-            id="set-baseurl"
-            className="control control-wide"
-            type="url"
-            placeholder={DEFAULT_BASE_URL}
-            value={settings.baseUrl}
-            onChange={(e) => onChange({ ...settings, baseUrl: e.target.value })}
-          />
+          <span className="field-label">Where requests go</span>
           <span className="field-hint">
-            Point this at a compatible proxy if your organization requires one. Documents are sent
-            only to this endpoint.
+            Extraction calls <code>{ANTHROPIC_ENDPOINT}</code> directly from this browser,
+            with your key. There is no proxy or gateway setting: if your organization
+            requires requests to route through its own endpoint, this tool cannot satisfy
+            that today, and you should not paste a protocol here.
           </span>
         </div>
 
         <div className="modal-foot">
-          <button
-            type="button"
-            className="btn btn-quiet"
-            onClick={() => onChange({ ...settings, baseUrl: DEFAULT_BASE_URL })}
-          >
-            Reset base URL
-          </button>
           <button type="button" className="btn btn-primary" onClick={onClose}>
             Done
           </button>
