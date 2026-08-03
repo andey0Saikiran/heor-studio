@@ -708,7 +708,7 @@ export function checkSpecShape(raw: unknown): { ok: boolean; problems: string[] 
     if (!isObj(m.provenance)) p.push("meta.provenance", `expected an object, got ${typeOf(m.provenance)}`);
     else {
       const prov = m.provenance;
-      need(p, "meta.provenance.method", prov.method === "llm_extraction" || prov.method === "llm_assisted" || prov.method === "manual", `expected "llm_extraction", "llm_assisted" or "manual", got ${JSON.stringify(prov.method)}`);
+      need(p, "meta.provenance.method", prov.method === "llm_extraction" || prov.method === "llm_assisted" || prov.method === "manual" || prov.method === "demo", `expected "llm_extraction", "llm_assisted", "manual" or "demo", got ${JSON.stringify(prov.method)}`);
       // model / sourceDocumentName / extractedAt are printed into generated headers.
       if (prov.model !== undefined) needSafeText(p, prov, "model", "meta.provenance", { maxLen: 120 });
       if (prov.sourceDocumentName !== undefined) needSafeText(p, prov, "sourceDocumentName", "meta.provenance", { maxLen: 200 });

@@ -15,7 +15,7 @@ export const PSO_DEMO_SPEC: StudySpec = {
     studyPeriod: { start: "2016-01-01", end: "2021-09-30" },
     description:
       "Adults newly initiating an IL-17, IL-23, or IL-12/23 inhibitor for psoriasis; 12-month baseline and follow-up; attrition, Table 1, treatment patterns.",
-    provenance: { method: "manual" },
+    provenance: { method: "demo" },
   },
   codeLists: [
     {

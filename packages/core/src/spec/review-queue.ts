@@ -116,9 +116,19 @@ function criterionItem(spec: StudySpec, c: Criterion): ReviewItem {
   let risk = RISK_HIGH_CONF;
   let concern: string | undefined;
 
+  const boundlessAge =
+    c.test.type === "age_at_index" && c.test.min === undefined && c.test.max === undefined;
+
   if (c.test.type === "unmapped") {
     risk = RISK_UNMAPPED;
     concern = "The extractor could not map this sentence to a rule at all. Until it is mapped, this criterion does nothing and the cohort is larger than the protocol describes.";
+  } else if (boundlessAge) {
+    /* A mapped-but-inert rule is worse than an unmapped one: it looks like a
+     * working age gate and excludes nobody. "adults with T2DM" with no numeric
+     * bound lets pediatric members into the cohort while the panel calls it
+     * routine. Surface it, do not bury it. */
+    risk = RISK_LOW_CONF;
+    concern = "This age rule has NO lower or upper bound, so it excludes nobody. If the protocol says 'adults' or names an age, set the bound; otherwise the cohort includes ages the protocol did not intend.";
   } else if (c.confidence === "low") {
     risk = RISK_LOW_CONF;
     concern = "The extractor was NOT confident about this one.";

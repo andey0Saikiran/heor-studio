@@ -103,7 +103,9 @@ export default function ChatShell(props: ChatShellProps) {
       `  Code lists   ${s.codeLists.length} (${p.codesTotal} codes)\n` +
       `  Analyses     ${enabled} enabled\n\n` +
       (p.remaining === 0
-        ? `Everything here is already signed off, so the code is ready whenever you are.`
+        ? (s.meta.provenance.method === "demo"
+            ? `This is the built-in demo, pre-filled so you can see the generated code right away. The review flags were set by the project, not by you, so the exported bundle says plainly it is a demonstration, not a reviewed study.`
+            : `Everything here is already signed off, so the code is ready whenever you are.`)
         : `None of it is signed off yet, and I will not generate code until it is. ` +
           `There ${p.remaining === 1 ? "is 1 thing" : `are ${p.remaining} things`} to confirm below, grouped so you ` +
           `can clear the routine ones in a click and look closely at the few that need it.`)
@@ -201,6 +203,17 @@ export default function ChatShell(props: ChatShellProps) {
   const acceptFile = async (file?: File | null) => {
     if (!file) return;
     setError("");
+    /* The dropzone used to base64-encode ANYTHING and send it to the API as a
+     * PDF, so a .docx or a text SAP came back as a raw API error. Validate here,
+     * and point at the paste-text path for non-PDFs. */
+    const isPdf = file.type === "application/pdf" || /\.pdf$/i.test(file.name);
+    if (!isPdf) {
+      setError(
+        `That is not a PDF (${file.name}). Extraction reads PDFs; for a Word doc or a text SAP, ` +
+        `open the full editor and paste the text into the protocol box instead.`,
+      );
+      return;
+    }
     if (!hasKey) { setError("Reading a protocol needs your own API key. Open Settings to add one."); return; }
     setMsgs((m) => [...m, { id: nextId(), role: "user", kind: "text", text: `Uploaded ${file.name}` }]);
     try {

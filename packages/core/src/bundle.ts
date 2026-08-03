@@ -148,8 +148,15 @@ function buildAiDisclosure(spec: StudySpec, generatedAt: string): string {
   const verifiedCodes = totalCodes - unverifiedCodeCount(spec);
   const readiness = specReadiness(spec);
 
+  const isDemo = prov.method === "demo";
+
   const roleSection =
-    prov.method === "llm_extraction"
+    isDemo
+      ? `This is the built-in DEMONSTRATION study. It ships pre-filled so a new
+user can see the generated code immediately. Its review and verification flags
+were set by the project, NOT by an analyst, and its code lists are illustrative
+rather than clinically validated.`
+      : prov.method === "llm_extraction"
       ? `A large language model was used to extract the structured study
 specification from the source document.
 
@@ -192,21 +199,29 @@ yield identical code.
 
 ## Human oversight
 
-- Criteria reviewed by an analyst: ${reviewedCriteria} of ${totalCriteria}
+${isDemo
+  ? `- Criteria reviewed by an analyst: 0 of ${totalCriteria} (this is the demo; its ${reviewedCriteria} pre-set review flags were NOT set by an analyst)
+- Codes verified by an analyst: 0 of ${totalCodes} (this is the demo; its ${verifiedCodes} pre-set verification flags were NOT set by an analyst)
+- Readiness at export: demonstration bundle, not an analyst-reviewed deliverable`
+  : `- Criteria reviewed by an analyst: ${reviewedCriteria} of ${totalCriteria}
 - Codes verified by an analyst: ${verifiedCodes} of ${totalCodes}
 - Readiness at export: ${
     readiness.ready ? "ready (no open problems)" : `NOT ready — ${readiness.problems.join("; ")}`
   }
 
 HEOR Studio refuses to generate code from a specification with unreviewed or
-unmapped criteria; export therefore implies the review states recorded above.
+unmapped criteria; export therefore implies the review states recorded above.`}
 
 ## Attestation
 
-Exported on ${generatedAt} from spec version ${spec.meta.version}. By
+${isDemo
+  ? `Exported on ${generatedAt} from the built-in demonstration study. This bundle
+carries NO analyst attestation: its review flags are pre-set for illustration, and
+it must not be used as, or presented as, a reviewed deliverable.`
+  : `Exported on ${generatedAt} from spec version ${spec.meta.version}. By
 distributing this bundle, the reviewing analyst attests that the criterion
 review flags and code verification flags in \`spec.json\` reflect their own
-item-by-item review.
+item-by-item review.`}
 `;
 }
 

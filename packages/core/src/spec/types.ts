@@ -1802,7 +1802,7 @@ export interface StudySpec {
        * chat-edited spec as "manual" would make the AI disclosure false, and
        * reporting it as "llm_extraction" would credit the model with work a
        * person did. */
-      method: "llm_extraction" | "llm_assisted" | "manual";
+      method: "llm_extraction" | "llm_assisted" | "manual" | "demo";
       model?: string;            // e.g. "claude-sonnet-5"
       extractedAt?: string;      // ISO timestamp
       sourceDocumentName?: string;

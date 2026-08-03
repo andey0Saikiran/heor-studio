@@ -72,6 +72,17 @@
   max-width: 68ch;
 }
 
+.rp-concern {
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  color: var(--ink);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius);
+  background: var(--warn-wash);
+  border: 1px solid color-mix(in srgb, var(--caution) 30%, var(--hairline));
+  margin-bottom: var(--space-1);
+}
+
 .rp-items { list-style: none; margin: 0; padding: 0; }
 .rp-item {
   display: flex;
