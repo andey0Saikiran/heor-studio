@@ -83,53 +83,42 @@
 .cs-log {
   flex: 1 1 auto;
   overflow-y: auto;
-  /* Generous inside the reading column, because this is the one place in the
-     app that holds running prose. */
-  padding: var(--space-5);
+  padding: var(--space-5) var(--space-4);
   display: flex;
   flex-direction: column;
-  /* Between TURNS. Three times the within-turn gap below, which is what makes
-     the grouping legible without a single rule or border. */
-  gap: var(--space-6);
+  /* Center the reading column, like a chat. Turns cap their own width. */
+  align-items: center;
+  gap: var(--space-5);
   max-height: calc(100vh - var(--cs-chrome) - 7rem);
   scroll-behavior: smooth;
 }
 
-.cs-msg {
-  display: flex;
-  flex-direction: column;
-  /* Within a turn: label and bubble belong together. */
-  gap: var(--space-2);
-  /* Prose cap. The column can be wider than comfortable reading on a large
-     screen; the text should not be. */
-  max-width: 68ch;
-}
-.cs-msg-user { align-self: flex-end; align-items: flex-end; }
+/* Claude-style turns. The assistant's reply is plain text in the reading
+   column; the user's turn is a quiet right-aligned bubble. The asymmetry does
+   the work no name label needs to. */
+.cs-turn { display: flex; flex-direction: column; max-width: 46rem; width: 100%; }
+.cs-turn-assistant { align-self: stretch; }
+.cs-turn-user { align-self: flex-end; align-items: flex-end; max-width: 42rem; }
 
-.cs-who {
-  font-size: var(--text-xs);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--ink-faint);
-  font-weight: 600;
-}
-
-.cs-bubble {
-  padding: var(--space-3) var(--space-4);
-  border-radius: var(--radius-lg);
+.cs-md {
   line-height: var(--leading-prose);
+  color: var(--ink);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   text-wrap: pretty;
 }
-.cs-msg-user .cs-bubble {
-  background: var(--accent-wash);
-  color: var(--accent-ink);
-  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
-}
-.cs-msg-assistant .cs-bubble {
+.cs-md :is(h1, h2, h3) { font-weight: 600; margin: 0 0 var(--space-2); }
+
+.cs-user-bubble {
+  padding: var(--space-3) var(--space-4);
+  border-radius: 1.1rem;
   background: var(--surface-deep);
-  border: 1px solid var(--line);
+  border: 1px solid var(--hairline);
+  color: var(--ink);
+  line-height: var(--leading-prose);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
 }
 
 /* ---------- the verification rail ----------
@@ -415,6 +404,88 @@
 }
 .cs-tab:hover { color: var(--ink); }
 .cs-tab.cs-on { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+
+/* ---------- composer (Claude-style) ----------
+   A rounded input box with the attach paperclip on the left and the send arrow
+   on the right, both inside the box, the textarea growing between them. The
+   composer CSS, like the dropzone's, was never written; the markup ran bare. */
+
+.cs-composer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4) var(--space-4);
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.cs-box {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  max-width: 46rem;
+  width: 100%;
+  margin: 0 auto;
+  background: var(--surface);
+  border: 1px solid color-mix(in srgb, var(--ink) 16%, var(--hairline));
+  border-radius: 1.4rem;
+  box-shadow: var(--shadow);
+  transition: border-color var(--dur) var(--ease-out), box-shadow var(--dur) var(--ease-out);
+}
+.cs-box:focus-within {
+  border-color: color-mix(in srgb, var(--verified) 45%, var(--hairline));
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+.cs-box-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  resize: none;
+  font: inherit;
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  color: var(--ink);
+  padding: 0.4rem 0.25rem;
+  max-height: 12rem;
+}
+.cs-box-input:focus { outline: none; }
+.cs-box-input:disabled { color: var(--ink-faint); }
+
+.cs-icon-btn, .cs-send {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 999px;
+  border: 0;
+  cursor: pointer;
+  transition: background var(--speed-hl-out) var(--ease-out-quad), color var(--speed-hl-out) var(--ease-out-quad);
+}
+.cs-icon-btn {
+  background: transparent;
+  color: var(--ink-soft);
+}
+.cs-icon-btn:not(:disabled):hover { background: var(--surface-2); color: var(--ink); transition-duration: var(--speed-hl-in); }
+.cs-send {
+  background: var(--verified);
+  color: #FFFFFF;
+}
+.cs-send:not(:disabled):hover { background: var(--verified-hover); transition-duration: var(--speed-hl-in); }
+.cs-icon-btn:disabled, .cs-send:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.cs-hint {
+  max-width: 46rem;
+  width: 100%;
+  margin: 0 auto;
+  font-size: var(--text-xs);
+  color: var(--ink-faint);
+  text-align: center;
+}
 
 /* ---------- progress ---------- */
 

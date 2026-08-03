@@ -75,6 +75,7 @@ export default function ChatShell(props: ChatShellProps) {
   const [selected, setSelected] = useState("");
   const [copied, setCopied] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   /* THE VERIFICATION RUN, owned here so its trigger can sit in the pane header
    * where a person actually looks, instead of at the foot of the Margin. The
@@ -376,10 +377,16 @@ export default function ChatShell(props: ChatShellProps) {
 
           {msgs.map((m) => {
             if (m.kind === "text") {
-              return (
-                <div key={m.id} className={m.role === "user" ? "cs-msg cs-msg-user" : "cs-msg cs-msg-assistant"}>
-                  <span className="cs-who">{m.role === "user" ? "You" : "HEOR Studio"}</span>
-                  <div className="cs-bubble">{m.text}</div>
+              /* Claude-style: the assistant's reply is plain text in the reading
+                 column, no bubble and no name label. The user's turn is a quiet
+                 right-aligned bubble. That asymmetry is the whole feel. */
+              return m.role === "user" ? (
+                <div key={m.id} className="cs-turn cs-turn-user">
+                  <div className="cs-user-bubble">{m.text}</div>
+                </div>
+              ) : (
+                <div key={m.id} className="cs-turn cs-turn-assistant">
+                  <div className="cs-md">{m.text}</div>
                 </div>
               );
             }
@@ -388,8 +395,7 @@ export default function ChatShell(props: ChatShellProps) {
             const changes: SpecChange[] = spec ? diffSpecs(spec, m.proposal.spec) : [];
             const costly = changesRequiringRereview(changes);
             return (
-              <div key={m.id} className="cs-msg cs-msg-assistant">
-                <span className="cs-who">HEOR Studio</span>
+              <div key={m.id} className="cs-turn cs-turn-assistant">
                 <div className="cs-proposal">
                   <div className="cs-proposal-body">
                     <div>{m.proposal.notes}</div>
@@ -473,25 +479,54 @@ export default function ChatShell(props: ChatShellProps) {
               </span>
             </div>
           )}
-          <div className="cs-input-row">
+          <div className="cs-box">
+            <input
+              ref={fileRef}
+              type="file"
+              accept="application/pdf,.pdf"
+              className="sr-only"
+              onChange={(e) => { void acceptFile(e.target.files?.[0]); e.target.value = ""; }}
+            />
+            <button
+              type="button"
+              className="cs-icon-btn"
+              aria-label="Attach a protocol PDF"
+              title="Attach a protocol PDF"
+              disabled={Boolean(busy)}
+              onClick={() => fileRef.current?.click()}
+            >
+              <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                <path d="M8.5 12.5l6-6a3 3 0 0 1 4.2 4.2l-8 8a5 5 0 0 1-7-7l8-8"
+                  fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
             <label className="sr-only" htmlFor={`${uid}-ask`}>Ask for a change</label>
             <textarea
               id={`${uid}-ask`}
-              className="cs-input"
-              placeholder={spec ? "Ask for a change, in plain words" : "Upload a protocol to begin"}
+              className="cs-box-input"
+              rows={1}
+              placeholder={spec ? "Ask for a change, or attach a new protocol" : "Attach a protocol, or load the demo below"}
               value={draft}
               disabled={!spec || Boolean(busy)}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void send(); }
+                if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void send(); }
               }}
             />
-            <button type="button" className="btn btn-primary" disabled={!spec || !draft.trim() || Boolean(busy)}
-              onClick={() => void send()}>Send</button>
+            <button
+              type="button"
+              className="cs-send"
+              aria-label="Send"
+              disabled={!spec || !draft.trim() || Boolean(busy)}
+              onClick={() => void send()}
+            >
+              <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                <path d="M12 19V6M6 12l6-6 6 6" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
           </div>
           <span className="cs-hint">
-            Changes are made to the study specification, never to the generated code. Nothing changes until you
-            apply a proposal, and then the code is rebuilt from it.
+            Enter to send, Shift+Enter for a new line. Changes edit the study spec, never the generated code.
           </span>
           {/* THE EDITOR IS REACHABLE WHENEVER THERE IS A STUDY, not only once
               the code exists. This button used to live inside the code pane,
