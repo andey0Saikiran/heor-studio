@@ -434,6 +434,7 @@ export default function App() {
             onLoadDemo={() => adoptSpec(structuredClone(PSO_DEMO_SPEC))}
             onStartBlank={() => adoptSpec(blankSpec())}
             onOpenPanels={() => { setMode("panels"); setStep(2); }}
+            onFlag={setFlagRequest}
           />
         ) : (
         <>

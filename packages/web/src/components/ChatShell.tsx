@@ -12,27 +12,29 @@
  * spec, the analyst accepts a diff, and the emitters run again on their own.
  *
  * THE REVIEW GATE IS ASKED, NOT PRESENTED. Code generation is blocked until
- * every criterion is reviewed and every code verified. As a form that is a wall
- * of checkboxes, and a wall of checkboxes gets cleared without being read. Here
- * it is one question at a time, riskiest first, each carrying the verbatim
- * protocol sentence beside the rule it produced so the analyst is comparing two
- * things rather than recalling one. The ordering and the evidence come from
- * core (spec/review-queue.ts) and are guarded there.
+ * every criterion is reviewed and every code verified. That review is the
+ * ReviewPanel: the outstanding items grouped into sections, each carrying the
+ * verbatim protocol sentence beside the rule it produced, with a bulk confirm
+ * for the routine groups and the risky ones (unmapped criteria, AI-suggested
+ * codes) surfaced open. The ordering, evidence and risk come from core
+ * (spec/review-queue.ts) and are guarded there.
  */
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import type {
   ProposedSpecEdit, ReviewItem, SpecChange, StudySpec, GeneratedFile, EmitOptions,
 } from "@heor-studio/core";
 import {
-  changesRequiringRereview, confirmItem, diffSpecs, emitSas, emitSql, extractSpec,
+  changesRequiringRereview, diffSpecs, emitSas, emitSql, extractSpec,
   listModels, planBundle, converseOrEdit, reviewProgress, reviewQueue, specReadiness,
   bundleFilename,
 } from "@heor-studio/core";
 import type { AppSettings } from "./SettingsModal";
+import type { FlagRequest } from "../lib/corrections";
 import { buildZip, downloadBlob } from "../lib/exportZip";
 import type { RunProgress } from "../lib/verifyRun";
 import { runVerification } from "../lib/verifyRun";
 import Margin from "./Margin";
+import ReviewPanel from "./ReviewPanel";
 import "./chatshell.css";
 
 type Dialect = "sas" | "postgres" | "snowflake";
@@ -56,6 +58,7 @@ export interface ChatShellProps {
   onLoadDemo: () => void;
   onStartBlank: () => void;
   onOpenPanels: () => void;
+  onFlag: (r: FlagRequest) => void;
 }
 
 export default function ChatShell(props: ChatShellProps) {
@@ -102,8 +105,8 @@ export default function ChatShell(props: ChatShellProps) {
       (p.remaining === 0
         ? `Everything here is already signed off, so the code is ready whenever you are.`
         : `None of it is signed off yet, and I will not generate code until it is. ` +
-          `There ${p.remaining === 1 ? "is 1 thing" : `are ${p.remaining} things`} to confirm, and I will go ` +
-          `through them one at a time, starting with the ones most likely to be wrong.`)
+          `There ${p.remaining === 1 ? "is 1 thing" : `are ${p.remaining} things`} to confirm below, grouped so you ` +
+          `can clear the routine ones in a click and look closely at the few that need it.`)
     );
   };
 
@@ -137,29 +140,41 @@ export default function ChatShell(props: ChatShellProps) {
 
   /* ---------------- the review conversation ---------------- */
 
-  /** Ask the next outstanding question, or announce the gate is clear. */
-  const askNext = useCallback((s: StudySpec) => {
+  /* THE REVIEW IS A PANEL NOW, NOT A QUEUE OF CHAT MESSAGES. askNext used to
+   * push one review card per outstanding item, riskiest first, which on a real
+   * protocol is seventy-odd sequential yes/no questions and a reject that
+   * re-asks the same card forever. The ReviewPanel below shows them grouped,
+   * with bulk confirm. So this only announces the transitions: gate cleared, or
+   * signed off but still not ready. Each fires once. */
+  const announced = useRef<"none" | "ready" | "blocked">("none");
+  const announce = useCallback((s: StudySpec) => {
     const q = reviewQueue(s);
-    if (q.length === 0) {
-      const r = specReadiness(s);
-      if (r.ready) {
-        say(
-          "That is everything signed off. The study code is ready, and I have opened it on the right.\n\n" +
-          "Nothing in it has been verified yet. Run the checks, top right of the code pane, and this browser will download Postgres and execute the full suite against the emitted SQL.\n\n" +
-          "You can still ask for changes: anything you accept re-runs the emitters, and anything you touch goes back to needing a look.",
-        );
-        setPaneOpen(true);
-      } else {
-        say(
-          "Every criterion and code is signed off, but the spec is not ready yet:\n\n" +
-          r.problems.map((p) => `  - ${p}`).join("\n") +
-          "\n\nTell me what to change and I will propose it.",
-        );
-      }
-      return;
+    if (q.length > 0) { announced.current = "none"; return; }
+    const r = specReadiness(s);
+    if (r.ready && announced.current !== "ready") {
+      announced.current = "ready";
+      say(
+        "That is everything signed off. The study code is ready, and I have opened it on the right.\n\n" +
+        "Nothing in it has been verified yet. Run the checks, top right of the code pane, and this browser will download Postgres and execute the full suite against the emitted SQL.\n\n" +
+        "You can still ask for changes: anything you accept re-runs the emitters, and anything you touch goes back to needing a look.",
+      );
+      setPaneOpen(true);
+    } else if (!r.ready && announced.current !== "blocked") {
+      announced.current = "blocked";
+      say(
+        "Everything you could confirm is confirmed, but the spec still is not ready to generate code:\n\n" +
+        r.problems.map((p) => `  - ${p}`).join("\n") +
+        "\n\nTell me what to change and I will propose it.",
+      );
     }
-    setMsgs((m) => [...m, { id: nextId(), role: "assistant", kind: "review", item: q[0] }]);
   }, [say]);
+  /* Announce whenever the outstanding count reaches zero, however it got there
+   * (the panel's bulk-confirm, a single confirm, or an accepted chat edit). */
+  useEffect(() => {
+    if (spec && progress && progress.remaining === 0) announce(spec);
+    else announced.current = "none";
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [spec, progress?.remaining]);
 
   /* GREET WHATEVER ARRIVES, however it arrived.
    *
@@ -175,25 +190,11 @@ export default function ChatShell(props: ChatShellProps) {
     if (!spec || greeted.current) return;
     greeted.current = true;
     setMsgs((m) => (m.length > 0 ? m : [{ id: nextId(), role: "assistant", kind: "text", text: summarize(spec, "loaded") }]));
-    askNext(spec);
+    announce(spec);
     /* `spec` alone on purpose. This must fire ONCE when a study first arrives,
-     * and the ref is what enforces that; adding askNext (which changes identity
-     * whenever `say` does) would re-run it and re-greet mid-review. */
-  }, [spec, askNext]);
-
-  const answer = (msgId: string, item: ReviewItem, ok: boolean) => {
-    if (!spec) return;
-    const next = confirmItem(spec, item.id, item.kind, ok);
-    onChange(next);
-    setMsgs((m) => m.map((x) => (x.id === msgId && x.kind === "review" ? { ...x, answer: ok ? "yes" : "no" } : x)));
-    if (ok) {
-      askNext(next);
-    } else {
-      say(
-        `Noted, and I have left it unconfirmed so it stays on the list. Tell me what it should say instead and I will propose the change.`,
-      );
-    }
-  };
+     * and the ref is what enforces that. */
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [spec]);
 
   /* ---------------- extraction ---------------- */
 
@@ -217,7 +218,6 @@ export default function ChatShell(props: ChatShellProps) {
       });
       onAdopt(s);
       say(summarize(s, "document"));
-      askNext(s);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -260,7 +260,6 @@ export default function ChatShell(props: ChatShellProps) {
   const acceptProposal = (msgId: string, p: ProposedSpecEdit) => {
     onChange(p.spec);
     setMsgs((m) => m.map((x) => (x.id === msgId && x.kind === "proposal" ? { ...x, settled: "accepted" } : x)));
-    askNext(p.spec);
   };
 
   /* ---------------- export ---------------- */
@@ -291,29 +290,40 @@ export default function ChatShell(props: ChatShellProps) {
         </div>
       )}
       <label
-        className={dragging ? "cs-drop cs-drag" : "cs-drop"}
-        onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+        className={`cs-drop${dragging ? " cs-drag" : ""}${busy ? " cs-drop-busy" : ""}`}
+        onDragOver={(e) => { if (busy) return; e.preventDefault(); setDragging(true); }}
         onDragLeave={() => setDragging(false)}
-        onDrop={(e) => { e.preventDefault(); setDragging(false); void acceptFile(e.dataTransfer.files[0]); }}
+        onDrop={(e) => { if (busy) return; e.preventDefault(); setDragging(false); void acceptFile(e.dataTransfer.files[0]); }}
       >
-        <input type="file" accept="application/pdf,.pdf" className="sr-only"
+        <input type="file" accept="application/pdf,.pdf" className="sr-only" disabled={Boolean(busy)}
           onChange={(e) => { void acceptFile(e.target.files?.[0]); e.target.value = ""; }} />
         <svg className="cs-drop-glyph" viewBox="0 0 24 24" aria-hidden="true">
           <path d="M6 2.5h8.5L20 8v13.5H6z" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
           <path d="M14.5 2.5V8H20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
           <path d="M9 12.5h8M9 15.5h8M9 18.5h5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
         </svg>
-        <span className="cs-drop-primary">Drop your protocol or SAP</span>
-        <span className="cs-drop-formats" aria-label="Accepted format: PDF">
-          <span className="cs-chip">.pdf</span>
-        </span>
-        <span className="cs-drop-trust">
-          <svg viewBox="0 0 16 16" aria-hidden="true" width="12" height="12">
-            <rect x="3" y="7" width="10" height="7" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.3" />
-            <path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" fill="none" stroke="currentColor" strokeWidth="1.3" />
-          </svg>
-          Read in your browser, sent only to Anthropic with your key.
-        </span>
+        {busy ? (
+          <>
+            <span className="cs-drop-primary">{busy}</span>
+            <span className="cs-drop-trust">
+              A long protocol can take up to a minute. It is being read here, in your browser.
+            </span>
+          </>
+        ) : (
+          <>
+            <span className="cs-drop-primary">Drop your protocol or SAP</span>
+            <span className="cs-drop-formats" aria-label="Accepted format: PDF">
+              <span className="cs-chip">.pdf</span>
+            </span>
+            <span className="cs-drop-trust">
+              <svg viewBox="0 0 16 16" aria-hidden="true" width="12" height="12">
+                <rect x="3" y="7" width="10" height="7" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.3" />
+                <path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" fill="none" stroke="currentColor" strokeWidth="1.3" />
+              </svg>
+              Read in your browser, sent only to Anthropic with your key.
+            </span>
+          </>
+        )}
       </label>
       <div className="cs-actions">
         <button type="button" className="btn btn-primary" onClick={props.onLoadDemo}>Load a demo study</button>
@@ -367,43 +377,7 @@ export default function ChatShell(props: ChatShellProps) {
                 </div>
               );
             }
-            if (m.kind === "review") {
-              return (
-                <div key={m.id} className="cs-msg cs-msg-assistant">
-                  <span className="cs-who">HEOR Studio</span>
-                  <div className="cs-review">
-                    <div className="cs-review-body">
-                      <strong>{m.item.question}</strong>
-                      {m.item.concern && <div className="cs-concern">{m.item.concern}</div>}
-                      <div className="cs-review-row">
-                        <span className="cs-review-label">
-                          {m.item.kind === "criterion" ? "Your protocol said" : "The code"}
-                        </span>
-                        <span className="cs-review-said">{m.item.evidence}</span>
-                      </div>
-                      <div className="cs-review-row">
-                        <span className="cs-review-label">What the generated code will do</span>
-                        <span className="cs-review-derived">{m.item.derived}</span>
-                      </div>
-                    </div>
-                    <div className="cs-review-foot">
-                      {m.answer === undefined ? (
-                        <>
-                          <button type="button" className="btn btn-primary btn-sm"
-                            onClick={() => answer(m.id, m.item, true)}>Yes, that is right</button>
-                          <button type="button" className="btn btn-sm"
-                            onClick={() => answer(m.id, m.item, false)}>No, that is wrong</button>
-                        </>
-                      ) : (
-                        <span className="cs-answered">
-                          {m.answer === "yes" ? "Confirmed by you" : "You said this is wrong, so it stays on the list"}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              );
-            }
+            if (m.kind === "review") return null; /* review lives in ReviewPanel now */
             /* proposal */
             const changes: SpecChange[] = spec ? diffSpecs(spec, m.proposal.spec) : [];
             const costly = changesRequiringRereview(changes);
@@ -464,7 +438,16 @@ export default function ChatShell(props: ChatShellProps) {
             );
           })}
 
-          {busy && <div className="status-line" role="status" aria-live="polite">{busy}</div>}
+          {spec && queue.length > 0 && !busy && (
+            <ReviewPanel spec={spec} onChange={onChange} onFlag={props.onFlag} />
+          )}
+
+          {busy && (
+            <div className="cs-working" role="status" aria-live="polite">
+              <span className="cs-working-dots" aria-hidden="true"><i /><i /><i /></span>
+              <span className="cs-working-text">{busy}</span>
+            </div>
+          )}
           {error && <div className="inline-error" role="alert">{error}</div>}
         </div>
 
@@ -478,11 +461,6 @@ export default function ChatShell(props: ChatShellProps) {
                     Math.max(1, progress.criteriaTotal + progress.codesTotal)) * 100)}%`,
                 }} />
               </span>
-              {queue.length > 0 && msgs.every((m) => m.kind !== "review" || m.answer !== undefined) && (
-                <button type="button" className="btn btn-quiet btn-sm" onClick={() => spec && askNext(spec)}>
-                  Next question
-                </button>
-              )}
             </div>
           )}
           <div className="cs-input-row">
