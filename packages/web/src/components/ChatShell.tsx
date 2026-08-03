@@ -120,6 +120,17 @@ export default function ChatShell(props: ChatShellProps) {
     if (el) el.scrollTop = el.scrollHeight;
   }, [msgs, busy]);
 
+  /* A ticking elapsed clock while the model works. A single 30-to-60-second API
+   * call reports almost no intermediate status, so without a visible counter the
+   * screen looks frozen. The number moving is the proof it is alive. */
+  const [busySeconds, setBusySeconds] = useState(0);
+  useEffect(() => {
+    if (!busy) return;
+    setBusySeconds(0);
+    const t = window.setInterval(() => setBusySeconds((s) => s + 1), 1000);
+    return () => window.clearInterval(t);
+  }, [busy]);
+
 
   const models = useMemo(() => { try { return listModels(); } catch { return []; } }, []);
   const model = settings.model || models[0]?.id || "";
@@ -459,9 +470,17 @@ export default function ChatShell(props: ChatShellProps) {
           )}
 
           {busy && (
-            <div className="cs-working" role="status" aria-live="polite">
-              <span className="cs-working-dots" aria-hidden="true"><i /><i /><i /></span>
-              <span className="cs-working-text">{busy}</span>
+            <div className="cs-turn cs-turn-assistant">
+              <div className="cs-working" role="status" aria-live="polite">
+                <span className="cs-working-dots" aria-hidden="true"><i /><i /><i /></span>
+                <span className="cs-working-text">{busy}</span>
+                <span className="cs-working-timer" data-num>{busySeconds}s</span>
+              </div>
+              {busySeconds >= 8 && (
+                <div className="cs-working-note">
+                  A long protocol can take up to a minute. It is being read in your browser and sent only to Anthropic.
+                </div>
+              )}
             </div>
           )}
           {error && <div className="inline-error" role="alert">{error}</div>}

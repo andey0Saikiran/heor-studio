@@ -151,9 +151,54 @@
 @media (max-width: 40rem) {
   .cs-status { padding-inline: var(--space-4); }
 }
+/* ---------- the working / thinking indicator ----------
+   The base styles were never written; only the reduced-motion override existed,
+   so in normal mode the three dots had no size and no animation and the whole
+   "loading" state read as static text. This is the animated indicator plus the
+   elapsed timer, so a long model call visibly ticks instead of looking frozen. */
+.cs-working {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: 1.1rem;
+  background: var(--surface-deep);
+  border: 1px solid var(--hairline);
+  font-size: var(--text-base);
+  color: var(--ink-soft);
+}
+.cs-working-dots { display: inline-flex; align-items: center; gap: 4px; }
+.cs-working-dots i {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--verified);
+  display: inline-block;
+  animation: cs-dot-bounce 1.2s var(--ease-out-quad) infinite;
+}
+.cs-working-dots i:nth-child(2) { animation-delay: 0.15s; }
+.cs-working-dots i:nth-child(3) { animation-delay: 0.3s; }
+@keyframes cs-dot-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: .45; }
+  30% { transform: translateY(-4px); opacity: 1; }
+}
+.cs-working-text { color: var(--ink); }
+.cs-working-timer {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+.cs-working-note {
+  margin-top: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--ink-faint);
+  line-height: var(--leading-normal);
+  max-width: 46ch;
+}
 @media (prefers-reduced-motion: reduce) {
   .cs-working-dots i { animation: cs-dot-fade 1.1s steps(1) infinite; transform: none; }
-  @keyframes cs-dot-fade { 0%, 50% { opacity: .3; } 51%, 100% { opacity: 1; } }
+  @keyframes cs-dot-fade { 0%, 50% { opacity: .35; } 51%, 100% { opacity: 1; } }
 }
 
 /* ---------- landing / dropzone ----------
