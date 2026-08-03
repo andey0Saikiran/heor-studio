@@ -941,5 +941,24 @@ export function verifySilenceGuards(): Check[] {
     }
   }
 
+  /* 7. THE CONTINUOUS-ENROLLMENT TWINS MUST AGREE ON THE BASELINE DAY.
+   *
+   * Baseline INCLUDES the index date, so N covered days span index-(N-1)..index
+   * and enrollment must begin on or before index-(N-1). The SQL twin used that;
+   * the SAS criterion branch used index-N, one day too early, so a member
+   * enrolled exactly at index-(N-1) was kept by the executed SQL and dropped by
+   * the SAS deliverable. The two twins advertised as equivalent produced
+   * different cohort Ns on the same spec, and nothing compared them because the
+   * disagreement is in a WHERE bound, not a scraped value. This pins both. */
+  {
+    const sas = emitSasFn(GOLD_A_SPEC, GOLD_A_OPTS).map((f) => f.content).join("\n");
+    const usesCorrected = sas.includes("dtstart <= a.index_date - (&baseline_days. - 1)");
+    /* the exact off-by-one form: a bare `- &baseline_days.` bound with no `- 1` */
+    const hasBug = /dtstart <= a\.index_date - &baseline_days\.(?!\s*-\s*1)/.test(sas);
+    push("guard: SAS continuous-enrollment baseline includes the index day (twin of SQL, not off by one)",
+      usesCorrected && !hasBug,
+      usesCorrected ? "baseline lower bound is index - (baseline_days - 1)" : "SAS still uses the index - baseline_days off-by-one bound");
+  }
+
   return out;
 }

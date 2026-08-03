@@ -206,16 +206,34 @@ function header(
  * lookback (e.g. 696.1 alongside L40.x); DXVER separates the eras at query
  * time, so each code only ever matches claims from its own era.
  */
-function splitDxEras(list: CodeList): { icd10: string[]; icd9: string[] } {
-  const icd10: string[] = [];
-  const icd9: string[] = [];
+interface DxEra { exact: string[]; prefix: string[] }
+function splitDxEras(list: CodeList): { icd10: DxEra; icd9: DxEra } {
+  const icd10: DxEra = { exact: [], prefix: [] };
+  const icd9: DxEra = { exact: [], prefix: [] };
   for (const entry of list.codes) {
     const code = claimCode(entry.code);
     if (code.length === 0) continue;
-    if (list.system === "icd9cm" || /^[0-9]/.test(code)) icd9.push(code);
-    else icd10.push(code);
+    const era = list.system === "icd9cm" || /^[0-9]/.test(code) ? icd9 : icd10;
+    (entry.match === "prefix" ? era.prefix : era.exact).push(code);
   }
-  return { icd10: dedupe(icd10), icd9: dedupe(icd9) };
+  return {
+    icd10: { exact: dedupe(icd10.exact), prefix: dedupe(icd10.prefix) },
+    icd9: { exact: dedupe(icd9.exact), prefix: dedupe(icd9.prefix) },
+  };
+}
+
+/**
+ * The claim-code predicate for one DXVER era. EXACT codes match with IN, family
+ * stems match with LIKE 'stem%'. When there are no prefixes this returns exactly
+ * `dx IN (...)` as before, so every existing exact-only list emits byte-for-byte
+ * identical SQL and the snapshot gate stays green; the combined parenthesised
+ * form appears only when a family is actually present.
+ */
+function dxEraPredicate(era: DxEra): string {
+  const parts: string[] = [];
+  if (era.exact.length > 0) parts.push(`dx IN ${inList(era.exact, "       ")}`);
+  for (const p of era.prefix) parts.push(`dx LIKE '${q(p)}%'`);
+  return parts.length === 1 ? parts[0] : `(${parts.join(" OR ")})`;
 }
 
 const dxLists = (spec: StudySpec): CodeList[] =>
@@ -404,11 +422,11 @@ function build02(ctx: Ctx): string {
     for (const list of dx) {
       const { icd10, icd9 } = splitDxEras(list);
       const conds: string[] = [];
-      if (icd10.length > 0) {
-        conds.push(`(dxver = '0' AND dx IN ${inList(icd10, "       ")})`);
+      if (icd10.exact.length > 0 || icd10.prefix.length > 0) {
+        conds.push(`(dxver = '0' AND ${dxEraPredicate(icd10)})`);
       }
-      if (icd9.length > 0) {
-        conds.push(`((dxver = '9' OR dxver IS NULL) AND dx IN ${inList(icd9, "       ")})`);
+      if (icd9.exact.length > 0 || icd9.prefix.length > 0) {
+        conds.push(`((dxver = '9' OR dxver IS NULL) AND ${dxEraPredicate(icd9)})`);
       }
       if (conds.length === 0) continue;
       perList.push(

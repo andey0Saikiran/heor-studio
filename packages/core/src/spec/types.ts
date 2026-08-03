@@ -27,6 +27,17 @@ export interface CodeEntry {
   description?: string;
   source: CodeSource;
   verified: boolean;       // analyst has signed off on this exact code
+  /**
+   * How this code matches a claim. Absent (or "exact") means the claim's code
+   * must equal this one, which is right for a single leaf code. "prefix" means
+   * the claim's code must START WITH this stem, which is how an ICD FAMILY is
+   * written: `K85` matches `K850`, `K8590`, `K85.90`; `E11` matches every type-2
+   * diabetes code. Without this a protocol that names a family (the norm: "E11.x",
+   * "250.x0", "K85.xx") produced an exact match against `K85XX`, which no real
+   * claim carries, so the cohort came back empty while the pipeline read "ready".
+   * Diagnosis lists only; NDC and drug-name lists have their own matching.
+   */
+  match?: "exact" | "prefix";
 }
 
 export interface CodeList {

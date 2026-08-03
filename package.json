@@ -16,7 +16,7 @@
     "typecheck": "tsc -p packages/core/tsconfig.json && tsc -p packages/web/tsconfig.app.json && tsc -p packages/mcp/tsconfig.json",
     "verify": "npm run verify -w @heor-studio/core",
     "verify:snapshot": "tsx packages/core/src/verify/snapshot.ts check",
-    "mcp:smoke": "npm run smoke -w @heor-studio/mcp",
+    "mcp:smoke": "npm run smoke -w heor-studio-mcp",
     "lint": "oxlint",
     "sas:fixture": "npm run sas:fixture -w @heor-studio/core",
     "deploy": "npm run deploy -w @heor-studio/web"

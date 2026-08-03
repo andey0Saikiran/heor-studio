@@ -737,6 +737,8 @@ export function checkSpecShape(raw: unknown): { ok: boolean; problems: string[] 
             p.push(`${cp}.code`, `${JSON.stringify(code.slice(0, 40))} contains characters never valid in a clinical code (quotes, backslashes, semicolons, control chars) or exceeds 80 chars — codes are embedded in generated SQL/SAS`);
           needBool(p, c, "verified", cp);
           needEnum(p, c, "source", cp, CODE_SOURCES);
+          if (c.match !== undefined && c.match !== "exact" && c.match !== "prefix")
+            p.push(`${cp}.match`, `expected "exact" or "prefix", got ${JSON.stringify(c.match)}`);
         });
       }
     });

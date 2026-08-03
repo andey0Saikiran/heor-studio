@@ -810,6 +810,10 @@ function normalizeCodeList(v: Record<string, unknown>, index: number, used: Set<
     codes.push({
       code,
       ...(description !== undefined ? { description } : {}),
+      // A diagnosis FAMILY the model flagged as a prefix stem MUST survive
+      // normalization; dropping it silently re-creates the empty-cohort bug the
+      // flag exists to fix. Only "prefix" is carried (exact is the default).
+      ...(c.match === "prefix" ? { match: "prefix" as const } : {}),
       // Extracted codes are ALWAYS ai_suggested + unverified, whatever the model said.
       source: "ai_suggested",
       verified: false,

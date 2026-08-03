@@ -31,6 +31,7 @@ import { fingerprintCoverageChecks, coverageGuardSelfTest, standardPopulationChe
 import { mutationChecks } from "./mutation";
 import { specChatGuards } from "./chat";
 import { reviewQueueGuards } from "./review-queue";
+import { verifyPrefixMatching } from "./prefix";
 
 export interface CheckGroup {
   /** shown in the UI as a band label; also the CLI's section heading */
@@ -66,6 +67,7 @@ const GROUPS: Array<{ title: string; run: () => Check[] | Promise<Check[]> }> = 
   { title: "Gold Case J — negative index weights, the ICD transition, and declared sweeps", run: verifyGoldJ },
   { title: "Gold Case K — line-of-therapy construction and linked mortality", run: verifyGoldK },
   { title: "Person-time constant", run: verifyDaysPerYearChoice },
+  { title: "Prefix diagnosis matching (ICD families)", run: verifyPrefixMatching },
   { title: "Care-setting filter (negative control)", run: verifySettingFilterControl },
   { title: "Ascertainment window", run: verifyAscertainmentWindow },
   { title: "Data cut reaches both twins", run: () => verifyDataCutReachesBothTwins() },

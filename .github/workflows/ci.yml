@@ -58,7 +58,7 @@ jobs:
         run: npx tsx packages/core/src/verify/snapshot.ts check
 
       - name: Build the MCP server
-        run: npm run build -w @heor-studio/mcp
+        run: npm run build -w heor-studio-mcp
 
       - name: MCP smoke (drives the server end to end, source AND built dist)
         run: npm run mcp:smoke

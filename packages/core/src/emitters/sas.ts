@@ -258,39 +258,58 @@ function listSources(spec: StudySpec, listId: string): { op: boolean; ip: boolea
  * Codes beginning with a digit are always ICD-9; V/E-leading codes are
  * ambiguous and follow the list's declared system.
  */
-function splitDxEras(list: CodeList): { icd10: string[]; icd9: string[] } {
-  const icd10: string[] = [];
-  const icd9: string[] = [];
+interface DxEra { exact: string[]; prefix: string[] }
+function splitDxEras(list: CodeList): { icd10: DxEra; icd9: DxEra } {
+  const icd10: DxEra = { exact: [], prefix: [] };
+  const icd9: DxEra = { exact: [], prefix: [] };
   for (const entry of list.codes) {
     const c = entry.code.replace(/\./g, "").toUpperCase().trim();
     if (c.length === 0) continue;
-    let era: "9" | "10";
-    if (/^[0-9]/.test(c)) era = "9";
-    else if (/^[VE]/.test(c)) era = list.system === "icd9cm" ? "9" : "10";
-    else era = "10";
-    (era === "9" ? icd9 : icd10).push(c);
+    let eraKey: "9" | "10";
+    if (/^[0-9]/.test(c)) eraKey = "9";
+    else if (/^[VE]/.test(c)) eraKey = list.system === "icd9cm" ? "9" : "10";
+    else eraKey = "10";
+    const era = eraKey === "9" ? icd9 : icd10;
+    (entry.match === "prefix" ? era.prefix : era.exact).push(c);
   }
-  return { icd10: [...new Set(icd10)], icd9: [...new Set(icd9)] };
+  return {
+    icd10: { exact: [...new Set(icd10.exact)], prefix: [...new Set(icd10.prefix)] },
+    icd9: { exact: [...new Set(icd9.exact)], prefix: [...new Set(icd9.prefix)] },
+  };
 }
 
 /* ================================================================== *
  *  shared SAS fragments
  * ================================================================== */
 
-/** diagnosis-column scan with DXVER era handling; caller indents */
-function dxCondLines(cols: string[], mv10: string | null, mv9: string | null): string[] {
-  const branch = (ver: string, mv: string): string[] => {
+/** diagnosis-column scan with DXVER era handling; caller indents.
+ *  Each era carries an EXACT macro var (`in (&mv.)`) and any family stems
+ *  (`like "stem%"`). With no stems the per-column atom is `a.dxN in (&mv.)`
+ *  exactly as before, so exact-only lists emit byte-identical SAS; the
+ *  parenthesised or-of-like form appears only when a family is present. Twin
+ *  of the SQL dxEraPredicate. */
+interface SasDxEra { mv: string | null; prefix: string[] }
+function dxCondLines(cols: string[], era10: SasDxEra, era9: SasDxEra): string[] {
+  const colAtom = (col: string, era: SasDxEra): string => {
+    const terms: string[] = [];
+    if (era.mv) terms.push(`a.${col.toLowerCase()} in (&${era.mv}.)`);
+    for (const p of era.prefix) terms.push(`a.${col.toLowerCase()} like "${p}%"`);
+    return terms.length === 1 ? terms[0] : `(${terms.join(" or ")})`;
+  };
+  const branch = (ver: string, era: SasDxEra): string[] => {
     const lines: string[] = [`(a.dxver = '${ver}' and`];
     cols.forEach((c, i) => {
       const head = i === 0 ? " (   " : "  or ";
       const tail = i === cols.length - 1 ? "))" : "";
-      lines.push(`${head}a.${c.toLowerCase()} in (&${mv}.)${tail}`);
+      lines.push(`${head}${colAtom(c, era)}${tail}`);
     });
     return lines;
   };
-  if (mv10 && mv9) {
-    const b10 = branch("0", mv10);
-    const b9 = branch("9", mv9);
+  const has10 = Boolean(era10.mv) || era10.prefix.length > 0;
+  const has9 = Boolean(era9.mv) || era9.prefix.length > 0;
+  if (has10 && has9) {
+    const b10 = branch("0", era10);
+    const b9 = branch("9", era9);
     return [
       "and (",
       ...b10.map((l, i) => (i === 0 ? `      ${l}` : `       ${l}`)),
@@ -298,7 +317,7 @@ function dxCondLines(cols: string[], mv10: string | null, mv9: string | null): s
       "    )",
     ];
   }
-  const only = branch(mv10 ? "0" : "9", (mv10 ?? mv9) as string);
+  const only = branch(has10 ? "0" : "9", has10 ? era10 : era9);
   return ["and " + only[0], ...only.slice(1).map((l) => "    " + l)];
 }
 
@@ -615,8 +634,8 @@ function eventsProgram(ctx: Ctx): GeneratedFile | null {
 
     if (pl.kind === "dx") {
       const { icd10, icd9 } = splitDxEras(list);
-      const mv10 = icd10.length > 0 ? ctx.mvar(`${list.id}_c10`) : null;
-      const mv9 = icd9.length > 0 ? ctx.mvar(`${list.id}_c9`) : null;
+      const mv10 = icd10.exact.length > 0 ? ctx.mvar(`${list.id}_c10`) : null;
+      const mv9 = icd9.exact.length > 0 ? ctx.mvar(`${list.id}_c9`) : null;
       const sources: DxSource[] = [];
       if (pl.op)
         sources.push({
@@ -663,14 +682,18 @@ function eventsProgram(ctx: Ctx): GeneratedFile | null {
       if (mv10)
         lines.push(
           `%let ${mv10} =`,
-          ...chunkQuoted(icd10).map((l) => `  ${l}`),
+          ...chunkQuoted(icd10.exact).map((l) => `  ${l}`),
           `;   /* ICD-10-CM era (DXVER = '0') */`
         );
       if (mv9)
         lines.push(
           `%let ${mv9} =`,
-          ...chunkQuoted(icd9).map((l) => `  ${l}`),
+          ...chunkQuoted(icd9.exact).map((l) => `  ${l}`),
           `;   /* ICD-9-CM era (DXVER = '9') */`
+        );
+      if (icd10.prefix.length > 0 || icd9.prefix.length > 0)
+        lines.push(
+          `  /* Family stems below match with LIKE 'stem%': ${cmt([...icd10.prefix, ...icd9.prefix].join(", "))} */`
         );
       lines.push(
         ``,
@@ -693,7 +716,7 @@ function eventsProgram(ctx: Ctx): GeneratedFile | null {
           `  from ${site.tab(src.letter)} as a`,
           `  where a.enrolid is not null`,
           `    and a.${src.dateCol} between &ascertain_start. and &ascertain_end.`,
-          ...dxCondLines(cols, mv10, mv9).map((l, i, arr) =>
+          ...dxCondLines(cols, { mv: mv10, prefix: icd10.prefix }, { mv: mv9, prefix: icd9.prefix }).map((l, i, arr) =>
             `    ${l}${i === arr.length - 1 ? ";" : ""}`
           ),
           `quit;`,
@@ -1373,11 +1396,19 @@ function attritionProgram(ctx: Ctx): GeneratedFile | null {
           `   enrollment pull in 040 - review before delivery. */`
         );
       }
+      /* Baseline INCLUDES the index date, so N covered days span
+       * index-(N-1)..index, and enrollment must start on or before index-(N-1),
+       * NOT index-N. This branch read `- ${bl}` (one day too early) while the
+       * SQL twin used index-(baselineDays-1); a member enrolled exactly at
+       * index-(N-1) was kept by SQL and dropped by SAS, so the two twins
+       * advertised as equivalent produced different cohort Ns. Twin of
+       * sql.ts continuous_enrollment (bdOff = -(baselineDays-1)). */
+      const blLower = t.baselineDays > 0 ? `a.index_date - (${bl} - 1)` : `a.index_date`;
       const inner = [
         `          select 1`,
         `          from ${epiT} as b`,
         `          where b.enrolid = a.enrolid`,
-        `            and b.dtstart <= a.index_date - ${bl}`,
+        `            and b.dtstart <= ${blLower}`,
         `            and b.dtend   >= a.index_date + ${fu}`,
       ];
       whereLines = [`  where ${negate ? "not exists" : "exists"} (`, ...inner, `        );`];

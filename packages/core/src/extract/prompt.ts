@@ -228,11 +228,24 @@ const CODE_ENTRY_SCHEMA = {
       type: "string",
       description:
         'The code exactly as written in the document, e.g. "L40.0", "696.1", ' +
-        'an 11-digit NDC, or a drug-name pattern like "ADALIMUMAB|HUMIRA".',
+        'an 11-digit NDC, or a drug-name pattern like "ADALIMUMAB|HUMIRA". For a ' +
+        'code FAMILY written with a placeholder ("E11.x", "K85.xx", "250.x0", ' +
+        '"E10.x"), record the STEM WITHOUT the placeholder ("E11", "K85", "250", ' +
+        '"E10") and set match:"prefix". Do NOT paste the literal x; a code with an ' +
+        'x in it matches no real claim.',
     },
     description: {
       type: "string",
       description: "Human-readable meaning of the code, if the document gives one.",
+    },
+    match: {
+      type: "string",
+      enum: ["exact", "prefix"],
+      description:
+        'How the code matches a claim. Omit or "exact" for a single leaf code. ' +
+        'Use "prefix" ONLY for a diagnosis FAMILY, so the stem matches every code ' +
+        'beneath it: "K85" (prefix) matches K850, K8590, K859; "E11" (prefix) ' +
+        'matches every type-2 diabetes code. Diagnosis lists only.',
     },
     source: {
       type: "string",
