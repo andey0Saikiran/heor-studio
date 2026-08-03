@@ -1,15 +1,21 @@
 /**
  * THE "I CANNOT REPRESENT THIS" GATE, verified.
  *
- * This is the check that the product keeps its central promise: when the schema
- * cannot express a construct, the tool refuses to go ready rather than shipping a
- * green study that answers a different question. Proven three ways:
+ * What these checks establish, stated narrowly so the assurance is not larger
+ * than the code: a model cannot forge an acknowledgement, cannot drop a recorded
+ * limitation by omitting it, and cannot clear a limitation the detector can
+ * re-find; readiness refuses while any is open and clears only on a human
+ * acknowledgement; the emitters refuse an unready spec. What they do NOT
+ * establish is total detection: the text detector is best-effort and the model
+ * channel is primary, so a construct neither the model records nor the detector
+ * matches still passes. Proven, for what is claimed:
  *
  *   1. The detector fires on the real protocol's constructs (a confirmatory
  *      pancreatitis outcome, an Optum/meta-analysis, a lab covariate).
  *   2. It does NOT fire on any clean gold spec, so it does not cry wolf.
  *   3. Readiness REFUSES while a construct is open, and CLEARS the moment the
  *      analyst acknowledges it. Acknowledgement survives because it is keyed.
+ *   4. A model cannot forge, drop, or type-confuse an acknowledgement.
  */
 import type { StudySpec } from "../spec/types";
 import { specReadiness } from "../spec/types";
@@ -157,6 +163,60 @@ export function verifyUnrepresentedGate(): Check[] {
     (s.analyses[0] as { notes?: string }).notes = "Follow-up uses a modified as-treated approach with a 30-day grace period.";
     push("coverage: an as-treated clause in analyses[].notes is caught",
       detectUnrepresented(s).some((h) => h.category === "censoring"), "censoring detected in analysis notes");
+  }
+
+  /* 11. THE DELETE VECTOR (was untested, and it was the vector that mattered). A
+   *     MODEL-recorded limitation whose text lives in no scanned field cannot be
+   *     dropped by a chat edit that simply omits the array. sanitizeProposal
+   *     re-inserts it, so readiness stays blocked. */
+  {
+    const before = JSON.parse(JSON.stringify(GOLD_A_SPEC)) as StudySpec;
+    before.unrepresented = [{
+      key: "database:modelonly1", category: "database", origin: "model", acknowledged: false,
+      label: "Pooled MarketScan + Optum meta-analysis",
+      sourceText: "fixed-effects meta-analysis pooling MarketScan and Optum",
+      detail: "single-database schema cannot express a pooled cross-vendor estimate",
+    }] as never;
+    // sanity: this construct is model-only, the detector cannot re-find it
+    const detectorFinds = detectUnrepresented(before).some((h) => h.key === "database:modelonly1");
+    const proposed = JSON.parse(JSON.stringify(before)) as StudySpec;
+    delete (proposed as { unrepresented?: unknown }).unrepresented;   // the drop
+    (proposed.meta as { description?: string }).description = "tweaked";
+    const { spec: clean, invalidated } = sanitizeProposal(before, proposed);
+    const stillThere = (clean.unrepresented ?? []).some((u) => u.key === "database:modelonly1");
+    push("delete-vector: a model cannot drop a recorded limitation by omitting it",
+      !detectorFinds && stillThere && !specReadiness(clean).ready && invalidated.some((s) => s.includes("modelonly1")),
+      `detectorFinds=${detectorFinds} reinserted=${stillThere} ready=${specReadiness(clean).ready}`);
+  }
+
+  /* 12. FLAW B FIX. A confirmatory case definition is caught in ANY text field,
+   *     not only inclusion/outcome (a code-list note, an analysis note, the
+   *     description). */
+  {
+    for (const place of ["desc", "analysisNote", "codelistNote"] as const) {
+      const s = JSON.parse(JSON.stringify(GOLD_A_SPEC)) as StudySpec;
+      const txt = "Acute pancreatitis diagnosis (577.0 or K85) AND a lipase measure within +/-7 days of the diagnosis.";
+      if (place === "desc") s.meta.description = txt;
+      if (place === "analysisNote") (s.analyses[0] as { notes?: string }).notes = txt;
+      if (place === "codelistNote") (s.codeLists[0] as { notes?: string }).notes = txt;
+      push(`flaw-B: a confirmatory outcome in ${place} is caught (not role-scoped away)`,
+        detectUnrepresented(s).some((h) => h.category === "outcome_algorithm"),
+        `outcome_algorithm ${detectUnrepresented(s).some((h) => h.category === "outcome_algorithm") ? "fired" : "MISSED"} in ${place}`);
+    }
+  }
+
+  /* 13. FLAW C FIX. A representable lab-PRESENCE inclusion (a lab and a window,
+   *     no confirmatory conjunction) is NOT falsely blocked. */
+  {
+    const s = JSON.parse(JSON.stringify(GOLD_A_SPEC)) as StudySpec;
+    s.criteria.push({
+      id: "c_hba1c", kind: "inclusion", reviewed: true, confidence: "high",
+      sourceText: "At least one HbA1c test within 90 days before index.",
+      test: { type: "unmapped", raw: "x" },
+    } as never);
+    push("flaw-C: a lab-presence inclusion (lab + window, no conjunction) is NOT flagged",
+      !detectUnrepresented(s).some((h) => h.category === "outcome_algorithm"),
+      `${detectUnrepresented(s).filter((h) => h.category === "outcome_algorithm").length} false outcome_algorithm fires (expected 0)`);
   }
 
   return out;

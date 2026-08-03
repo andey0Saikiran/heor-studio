@@ -185,6 +185,7 @@ export function sanitizeProposal(before: StudySpec, proposed: StudySpec): Saniti
    * ONLY when the SAME construct (by key) was already acknowledged before this
    * edit; anything the model newly acknowledges is a forged signature and is
    * reset to false. */
+  const priorByKey = new Map((before.unrepresented ?? []).map((u) => [u.key, u]));
   const priorAcked = new Set((before.unrepresented ?? []).filter((u) => u.acknowledged === true).map((u) => u.key));
   const unrepresented = (proposed.unrepresented ?? []).map((u) => {
     if (u.acknowledged === true && !priorAcked.has(u.key)) {
@@ -193,6 +194,23 @@ export function sanitizeProposal(before: StudySpec, proposed: StudySpec): Saniti
     }
     return { ...u, acknowledged: u.acknowledged === true };
   });
+
+  /* THE DELETE VECTOR, which the acknowledged:true guard above does NOT close.
+   * A whole-spec chat edit that simply OMITS a recorded limitation would drop it
+   * with no forged flag and no re-detection, and the detector cannot re-find a
+   * model-recorded construct whose text lives in no scanned field (a pooled
+   * comparator, an episode design). That is precisely the model-primary class,
+   * so the removal clears the gate for exactly the constructs nothing else
+   * catches. A model cannot DROP a limitation any more than it can acknowledge
+   * one: every prior construct missing from the proposal is re-inserted with its
+   * prior acknowledgement state (so an un-acked one re-blocks), and reported. */
+  const proposedKeys = new Set(unrepresented.map((u) => u.key));
+  for (const [key, b] of priorByKey) {
+    if (!proposedKeys.has(key)) {
+      unrepresented.push({ ...b, acknowledged: b.acknowledged === true });
+      invalidated.push(`unrepresented.${key} (a model cannot drop a recorded limitation; re-inserted with its prior review state)`);
+    }
+  }
 
   return { spec: { ...proposed, meta, criteria, codeLists, unrepresented }, forged, invalidated };
 }

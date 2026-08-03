@@ -161,15 +161,25 @@ export function detectUnrepresented(spec: StudySpec): UnrepresentedConstruct[] {
   for (const bit of textBits(spec)) {
     const t = bit.text;
 
-    /* Confirmatory / composite outcome. Scoped to where a CASE DEFINITION lives
-     * (outcome text, or an inclusion/unmapped criterion) and never an exclusion,
-     * because a drug washout "no antibiotic within 30 days" is representable and
-     * used to be blocked here. Fires on a co-occurrence WINDOW or an explicit
-     * confirmatory PHRASE, either beside a lab/imaging modality, so "confirmed by
-     * an elevated lipase" and "> 3x ULN" are caught even with no day count. */
-    if ((bit.role === "outcome" || bit.role === "inclusion") &&
-        !/^\s*(no|without|exclud|absence of)\b/i.test(t) &&
-        CONFIRM_MODALITY.test(t) && (TEMPORAL.test(t) || CONFIRM_PHRASE.test(t))) {
+    /* Confirmatory / composite outcome: a condition PLUS a lab/imaging
+     * confirmation the single-code-list OutcomeDefinition cannot express.
+     *
+     * NOT role-scoped. An earlier version fired only on outcome/inclusion text,
+     * which REGRESSED coverage: the confirmatory case definition parked in a
+     * code-list note, an analysis note, or the study description sailed through.
+     * It now scans every role, held off exclusions and washouts by the lead-word
+     * guard alone (CONFIRM_MODALITY already excludes drug dispensing).
+     *
+     * The trigger is a confirmatory LINK, not merely a lab word beside a date.
+     * "At least one HbA1c test within 90 days" names a lab and a window and is
+     * perfectly representable as a procedure-presence criterion, so lab + date
+     * used to false-fire on it. A composite case definition instead carries a
+     * conjunction between two clinical events ("... AND a lipase within 7 days")
+     * or an explicit confirmatory phrase ("confirmed by an elevated lipase",
+     * "> 3x ULN"). Require one of those. */
+    if (!/^\s*(no|without|exclud|absence of)\b/i.test(t) &&
+        CONFIRM_MODALITY.test(t) &&
+        (CONFIRM_PHRASE.test(t) || (TEMPORAL.test(t) && /\b(and|plus|as well as|together with|accompanied)\b/i.test(t)))) {
       add("outcome_algorithm", "Confirmatory / composite case definition", bit,
         `This reads as a case definition that requires a diagnosis together with a lab or procedure (in ${bit.where}). ` +
         `The schema binds an outcome to a single code list with no confirmatory component and no co-occurrence window, ` +

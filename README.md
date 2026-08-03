@@ -26,7 +26,7 @@ re-implementation of the logic; the emitted text itself, run in real Postgres 16
 
 ```
 $ npm run verify
-2558 checks across 24 groups, 0 failing
+2563 checks across 24 groups, 0 failing
 ```
 
 Five mechanisms, each covering a gap the others cannot:
