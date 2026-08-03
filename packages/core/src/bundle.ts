@@ -150,6 +150,21 @@ function buildAiDisclosure(spec: StudySpec, generatedAt: string): string {
 
   const isDemo = prov.method === "demo";
 
+  /* Acknowledged limitations become an honest "what this does NOT do" section.
+   * Built as a variable with its own leading blank lines so that when there are
+   * none, the disclosure is byte-for-byte what it was before this section
+   * existed (the snapshot gate depends on that). */
+  const ackedLimits = (spec.unrepresented ?? []).filter((u) => u.acknowledged);
+  const limitationsSection = ackedLimits.length === 0 ? "" : `
+
+## What this code does NOT do
+
+The protocol required the following, which HEOR Studio cannot express. The
+reviewing analyst acknowledged that the generated code OMITS each, and it is not
+computed anywhere in this bundle:
+
+${ackedLimits.map((u) => `- **${u.label}.** ${u.detail}`).join("\n")}`;
+
   const roleSection =
     isDemo
       ? `This is the built-in DEMONSTRATION study. It ships pre-filled so a new
@@ -210,7 +225,7 @@ ${isDemo
   }
 
 HEOR Studio refuses to generate code from a specification with unreviewed or
-unmapped criteria; export therefore implies the review states recorded above.`}
+unmapped criteria; export therefore implies the review states recorded above.`}${limitationsSection}
 
 ## Attestation
 

@@ -35,6 +35,7 @@ import type { RunProgress } from "../lib/verifyRun";
 import { runVerification } from "../lib/verifyRun";
 import Margin from "./Margin";
 import ReviewPanel from "./ReviewPanel";
+import LimitationsPanel from "./LimitationsPanel";
 import "./chatshell.css";
 
 type Dialect = "sas" | "postgres" | "snowflake";
@@ -450,6 +451,10 @@ export default function ChatShell(props: ChatShellProps) {
               </div>
             );
           })}
+
+          {spec && !busy && (
+            <LimitationsPanel spec={spec} onChange={onChange} />
+          )}
 
           {spec && queue.length > 0 && !busy && (
             <ReviewPanel spec={spec} onChange={onChange} onFlag={props.onFlag} />

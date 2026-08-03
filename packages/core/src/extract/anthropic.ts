@@ -32,8 +32,11 @@ import type {
   Stratifier,
   RelativeWindow,
   StudySpec,
+  UnrepresentedConstruct,
 } from "../spec/types";
 import { migrateLegacyAnalyses, EMITTABLE_ANALYSIS_KINDS } from "../spec/types";
+import { mergeUnrepresented } from "../spec/unrepresented";
+import { stableHash } from "../provenance";
 import { checkSpecShape } from "../spec/shape";
 import { sanitizeProposal } from "../spec/diff";
 import {
@@ -770,10 +773,42 @@ export function normalizeSpec(raw: unknown, ctx: NormalizeContext): StudySpec {
   /* --- meta --- */
   const meta = normalizeMeta(root.meta, ctx);
 
-  return {
+  /* --- what the model said it could NOT represent --- */
+  const modelUnrepresented = normalizeUnrepresented(root.unrepresented);
+
+  const base: StudySpec = {
     meta, codeLists, indexEvent, enrollment, criteria, baseline,
     outcomes: [], groupVars: [], comparisons: [], analyses,
+    ...(modelUnrepresented.length > 0 ? { unrepresented: modelUnrepresented } : {}),
   };
+
+  /* Fold in anything the deterministic detector finds in the spec's own text
+   * that the model did not flag, so the "I cannot represent this" gate holds even
+   * when extraction misses one. Unacknowledged, so readiness refuses until the
+   * analyst sees it. */
+  return mergeUnrepresented(base);
+}
+
+/** Carry the model's unrepresented[] through, minted with stable keys and
+ *  origin "model", unacknowledged. Untrusted input, so everything is coerced. */
+function normalizeUnrepresented(v: unknown): UnrepresentedConstruct[] {
+  const CATS = new Set(["outcome_algorithm", "database", "censoring", "covariate", "exposure", "other"]);
+  const out: UnrepresentedConstruct[] = [];
+  for (const u of arr(v)) {
+    if (!isObject(u)) continue;
+    const category = (CATS.has(str(u.category)) ? str(u.category) : "other") as UnrepresentedConstruct["category"];
+    const label = str(u.label).trim();
+    const sourceText = str(u.sourceText).trim();
+    const detail = str(u.detail).trim();
+    if (!label && !sourceText) continue;
+    out.push({
+      key: `${category}:${stableHash((sourceText || label).toLowerCase().replace(/\s+/g, " ").slice(0, 200))}`,
+      category, label: label || "Unrepresented construct",
+      sourceText: sourceText.slice(0, 400), detail: detail.slice(0, 1200),
+      acknowledged: false, origin: "model",
+    });
+  }
+  return out;
 }
 
 function normalizeMeta(v: unknown, ctx: NormalizeContext): StudySpec["meta"] {

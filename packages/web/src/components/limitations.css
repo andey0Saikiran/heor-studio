@@ -1,0 +1,78 @@
+/* "I cannot represent this." The one refusal that outranks everything else on
+   screen, so it carries the caution wash and a full border rather than the quiet
+   card treatment. Never a decorative side-stripe. */
+
+.lp {
+  border: 1px solid color-mix(in srgb, var(--caution) 45%, var(--hairline));
+  border-radius: var(--radius-lg);
+  background: var(--warn-wash);
+  padding: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+
+.lp-head { margin-bottom: var(--space-3); }
+
+.lp-title {
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: 600;
+  color: var(--ink);
+  margin: 0 0 var(--space-1);
+}
+
+.lp-sub {
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  color: var(--ink-soft);
+  margin: 0;
+  max-width: 68ch;
+}
+
+.lp-items { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+
+.lp-item {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: flex-start;
+  justify-content: space-between;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  padding: var(--space-3);
+}
+
+.lp-item-main { flex: 1 1 22rem; min-width: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+
+.lp-cat {
+  font-family: var(--font-mono);
+  font-size: var(--t-micro);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--caution);
+  font-weight: 600;
+}
+
+.lp-label { font-weight: 600; color: var(--ink); font-size: var(--text-base); }
+
+.lp-src {
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  color: var(--ink);
+  font-style: italic;
+}
+.lp-src-lbl {
+  font-style: normal;
+  font-family: var(--font-mono);
+  font-size: var(--t-micro);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin-right: var(--space-1);
+}
+
+.lp-detail { font-size: var(--text-sm); line-height: var(--leading-normal); color: var(--ink-soft); }
+
+.lp-origin { font-size: var(--t-micro); color: var(--ink-faint); font-family: var(--font-mono); }
+
+.lp-item-act { flex: 0 0 auto; }

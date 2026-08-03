@@ -854,6 +854,25 @@ export function checkSpecShape(raw: unknown): { ok: boolean; problems: string[] 
     else raw.sweeps.forEach((s, i) => checkSweepPlan(p, s, `sweeps[${i}]`));
   }
 
+  /* unrepresented[] carries free text (label, sourceText, detail) that reaches
+   * the AI disclosure, so it is held to the same safe-text bar as every other
+   * printed string: no quotes, backslashes or control chars that could break out
+   * of the markdown it lands in. */
+  if (raw.unrepresented !== undefined) {
+    if (!Array.isArray(raw.unrepresented)) p.push("unrepresented", `expected an array, got ${typeOf(raw.unrepresented)}`);
+    else if (raw.unrepresented.length > 100) p.push("unrepresented", "more than 100 unrepresented constructs");
+    else raw.unrepresented.forEach((u, i) => {
+      const up = `unrepresented[${i}]`;
+      if (!isObj(u)) { p.push(up, `expected an object, got ${typeOf(u)}`); return; }
+      needSafeText(p, u, "key", up, { nonEmpty: true, maxLen: 120 });
+      needSafeText(p, u, "label", up, { nonEmpty: true, maxLen: 200 });
+      needSafeText(p, u, "sourceText", up, { maxLen: 400 });
+      needSafeText(p, u, "detail", up, { maxLen: 1200 });
+      needEnum(p, u, "category", up, new Set(["outcome_algorithm", "database", "censoring", "covariate", "exposure", "other"]));
+      needBool(p, u, "acknowledged", up);
+    });
+  }
+
   return { ok: p.list.length === 0, problems: p.list };
 }
 

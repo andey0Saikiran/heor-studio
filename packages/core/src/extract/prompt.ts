@@ -827,6 +827,33 @@ export const SPEC_JSON_SCHEMA: Record<string, unknown> = {
         "future_stub with the right plannedKind.",
       items: ANALYSIS_SCHEMA,
     },
+    unrepresented: {
+      type: "array",
+      description:
+        "Constructs the protocol REQUIRES that this schema cannot express. Record " +
+        "them here instead of dropping or approximating them silently; the analyst " +
+        "must acknowledge each before code is generated. Add an entry whenever the " +
+        "protocol needs: a compound/confirmatory case definition (a diagnosis AND a " +
+        "lab or procedure within N days); a database other than MarketScan (e.g. " +
+        "Optum) or a pooled / meta-analytic primary estimate; an as-treated or " +
+        "grace-period follow-up clock; a laboratory-value baseline covariate; an " +
+        "exposure with more than two levels or a pooled comparator; or anything else " +
+        "you cannot faithfully place in the fields above.",
+      items: {
+        type: "object",
+        properties: {
+          category: {
+            type: "string",
+            enum: ["outcome_algorithm", "database", "censoring", "covariate", "exposure", "other"],
+          },
+          label: { type: "string", description: "Short name of the construct, e.g. 'Confirmatory pancreatitis algorithm'." },
+          sourceText: { type: "string", description: "The verbatim protocol sentence that requires it." },
+          detail: { type: "string", description: "What the schema cannot do and what the generated code will do instead." },
+        },
+        required: ["category", "label", "sourceText", "detail"],
+        additionalProperties: false,
+      },
+    },
   },
   required: [
     "meta",
@@ -854,6 +881,8 @@ WHAT TO EXTRACT
 5. Code lists — every diagnosis, procedure, drug, or NDC list the criteria and index event reference.
 6. Baseline (Table 1) characteristics — demographics, plan/region/year, comorbidities, medications, utilization.
 7. Requested analyses — one object per analysis, choosing the KIND that matches the endpoint (see ANALYSIS LAYER below). Always include attrition and table1. Emit a descriptive-epi analysis for each incidence / prevalence / risk endpoint; record everything else (HCRU, cost, adherence, line of therapy, switching, KM, Cox, PS/IPTW, competing risks) as a future_stub with the correct plannedKind and the protocol notes.
+
+8. What you CANNOT express — the unrepresented[] list. This schema is deliberately narrow. When the protocol requires something you cannot faithfully place in the fields above, DO NOT force it into the closest field, drop it, or approximate it. Record it in unrepresented[] with the verbatim sentence and what the generated code will do instead. The most common cases: a compound/confirmatory case definition (a diagnosis AND a lab or procedure within N days, like acute pancreatitis confirmed by a lipase value); a non-MarketScan database such as Optum, or a pooled/meta-analytic primary estimate; an as-treated or grace-period follow-up clock; laboratory-value baseline covariates; a multi-level or pooled exposure. A tool that says "I cannot represent this" is doing its job; a tool that silently ships a study answering a different question is the failure this whole product exists to prevent.
 
 HARD RULES
 - NEVER invent, infer, or "complete" medical codes. Only include a code if it appears in the document. When the protocol names a clinical concept without listing codes (e.g. "patients with type 2 diabetes" with no ICD codes given), still create the code list — with an EMPTY codes array — and state in its notes exactly what must be looked up (concept, vocabulary, and any qualifiers the protocol gives). An empty list the analyst fills in is correct; a fabricated code is a critical failure.

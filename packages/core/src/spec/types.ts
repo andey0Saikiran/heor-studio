@@ -11,6 +11,9 @@
  *  - Windows are expressed in days relative to index date (negative = before).
  */
 
+import { openLimitations, type UnrepresentedConstruct } from "./unrepresented";
+export type { UnrepresentedConstruct } from "./unrepresented";
+
 export type DatabaseId = "marketscan_ccae" | "marketscan_mdcr" | "marketscan_medicaid";
 
 export type CodeSystem =
@@ -1832,6 +1835,12 @@ export interface StudySpec {
   comparisons: Comparison[];
   /** The analysis request list; references the catalogs above by id. */
   analyses: Analysis[];
+  /** Constructs the protocol requires that the schema cannot express, recorded
+   *  rather than silently dropped. The model populates this from the protocol
+   *  text during extraction, and detectUnrepresented() adds any it can find in
+   *  the spec's own text. specReadiness refuses while any is unacknowledged, so
+   *  the tool says what it cannot do instead of shipping a green wrong study. */
+  unrepresented?: UnrepresentedConstruct[];
   /** declared subgroup and sensitivity sweeps over named analyses */
   sweeps?: SweepPlan[];
   /** Small-cell suppression policy for released tables (BR-DEL-004). Omitted
@@ -1940,6 +1949,20 @@ export function mortalityProxyFinding(
 
 export function specReadiness(spec: StudySpec): { ready: boolean; problems: string[] } {
   const problems: string[] = [];
+
+  /* THE "I CANNOT REPRESENT THIS" GATE, first, because it is the most important
+   * refusal the tool makes. A construct the schema cannot express, whether the
+   * model recorded it or the detector found it in the spec's text, blocks
+   * readiness until the analyst acknowledges the generated code does not do it.
+   * Code generation and export are gated on readiness, so this one check makes
+   * the whole silent-degradation class impossible. */
+  for (const c of openLimitations(spec)) {
+    problems.push(
+      `CANNOT REPRESENT: ${c.label}. ${c.detail} Source: "${c.sourceText}". ` +
+      `Acknowledge that the generated code does not do this, or remove it from the study.`,
+    );
+  }
+
   const unrev = unreviewedCriteria(spec);
   if (unrev.length > 0)
     problems.push(`${unrev.length} criteria not yet reviewed/mapped`);

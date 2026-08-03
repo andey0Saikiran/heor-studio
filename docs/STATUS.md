@@ -7,7 +7,7 @@ accurate when written; where it disagrees with ROADMAP.md, ROADMAP.md wins.
 
 ## Current, 2026-08-02
 
-**2539 harness checks across 23 groups, 0 failing**, measured by CI on GitHub's
+**2551 harness checks across 24 groups, 0 failing**, measured by CI on GitHub's
 hardware at run 30731834003 rather than on a laptop. 20 registered analysis
 modules plus attrition and Table 1 from the spine. The byte-identity gate covers
 2721 emitted files.
@@ -172,7 +172,7 @@ Each has a real prerequisite — deliberately left for an awake session (see NIG
 
 ## Analysis Waves 1.6 + 2 (2026-07-28) — 8 analyses now verified
 
-**Superseded.** The live figures are measured by CI, not maintained here: 2539 checks
+**Superseded.** The live figures are measured by CI, not maintained here: 2551 checks
 across 22 groups, 0 failing, and 2721 byte-identical emitted files, at run 30731834003.
 A hand-maintained count beside the thing it counts drifts; this one had drifted by a
 factor of three before anyone noticed.
