@@ -790,21 +790,39 @@ export function normalizeSpec(raw: unknown, ctx: NormalizeContext): StudySpec {
 }
 
 /** Carry the model's unrepresented[] through, minted with stable keys and
- *  origin "model", unacknowledged. Untrusted input, so everything is coerced. */
+ *  origin "model", unacknowledged. Untrusted input, so everything is coerced.
+ *
+ *  These strings land in AI_DISCLOSURE.md as `- **${label}.** ${detail}`, so a
+ *  detail carrying newlines and a fake "## Attestation" heading would inject a
+ *  real top-level heading and a false sign-off into the compliance document.
+ *  Every string is flattened to a single line and stripped of markdown structure
+ *  markers before it is stored. */
+function cleanDisclosureText(s: string, max: number): string {
+  return s
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")     // control chars incl. newlines/tabs
+    .replace(/[`*#>|]/g, " ")                    // markdown structure: code, emphasis, heading, quote, table
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, max);
+}
+
+const MAX_UNREPRESENTED = 100;
+
 function normalizeUnrepresented(v: unknown): UnrepresentedConstruct[] {
   const CATS = new Set(["outcome_algorithm", "database", "censoring", "covariate", "exposure", "other"]);
   const out: UnrepresentedConstruct[] = [];
   for (const u of arr(v)) {
+    if (out.length >= MAX_UNREPRESENTED) break;   // matches checkSpecShape's cap; no bloat vector
     if (!isObject(u)) continue;
     const category = (CATS.has(str(u.category)) ? str(u.category) : "other") as UnrepresentedConstruct["category"];
-    const label = str(u.label).trim();
-    const sourceText = str(u.sourceText).trim();
-    const detail = str(u.detail).trim();
+    const label = cleanDisclosureText(str(u.label), 200);
+    const sourceText = cleanDisclosureText(str(u.sourceText), 400);
+    const detail = cleanDisclosureText(str(u.detail), 1200);
     if (!label && !sourceText) continue;
     out.push({
-      key: `${category}:${stableHash((sourceText || label).toLowerCase().replace(/\s+/g, " ").slice(0, 200))}`,
+      key: `${category}:${stableHash((sourceText || label).toLowerCase().replace(/\s+/g, " "))}`,
       category, label: label || "Unrepresented construct",
-      sourceText: sourceText.slice(0, 400), detail: detail.slice(0, 1200),
+      sourceText, detail,
       acknowledged: false, origin: "model",
     });
   }

@@ -256,7 +256,22 @@ function placePath(folder: string, p: string): string {
  * `now` is injected so callers control the timestamp (and so it stays testable);
  * defaults to the current time. Throws if an emitter rejects the spec.
  */
-export function planBundle(spec: StudySpec, opts: EmitOptions, now?: string): BundleEntry[] {
+export function planBundle(spec: StudySpec, opts: EmitOptions, now?: string, allowUnready = false): BundleEntry[] {
+  /* THE ENFORCEMENT CHOKEPOINT. Readiness used to be checked only by callers
+   * (the web export button, the MCP generate_code), so any path that reached
+   * planBundle another way emitted a full deliverable from a spec that was NOT
+   * ready, unreviewed codes, unmapped criteria, unacknowledged limitations and
+   * all. exportZip.ts already did exactly that. The refusal now lives HERE, at
+   * the one function every export path goes through, so it cannot be forgotten.
+   * `allowUnready` is the single explicit opt-out, for the verify harness that
+   * emits gold specs (which are ready anyway) and for tests. */
+  if (!allowUnready) {
+    const r = specReadiness(spec);
+    if (!r.ready)
+      throw new Error(
+        `Refusing to build a bundle from a spec that is not ready. ${r.problems.length} open problem${r.problems.length === 1 ? "" : "s"}: ${r.problems.join("; ")}`,
+      );
+  }
   const generatedAt = now ?? new Date().toISOString();
   const sas: GeneratedFile[] = emitSas(spec, opts);
   const postgres: GeneratedFile[] = emitSql(spec, "postgres", opts);

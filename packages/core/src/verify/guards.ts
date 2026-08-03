@@ -817,7 +817,7 @@ export function verifySilenceGuards(): Check[] {
       `sql=${sqlHead.includes(gold)} sas=${sasHead.includes(gold)} v${EMITTER_VERSION}`,
     );
 
-    const readme = planBundle(GOLD_A_SPEC, GOLD_A_OPTS, "2026-01-01T00:00:00Z").find((f) => /readme\.md$/i.test(f.path));
+    const readme = planBundle(GOLD_A_SPEC, GOLD_A_OPTS, "2026-01-01T00:00:00Z", true).find((f) => /readme\.md$/i.test(f.path));
     push(
       "guard: bundle README carries the reproducibility block",
       !!readme && readme.content.includes("## Reproducibility") && readme.content.includes(gold) && readme.content.includes(EMITTER_VERSION),
@@ -827,7 +827,7 @@ export function verifySilenceGuards(): Check[] {
 
   /* 4. bundle layout matches the README the client reads */
   {
-    const entries = planBundle(GOLD_A_SPEC, GOLD_A_OPTS, "2026-01-01T00:00:00.000Z");
+    const entries = planBundle(GOLD_A_SPEC, GOLD_A_OPTS, "2026-01-01T00:00:00.000Z", true);
     const badPaths = entries.filter((e) => /^sql_(postgres|snowflake)\/.*\//.test(e.path) || /^sas\/.*\//.test(e.path));
     push("guard: bundle files sit directly under their README folder", badPaths.length === 0, badPaths.length === 0 ? `${entries.length} entries, all flat` : `nested: ${badPaths.slice(0, 3).map((e) => e.path).join(", ")}`);
     const pg = entries.filter((e) => e.path.startsWith("sql_postgres/"));

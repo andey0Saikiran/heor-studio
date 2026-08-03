@@ -79,7 +79,7 @@ export function snapshot(): Record<string, string> {
        * the clock rather than chasing a hash that moves every second. The
        * emitted CODE carries no timestamp and is byte-stable without help —
        * which is the property this gate exists to protect. */
-      for (const e of planBundle(c.spec, opts, FIXED_NOW)) out[`${tag}/bundle/${e.path}`] = sha(e.content);
+      for (const e of planBundle(c.spec, opts, FIXED_NOW, true)) out[`${tag}/bundle/${e.path}`] = sha(e.content);
     }
   }
   return out;

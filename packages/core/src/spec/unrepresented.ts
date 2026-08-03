@@ -56,40 +56,63 @@ export interface UnrepresentedConstruct {
   origin: "model" | "detector";
 }
 
-/** One piece of scannable text and where it lives, for the messages. */
-interface TextBit { where: string; text: string }
+/** Where a piece of text lives, so a detector fires only where it makes sense.
+ *  The regex-scan approach leaks both ways unless it is scoped: an incidental
+ *  "creatinine" in a diagnosis criterion is not a lab covariate, and a drug
+ *  washout is not a confirmatory outcome. Role scoping is what stops the
+ *  fail-closed noise that trains blanket acknowledge-click-through. */
+type BitRole = "meta" | "inclusion" | "exclusion" | "outcome" | "codelist" | "baseline" | "analysis";
+interface TextBit { where: string; text: string; role: BitRole }
 
 function textBits(spec: StudySpec): TextBit[] {
   const bits: TextBit[] = [];
-  if (spec.meta.title) bits.push({ where: "the study title", text: spec.meta.title });
-  if (spec.meta.description) bits.push({ where: "the study description", text: spec.meta.description });
-  for (const c of spec.criteria) if (c.sourceText) bits.push({ where: `criterion "${c.id}"`, text: c.sourceText });
-  for (const o of spec.outcomes) {
-    if (o.label) bits.push({ where: `outcome "${o.id}"`, text: o.label });
-  }
+  if (spec.meta.title) bits.push({ where: "the study title", text: spec.meta.title, role: "meta" });
+  if (spec.meta.description) bits.push({ where: "the study description", text: spec.meta.description, role: "meta" });
+  for (const c of spec.criteria)
+    if (c.sourceText) bits.push({ where: `criterion "${c.id}"`, text: c.sourceText, role: c.kind === "exclusion" ? "exclusion" : "inclusion" });
+  for (const o of spec.outcomes) if (o.label) bits.push({ where: `outcome "${o.id}"`, text: o.label, role: "outcome" });
   for (const l of spec.codeLists) {
-    if (l.label) bits.push({ where: `code list "${l.id}"`, text: l.label });
-    if (l.notes) bits.push({ where: `code list "${l.id}" notes`, text: l.notes });
+    const role: BitRole = l.role === "outcome" ? "outcome" : l.role === "covariate" ? "baseline" : "codelist";
+    if (l.label) bits.push({ where: `code list "${l.id}"`, text: l.label, role });
+    if (l.notes) bits.push({ where: `code list "${l.id}" notes`, text: l.notes, role });
   }
-  for (const b of spec.baseline) if (b.label) bits.push({ where: `baseline covariate "${b.id}"`, text: b.label });
+  for (const b of spec.baseline) if (b.label) bits.push({ where: `baseline covariate "${b.id}"`, text: b.label, role: "baseline" });
+  /* analyses[].notes is documented as verbatim SAP text, and it was the ONE
+   * un-paraphrased field the net did not scan, so an as-treated clause parked
+   * there sailed through. */
+  for (const a of spec.analyses) {
+    if (a.label) bits.push({ where: `analysis "${a.id}"`, text: a.label, role: "analysis" });
+    const notes = (a as { notes?: string }).notes;
+    if (notes) bits.push({ where: `analysis "${a.id}" notes`, text: notes, role: "analysis" });
+  }
   return bits;
 }
 
-/* A temporal co-occurrence window: "within 7 days", "+/- 7 days", "within +/-7 days". */
-const TEMPORAL = /(?:within\s*(?:\+\/?-|±)?\s*\d+\s*days?)|(?:(?:\+\/?-|±)\s*\d+\s*days?)/i;
-/* A CONFIRMATORY second modality beside a diagnosis (labs, imaging, a second class of claim). */
-const MODALITY = /\b(lipase|amylase|lab(?:oratory)?|loinc|ultrasound|imaging|radiograph|biopsy|culture|antivir\w*|antibiotic|dispensing|second\s+(?:diagnosis|claim|prescription)|confirmed\s+by|accompanied\s+by)\b/i;
-/* Optum, a pool, or a meta-analytic estimate: DatabaseId is a MarketScan-only enum. */
-const MULTI_DB = /\b(optum|clinformatics|pooled\s+(?:analysis|estimate|cohort|result)|meta[-\s]?analys[ie]s|fixed[-\s]?effects?|random[-\s]?effects?|across\s+(?:both\s+)?databases|two\s+databases)\b/i;
-/* Laboratory-value baseline covariates. */
-const LAB_COVAR = /\b(loinc|hba1c|a1c\b|triglycerid\w*|creatinine|(?:ldl|hdl)\b|c-?reactive)\b/i;
+/* A temporal co-occurrence window: "within 7 days", "+/- 7 days", "within one week". */
+const TEMPORAL = /(?:within\s*(?:\+\/?-|±)?\s*(?:\d+\s*(?:days?|d\b|weeks?|wks?)|(?:one|two|three|a)\s+(?:days?|weeks?)))|(?:(?:\+\/?-|±)\s*\d+\s*(?:days?|d\b))/i;
+/* A LABORATORY or imaging confirmation beside a diagnosis. Deliberately NOT drug
+ * dispensing or antibiotics: those are ordinary washouts the schema CAN express,
+ * and including them fired on every day-phrased drug exclusion (fail-closed). */
+const CONFIRM_MODALITY = /\b(lipase|amylase|troponin|hba1c|glucose|creatinine|elevated\s+(?:serum|blood)?\s*\w+|lab(?:oratory)?\s+(?:value|result|confirm\w*|test)|biopsy|culture|ultrasound|imaging|radiograph|endoscop\w*)\b/i;
+/* An explicit confirmatory conjunction, so a composite case definition is caught
+ * even when it names no day count ("confirmed by an elevated lipase", "> 3x ULN"). */
+const CONFIRM_PHRASE = /\b(confirmed\s+by|accompanied\s+by|defined\s+by|in\s+the\s+presence\s+of|together\s+with|(?:greater\s+than|>|≥|>=)\s*\d+\s*(?:x|times)\s*(?:the\s+)?(?:upper\s+limit|uln)|x\s*uln)\b/i;
+/* Optum, another vendor, a pool, or a meta-analytic estimate: DatabaseId is a
+ * MarketScan-only enum and there is no meta-analysis analysis kind. */
+const MULTI_DB = /\b(optum|clinformatics|truven|merative|pharmetrics|ibm\s+watson|marketscan\s+and\s+\w|pooled?\s+(?:analysis|estimate|cohort|result|across|data)|pooling|meta[-\s]?analy\w+|fixed[-\s]?effects?|random[-\s]?effects?|(?:across|both|two|second|multiple)\s+(?:us\s+)?(?:commercial\s+)?(?:claims\s+)?(?:databases?|data\s+sources?))\b/i;
+/* Laboratory-value baseline covariates. Broadened past named analytes to the
+ * generic phrasings a protocol uses, but scanned ONLY in baseline-role text so
+ * an incidental analyte in a diagnosis criterion does not trip it. */
+const LAB_COVAR = /\b(loinc|hba1c|a1c\b|glycated\s+h[ae]moglobin|triglycerid\w*|creatinine|egfr|estimated\s+gfr|(?:ldl|hdl)\b|c-?reactive|lipase|amylase|serum\s+\w+|lab(?:oratory)?\s+(?:value|result|test|panel|measure)s?)\b/i;
 /* As-treated / grace-period follow-up: PersonTimeRule cannot express it. */
-const AS_TREATED = /\b(as[-\s]?treated|on[-\s]?treatment|grace[-\s]?period|treatment\s+discontinuation|censor\w*\s+at\s+(?:treatment|drug|discontinuation|switch))\b/i;
+const AS_TREATED = /\b(as[-\s]?treated|on[-\s]?(?:treatment|drug)|grace[-\s]?period|treatment\s+(?:discontinuation|cessation)|discontinu\w*\s+(?:plus|\+)\s*\d+|censor\w*\s+at\s+(?:treatment|drug|discontinuation|switch|cessation))\b/i;
 
 function makeKey(category: string, sourceText: string): string {
-  /* Keyed on the category and a normalized snippet, so the same construct keeps
-   * the same key across re-detection and the acknowledgement holds. */
-  const norm = sourceText.trim().toLowerCase().replace(/\s+/g, " ").slice(0, 200);
+  /* Keyed on the category and the FULL normalized text (not a 200-char prefix:
+   * two clauses differing only past char 200 — a 30-day vs a 90-day grace — used
+   * to collapse to one key, so an acknowledgement of one silently cleared the
+   * other). */
+  const norm = sourceText.trim().toLowerCase().replace(/\s+/g, " ");
   return `${category}:${stableHash(norm)}`;
 }
 
@@ -112,17 +135,43 @@ export function detectUnrepresented(spec: StudySpec): UnrepresentedConstruct[] {
     found.push({ key, category, label, sourceText: snippet(bit.text), detail, acknowledged: false, origin: "detector" });
   };
 
+  /* STRUCTURAL, not textual: a group variable with more than two levels cannot
+   * be an active-comparator arm axis, and the descriptive rate emitters pool all
+   * levels. This one is reliable because it reads a TYPED field, not prose, so it
+   * neither evades on a paraphrase nor false-fires on an incidental word. */
+  for (const g of spec.groupVars) {
+    if (g.levels.length > 2) {
+      const key = `exposure:${stableHash(`${g.id}:${g.levels.join("|")}`)}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        found.push({
+          key, category: "exposure",
+          label: "Exposure with more than two levels",
+          sourceText: snippet(`${g.label}: ${g.levels.join(", ")}`),
+          detail:
+            `Group variable "${g.id}" declares ${g.levels.length} levels. Inferential models are held to a two-level ` +
+            `contrast, and the descriptive rate emitters carry no arm axis at all, so they pool every level into one ` +
+            `number. A three-arm or pooled-comparator design is not produced as such.`,
+          acknowledged: false, origin: "detector",
+        });
+      }
+    }
+  }
+
   for (const bit of textBits(spec)) {
     const t = bit.text;
 
-    /* Confirmatory / composite outcome: a diagnosis PLUS a lab or procedure in a
-     * co-occurrence window. OutcomeDefinition holds ONE code list and no second
-     * component or window, so the confirmation is silently dropped and every
-     * coded mention counts as a case. Scoped to the case definition, not to a
-     * washout (a washout says "within N days" too but names no lab modality). */
-    if (TEMPORAL.test(t) && MODALITY.test(t)) {
+    /* Confirmatory / composite outcome. Scoped to where a CASE DEFINITION lives
+     * (outcome text, or an inclusion/unmapped criterion) and never an exclusion,
+     * because a drug washout "no antibiotic within 30 days" is representable and
+     * used to be blocked here. Fires on a co-occurrence WINDOW or an explicit
+     * confirmatory PHRASE, either beside a lab/imaging modality, so "confirmed by
+     * an elevated lipase" and "> 3x ULN" are caught even with no day count. */
+    if ((bit.role === "outcome" || bit.role === "inclusion") &&
+        !/^\s*(no|without|exclud|absence of)\b/i.test(t) &&
+        CONFIRM_MODALITY.test(t) && (TEMPORAL.test(t) || CONFIRM_PHRASE.test(t))) {
       add("outcome_algorithm", "Confirmatory / composite case definition", bit,
-        `This reads as a case definition that requires more than one event in a time window (in ${bit.where}). ` +
+        `This reads as a case definition that requires a diagnosis together with a lab or procedure (in ${bit.where}). ` +
         `The schema binds an outcome to a single code list with no confirmatory component and no co-occurrence window, ` +
         `so the generated code counts EVERY coded mention as a case and drops the confirmation. That inflates the numerator ` +
         `in exactly the direction the algorithm exists to prevent.`);
@@ -135,11 +184,13 @@ export function detectUnrepresented(spec: StudySpec): UnrepresentedConstruct[] {
         `database only; any Optum arm and any pooled or meta-analytic primary estimate is not produced.`);
     }
 
-    if (LAB_COVAR.test(t)) {
+    /* Lab covariates only in BASELINE text. An incidental "creatinine clearance"
+     * in a renal exclusion or a T2DM criterion is representable and must not fire. */
+    if ((bit.role === "baseline") && LAB_COVAR.test(t)) {
       add("covariate", "Laboratory-value baseline covariate", bit,
-        `This names a laboratory value (in ${bit.where}). Baseline characteristics have no lab-result kind and there is ` +
-        `no LOINC code system, so a lab covariate is dropped or mis-mapped. Table 1 and any adjusted model differ from ` +
-        `the protocol, with the lab block silently absent.`);
+        `This names a laboratory value used as a covariate (in ${bit.where}). Baseline characteristics have no lab-result ` +
+        `kind and there is no LOINC code system, so a lab covariate is dropped or mis-mapped. Table 1 and any adjusted ` +
+        `model differ from the protocol, with the lab block silently absent.`);
     }
 
     if (AS_TREATED.test(t)) {
@@ -162,7 +213,10 @@ export function openLimitations(spec: StudySpec): UnrepresentedConstruct[] {
   const byKey = new Map<string, UnrepresentedConstruct>();
   for (const c of stored) byKey.set(c.key, c);
   for (const d of detectUnrepresented(spec)) if (!byKey.has(d.key)) byKey.set(d.key, d);
-  return [...byKey.values()].filter((c) => !c.acknowledged);
+  /* STRICT boolean: only a literal `true` counts as acknowledged. `!c.acknowledged`
+   * would treat the string "false" (or any truthy non-boolean that slipped past
+   * an un-validated restore path) as acknowledged and clear the block. */
+  return [...byKey.values()].filter((c) => c.acknowledged !== true);
 }
 
 /**

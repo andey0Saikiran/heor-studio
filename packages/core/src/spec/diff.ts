@@ -177,7 +177,24 @@ export function sanitizeProposal(before: StudySpec, proposed: StudySpec): Saniti
     invalidated.push(`meta.provenance.method (a model edited this spec, so the AI disclosure must say so)`);
   }
 
-  return { spec: { ...proposed, meta, criteria, codeLists }, forged, invalidated };
+  /* ACKNOWLEDGEMENT IS A HUMAN SIGNATURE, exactly like a review or verify flag,
+   * and the model must not be able to set it. Left alone, `{ ...proposed }`
+   * spreads proposed.unrepresented verbatim, so a model in the spec chat could
+   * flip every acknowledged:true and clear the whole "cannot represent" gate in
+   * one edit, with no human touching the button. An acknowledgement survives
+   * ONLY when the SAME construct (by key) was already acknowledged before this
+   * edit; anything the model newly acknowledges is a forged signature and is
+   * reset to false. */
+  const priorAcked = new Set((before.unrepresented ?? []).filter((u) => u.acknowledged === true).map((u) => u.key));
+  const unrepresented = (proposed.unrepresented ?? []).map((u) => {
+    if (u.acknowledged === true && !priorAcked.has(u.key)) {
+      forged.push(`unrepresented.${u.key}.acknowledged (a model cannot acknowledge a limitation; only the analyst can)`);
+      return { ...u, acknowledged: false };
+    }
+    return { ...u, acknowledged: u.acknowledged === true };
+  });
+
+  return { spec: { ...proposed, meta, criteria, codeLists, unrepresented }, forged, invalidated };
 }
 
 /* ------------------------------------------------------------------ *
