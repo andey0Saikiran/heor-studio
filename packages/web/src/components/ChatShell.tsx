@@ -346,33 +346,25 @@ export default function ChatShell(props: ChatShellProps) {
     </div>
   );
 
-  /* THE VERIFICATION RAIL. Presentational only: it derives from the same
-     spec/readiness state everything else reads, and changes nothing. In the
-     empty state it teaches the pipeline; once a study exists it is live
-     status. Step 3 lights only when readiness is genuinely ready, because a
-     rail that shows "verified code" while the gate is blocked would be the
-     exact settled-looking-unsettled state this product refuses. */
-  const railStep = !spec ? 1 : readiness?.ready ? 3 : 2;
+  /* ONE-LINE STATUS. Not a stepper, not layers: a single where-am-I line that
+     derives from the same spec/readiness state everything else reads and changes
+     nothing. The one flow is the chat; this just names where it is. It says
+     "code ready" only when readiness is genuinely ready, because a status that
+     reads settled while the gate is blocked is the exact settled-looking-unsettled
+     state this product refuses. */
+  const statusTone = !spec ? "idle" : readiness?.ready ? "ready" : "working";
+  const statusText = !spec
+    ? "Upload a protocol to begin."
+    : readiness?.ready
+      ? "Code ready."
+      : progress && progress.remaining > 0
+        ? `Reviewing the spec. ${progress.remaining} to confirm.`
+        : "Finishing the spec.";
   const rail = (
-    <nav className="cs-rail" aria-label="Pipeline">
-      <ol className="cs-rail-steps">
-        {(["upload protocol", "review spec", "verified code"] as const).map((label, i) => {
-          const n = i + 1;
-          const state = n < railStep ? "done" : n === railStep ? "active" : "future";
-          return (
-            <li key={label} className="cs-rail-step" data-state={state}>
-              <span className="cs-rail-num" aria-hidden="true">{state === "done" ? "✓" : n}</span>
-              <span className="cs-rail-label">
-                {label}
-                {state === "active" && n === 2 && progress && progress.remaining > 0 && (
-                  <span className="cs-rail-note">{progress.remaining} to confirm</span>
-                )}
-              </span>
-            </li>
-          );
-        })}
-      </ol>
-    </nav>
+    <p className="cs-status" data-tone={statusTone} role="status" aria-live="polite">
+      <span className="cs-status-dot" aria-hidden="true" />
+      {statusText}
+    </p>
   );
 
   return (
@@ -510,7 +502,7 @@ export default function ChatShell(props: ChatShellProps) {
           {spec && (
             <div className="cs-progress">
               <button type="button" className="btn btn-quiet btn-sm" onClick={props.onOpenPanels}>
-                Open the full editor
+                Study tools
               </button>
               {readiness && !readiness.ready && (
                 <span className="cs-hint">

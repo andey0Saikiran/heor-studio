@@ -102,63 +102,6 @@
   font-size: 0.82rem;
 }
 
-/* ---------- stepper ---------- */
-
-.stepper {
-  list-style: none;
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  margin: var(--space-5) 0;
-  padding: 0;
-}
-
-.step-btn {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid transparent;
-  border-radius: var(--radius);
-  background: transparent;
-  color: var(--ink-soft);
-  font-weight: 500;
-}
-
-.step-btn:not(:disabled):hover {
-  background: var(--surface-deep);
-  color: var(--ink);
-}
-
-.step-btn[aria-current="step"] {
-  background: var(--accent-wash);
-  border-color: var(--accent);
-  color: var(--accent-ink);
-}
-
-.step-btn:disabled {
-  color: var(--ink-faint);
-}
-
-.step-num {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 1.5rem;
-  height: 1.5rem;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  font-size: 0.8rem;
-  font-weight: 600;
-  background: var(--paper);
-}
-
-.step-btn[aria-current="step"] .step-num {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--paper);
-}
-
 /* ---------- cards + fields ---------- */
 
 .card {
@@ -994,6 +937,47 @@ textarea.control {
   max-width: 680px;
 }
 
+/* ---------- study tools drawer (replaces the numbered wizard) ----------
+   A single overlay over the one chat surface. Tabs, not steps: no sequence, no
+   Back/Continue, no numbers. Opens on demand for the form editors that are
+   genuinely better as forms (code-list grid + vocabulary search, per-analysis
+   parameters, bundle naming). */
+.modal-tools {
+  max-width: min(1100px, 96vw);
+  width: 100%;
+  max-height: 92vh;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+}
+.tools-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  justify-content: space-between;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-deep);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.tools-tabs { display: flex; gap: var(--space-1); flex-wrap: wrap; min-width: 0; }
+.tools-tab {
+  border: 0;
+  background: transparent;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius);
+  font: inherit;
+  font-size: var(--text-sm);
+  color: var(--ink-soft);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+.tools-tab:hover { background: var(--surface-2); color: var(--ink); }
+.tools-tab-on { background: var(--accent-wash); color: var(--accent-ink); font-weight: 600; }
+.tools-body { overflow: auto; padding: var(--space-4); min-height: 0; }
+
 /* ---------- corrections: flag target block + inbox ---------- */
 
 .count-badge {
@@ -1134,9 +1118,3 @@ textarea.control {
 
 /* ---------- wizard nav ---------- */
 
-.wizard-nav {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--space-3);
-  margin-top: var(--space-5);
-}

@@ -16,18 +16,22 @@ import CorrectionModal from "./components/CorrectionModal";
 import CorrectionsInbox from "./components/CorrectionsInbox";
 import ChatShell from "./components/ChatShell";
 import { loadCorrections, saveCorrections, type FlagRequest } from "./lib/corrections";
-import { extractSpec } from "@heor-studio/core";
 import "./App.css";
 
 const DRAFT_KEY = "heor-studio.draft";
 
-const STEPS = [
-  { n: 1, label: "Protocol" },
-  { n: 2, label: "Review spec" },
-  { n: 3, label: "Codelists" },
-  { n: 4, label: "Code" },
-  { n: 5, label: "Export" },
+/* The tools drawer. NOT a wizard: these are the form-based editors that are
+ * genuinely better as forms than as conversation (a code-list grid with live
+ * vocabulary search, the per-analysis parameter fields, bundle naming). They
+ * open on demand over the one chat surface, in any order, with no numbered
+ * steps and no forced sequence. The old 1..5 stepper is gone. */
+const TOOLS = [
+  { key: "details", label: "Study details" },
+  { key: "codelists", label: "Code lists" },
+  { key: "code", label: "Code & naming" },
+  { key: "export", label: "Export" },
 ] as const;
+type ToolKey = (typeof TOOLS)[number]["key"];
 
 /* ---------- draft persistence ---------- */
 
@@ -99,219 +103,13 @@ function blankSpec(): StudySpec {
   };
 }
 
-function readFileAsBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const r = new FileReader();
-    r.onload = () => {
-      const s = String(r.result);
-      resolve(s.slice(s.indexOf(",") + 1));
-    };
-    r.onerror = () => reject(r.error ?? new Error("Could not read the file."));
-    r.readAsDataURL(file);
-  });
-}
-
-/* ---------- step 1: protocol intake ---------- */
-
-interface PdfPick {
-  name: string;
-  size: number;
-  base64: string;
-}
-
-function ProtocolStep({
-  settings,
-  onOpenSettings,
-  onSpecReady,
-}: {
-  settings: AppSettings;
-  onOpenSettings: () => void;
-  onSpecReady: (spec: StudySpec) => void;
-}) {
-  const [pdf, setPdf] = useState<PdfPick | null>(null);
-  const [text, setText] = useState("");
-  const [dragging, setDragging] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const acceptFile = async (file: File | null | undefined) => {
-    setError(null);
-    if (!file) return;
-    const isPdf = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
-    if (!isPdf) {
-      setError("Only PDF files are supported here. For anything else, paste the text below.");
-      return;
-    }
-    try {
-      const base64 = await readFileAsBase64(file);
-      setPdf({ name: file.name, size: file.size, base64 });
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  };
-
-  const runExtract = async () => {
-    setError(null);
-    const source = pdf
-      ? { kind: "pdf" as const, base64: pdf.base64, name: pdf.name }
-      : text.trim()
-        ? { kind: "text" as const, text }
-        : null;
-    if (!source) {
-      setError("Choose a protocol PDF or paste SAP text first.");
-      return;
-    }
-    if (!settings.apiKey) {
-      setError("AI extraction needs your API key. Set it in Settings.");
-      return;
-    }
-    setBusy(true);
-    setStatus("Preparing extraction…");
-    try {
-      const result: StudySpec = await extractSpec({
-        apiKey: settings.apiKey,
-        model: settings.model,
-        source,
-        onStatus: (s: string) => setStatus(s),
-      });
-      onSpecReady(result);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-      setStatus(null);
-    }
-  };
-
-  return (
-    <div>
-      <section className="card" aria-labelledby="proto-title">
-        <h2 className="card-title" id="proto-title">
-          Protocol or SAP
-        </h2>
-        <p className="card-sub">
-          Bring your own key: extraction calls Anthropic directly from this browser, with your
-          key. The document goes to Anthropic and nowhere else. There is no proxy setting.
-        </p>
-
-        <label
-          className={dragging ? "dropzone is-drag" : "dropzone"}
-          onDragOver={(e) => {
-            e.preventDefault();
-            setDragging(true);
-          }}
-          onDragLeave={() => setDragging(false)}
-          onDrop={(e) => {
-            e.preventDefault();
-            setDragging(false);
-            void acceptFile(e.dataTransfer.files[0]);
-          }}
-        >
-          <input
-            type="file"
-            accept="application/pdf,.pdf"
-            className="sr-only"
-            onChange={(e) => {
-              void acceptFile(e.target.files?.[0]);
-              e.target.value = "";
-            }}
-          />
-          <span className="dropzone-primary">Drop a protocol PDF here, or click to choose</span>
-          <span>Read locally with FileReader; sent only to Anthropic.</span>
-        </label>
-
-        {pdf && (
-          <span className="file-chip">
-            {pdf.name} ({Math.max(1, Math.round(pdf.size / 1024))} KB)
-            <button type="button" aria-label={`Remove ${pdf.name}`} onClick={() => setPdf(null)}>
-              &times;
-            </button>
-          </span>
-        )}
-
-        <div className="or-rule">or paste text</div>
-
-        <div className="field">
-          <label className="field-label" htmlFor="sap-text">
-            SAP / protocol text
-          </label>
-          <textarea
-            id="sap-text"
-            className="control control-wide"
-            rows={8}
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            placeholder="Paste the relevant protocol or SAP sections (cohort definition, index event, criteria)…"
-          />
-          {pdf && text.trim() && (
-            <span className="field-hint">
-              A PDF is selected, so it takes precedence — remove it to extract from this text.
-            </span>
-          )}
-        </div>
-
-        <div style={{ display: "flex", gap: "0.75rem", alignItems: "center", marginTop: "1rem" }}>
-          <button
-            type="button"
-            className="btn btn-primary"
-            disabled={busy || (!pdf && !text.trim())}
-            onClick={() => void runExtract()}
-          >
-            {busy ? "Extracting…" : "Extract with AI"}
-          </button>
-          {!settings.apiKey && (
-            <button type="button" className="btn btn-quiet" onClick={onOpenSettings}>
-              Set API key in Settings
-            </button>
-          )}
-        </div>
-        {status && (
-          <p className="status-line" role="status" aria-live="polite">
-            {status}
-          </p>
-        )}
-        {error && (
-          <div className="inline-error" role="alert">
-            {error}
-          </div>
-        )}
-      </section>
-
-      <section className="card" aria-labelledby="noai-title">
-        <h2 className="card-title" id="noai-title">
-          No AI required
-        </h2>
-        <p className="card-sub">
-          Both paths below build the same reviewed-spec structure without any LLM call.
-        </p>
-        <div className="alt-paths">
-          <button
-            type="button"
-            className="btn"
-            onClick={() => onSpecReady(structuredClone(PSO_DEMO_SPEC))}
-          >
-            Load demo study (PsO biologics)
-          </button>
-          <button type="button" className="btn" onClick={() => onSpecReady(blankSpec())}>
-            Start blank
-          </button>
-        </div>
-      </section>
-    </div>
-  );
-}
-
 /* ---------- app shell ---------- */
 
 export default function App() {
   const [spec, setSpec] = useState<StudySpec | null>(null);
-  const [step, setStep] = useState(1);
-  /* CHAT IS THE DEFAULT SURFACE. The wizard is not deleted: the codelist
-   * workbench with its live vocabulary search and the per-analysis parameter
-   * editors are genuinely better as forms, so they stay one click away rather
-   * than being reimplemented worse inside a conversation. */
-  const [mode, setMode] = useState<"chat" | "panels">("chat");
+  /* THE CHAT IS THE ONLY SURFACE. The form editors live in an on-demand tools
+   * drawer (toolsTab), never a numbered mode you switch into. */
+  const [toolsTab, setToolsTab] = useState<ToolKey | null>(null);
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [emitOptions, setEmitOptions] = useState<EmitOptions>(DEFAULT_EMIT_OPTIONS);
@@ -359,10 +157,7 @@ export default function App() {
     lastBumpRef.current = Date.now();
     setSpec(s);
     setDraft(null);
-    setStep(2);
   };
-
-  const reachable = (n: number) => n === 1 || spec !== null;
 
   /** Newest first; the deterministic id means re-filing the same claim replaces it. */
   const addCorrection = (c: Correction) =>
@@ -423,107 +218,74 @@ export default function App() {
           </div>
         )}
 
-        {mode === "chat" ? (
-          <ChatShell
-            spec={spec}
-            onChange={updateSpec}
-            onAdopt={adoptSpec}
-            settings={settings}
-            onOpenSettings={() => setSettingsOpen(true)}
-            options={emitOptions}
-            onLoadDemo={() => adoptSpec(structuredClone(PSO_DEMO_SPEC))}
-            onStartBlank={() => adoptSpec(blankSpec())}
-            onOpenPanels={() => { setMode("panels"); setStep(2); }}
-            onFlag={setFlagRequest}
-          />
-        ) : (
-        <>
-        <nav aria-label="Wizard steps">
-          <ol className="stepper">
-            {STEPS.map((s) => (
-              <li key={s.n}>
-                <button
-                  type="button"
-                  className="step-btn"
-                  aria-current={step === s.n ? "step" : undefined}
-                  disabled={!reachable(s.n)}
-                  onClick={() => setStep(s.n)}
-                >
-                  <span className="step-num" aria-hidden="true">
-                    {s.n}
-                  </span>
-                  {s.label}
-                </button>
-              </li>
-            ))}
-          </ol>
-        </nav>
-
-        {step === 1 && (
-          <ProtocolStep
-            settings={settings}
-            onOpenSettings={() => setSettingsOpen(true)}
-            onSpecReady={adoptSpec}
-          />
-        )}
-        {step > 1 && !spec && (
-          <section className="card">
-            <h2 className="card-title">No study yet</h2>
-            <p className="card-sub">Start on the Protocol step to create or load a study spec.</p>
-            <button type="button" className="btn" onClick={() => setStep(1)}>
-              Go to Protocol
-            </button>
-          </section>
-        )}
-        {step === 2 && spec && (
-          <SpecReview
-            spec={spec}
-            settings={settings}
-            onChange={updateSpec}
-            onFlag={setFlagRequest}
-            onOpenSettings={() => setSettingsOpen(true)}
-          />
-        )}
-        {step === 3 && spec && (
-          <CodelistWorkbench spec={spec} onChange={updateSpec} onFlag={setFlagRequest} />
-        )}
-        {step === 4 && spec && (
-          <CodePanel
-            spec={spec}
-            options={emitOptions}
-            onOptionsChange={setEmitOptions}
-            onNavigate={setStep}
-            onFlag={setFlagRequest}
-          />
-        )}
-        {step === 5 && spec && (
-          <ExportPanel spec={spec} options={emitOptions} onNavigate={setStep} />
-        )}
-
-        <div className="wizard-nav">
-          <button
-            type="button"
-            className="btn"
-            disabled={step === 1}
-            onClick={() => setStep(step - 1)}
-          >
-            Back
-          </button>
-          <button
-            type="button"
-            className="btn"
-            disabled={step === 5 || !reachable(step + 1)}
-            onClick={() => setStep(step + 1)}
-          >
-            Continue
-          </button>
-          <button type="button" className="btn btn-quiet" onClick={() => setMode("chat")}>
-            Back to the conversation
-          </button>
-        </div>
-        </>
-        )}
+        <ChatShell
+          spec={spec}
+          onChange={updateSpec}
+          onAdopt={adoptSpec}
+          settings={settings}
+          onOpenSettings={() => setSettingsOpen(true)}
+          options={emitOptions}
+          onLoadDemo={() => adoptSpec(structuredClone(PSO_DEMO_SPEC))}
+          onStartBlank={() => adoptSpec(blankSpec())}
+          onOpenPanels={() => setToolsTab("codelists")}
+          onFlag={setFlagRequest}
+        />
       </main>
+
+      {spec && toolsTab && (
+        <div
+          className="modal-overlay"
+          onMouseDown={(e) => { if (e.target === e.currentTarget) setToolsTab(null); }}
+        >
+          <div role="dialog" aria-modal="true" aria-label="Study tools" className="modal modal-tools">
+            <div className="tools-head">
+              <div className="tools-tabs" role="tablist">
+                {TOOLS.map((t) => (
+                  <button
+                    key={t.key}
+                    type="button"
+                    role="tab"
+                    aria-selected={toolsTab === t.key}
+                    className={toolsTab === t.key ? "tools-tab tools-tab-on" : "tools-tab"}
+                    onClick={() => setToolsTab(t.key)}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+              <button type="button" className="btn btn-quiet btn-sm" aria-label="Close tools" onClick={() => setToolsTab(null)}>
+                Done
+              </button>
+            </div>
+            <div className="tools-body">
+              {toolsTab === "details" && (
+                <SpecReview
+                  spec={spec}
+                  settings={settings}
+                  onChange={updateSpec}
+                  onFlag={setFlagRequest}
+                  onOpenSettings={() => setSettingsOpen(true)}
+                />
+              )}
+              {toolsTab === "codelists" && (
+                <CodelistWorkbench spec={spec} onChange={updateSpec} onFlag={setFlagRequest} />
+              )}
+              {toolsTab === "code" && (
+                <CodePanel
+                  spec={spec}
+                  options={emitOptions}
+                  onOptionsChange={setEmitOptions}
+                  onNavigate={() => setToolsTab(null)}
+                  onFlag={setFlagRequest}
+                />
+              )}
+              {toolsTab === "export" && (
+                <ExportPanel spec={spec} options={emitOptions} onNavigate={() => setToolsTab(null)} />
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       <footer className="app-footer">
         <div className="app-footer-inner">
