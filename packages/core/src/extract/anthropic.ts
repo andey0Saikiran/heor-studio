@@ -96,6 +96,12 @@ export const ANTHROPIC_ENDPOINT = "https://api.anthropic.com/v1/messages";
 const API_URL = ANTHROPIC_ENDPOINT;
 const TOOL_NAME = "submit_study_spec";
 const MAX_TOKENS = 16000;
+/* Extraction of a real protocol produces a much larger tool call than a chat
+ * edit: a multi-arm, multi-line study with full code lists, exclusions and a
+ * composite outcome can run well past 16k output tokens. When it hit that cap
+ * the tool call came back truncated and the whole extraction collapsed to an
+ * empty spec. Extraction gets its own, larger budget. */
+const EXTRACT_MAX_TOKENS = 32000;
 
 /**
  * Extract a StudySpec from a protocol/SAP (PDF or plain text) using the
@@ -143,7 +149,7 @@ export async function extractSpec(args: ExtractSpecArgs): Promise<StudySpec> {
 
   const body = {
     model,
-    max_tokens: MAX_TOKENS,
+    max_tokens: EXTRACT_MAX_TOKENS,
     system: SYSTEM_PROMPT,
     messages: [{ role: "user", content: userContent }],
     tools: [
@@ -203,15 +209,22 @@ export async function extractSpec(args: ExtractSpecArgs): Promise<StudySpec> {
     );
   }
 
+  const stopReason = isObject(data) ? str(data.stop_reason) : "";
+  /* A truncated tool call is worse than a missing one: the input parses as a
+   * partial object, normalize fills every gap with a default, and the result
+   * is a plausible-looking EMPTY study. Catch the truncation itself, before
+   * that happens, whether or not a partial tool block came back. */
+  if (stopReason === "max_tokens") {
+    throw new Error(
+      "The protocol was read, but the specification was cut off before it " +
+        "finished (the model hit its output limit). This document is long; try " +
+        "a more capable model in Settings, or paste the key sections (cohort, " +
+        "exposures, outcomes, code lists) as text instead of the full PDF."
+    );
+  }
+
   const rawSpec = pluckToolInput(data);
   if (rawSpec === undefined) {
-    const stopReason = isObject(data) ? str(data.stop_reason) : "";
-    if (stopReason === "max_tokens") {
-      throw new Error(
-        "The model ran out of output space before finishing the " +
-          "specification. Try a shorter document or a more capable model."
-      );
-    }
     if (stopReason === "refusal") {
       throw new Error(
         "The model declined to process this document. Check that it is a " +
@@ -227,6 +240,24 @@ export async function extractSpec(args: ExtractSpecArgs): Promise<StudySpec> {
   status("Validating and normalizing the specification…");
 
   const spec = normalizeSpec(rawSpec, { model, sourceDocumentName: sourceName });
+
+  /* AN EMPTY EXTRACTION IS A FAILURE, NOT A STUDY. The model can return a
+   * well-formed but hollow tool call (no title, no codes, no criteria) when it
+   * could not read the document or gave up on a hard one. Normalize dutifully
+   * fills defaults and the app used to present that as "Untitled study" with a
+   * green pipeline, which is the silent success this project exists to refuse.
+   * If nothing substantive came back, say so, and say what to try. */
+  const codeCount = spec.codeLists.reduce((n, c) => n + c.codes.length, 0);
+  const titled = !spec.meta.title.startsWith("Untitled study");
+  if (codeCount === 0 && spec.criteria.length === 0 && !titled) {
+    throw new Error(
+      "The document was read, but no study could be extracted from it: no cohort " +
+        "criteria and no medical codes came back. This usually means the PDF is " +
+        "scanned or heavily redacted, or the protocol is long enough that the " +
+        "model lost the detail. Try a more capable model in Settings, or paste " +
+        "the eligibility, exposure, outcome and code-list sections as text."
+    );
+  }
 
   status("Extraction complete.");
   return spec;
