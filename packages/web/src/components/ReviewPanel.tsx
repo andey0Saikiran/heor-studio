@@ -131,7 +131,8 @@ export default function ReviewPanel({ spec, onChange, onFlag }: ReviewPanelProps
    * confirm), not the raw total, so a real protocol reads as "a few to look at"
    * rather than "seventy to clear". */
   const decisions = sections.filter((s) => !s.bulk).reduce((n, s) => n + s.items.length, 0);
-  const routine = queue.length - decisions;
+  const routineItems = sections.filter((s) => s.bulk).flatMap((s) => s.items);
+  const routine = routineItems.length;
   const headline =
     decisions === 0
       ? `Read and confirm ${routine === 1 ? "the one item" : `these ${routine} items`}, then the code is ready.`
@@ -142,9 +143,15 @@ export default function ReviewPanel({ spec, onChange, onFlag }: ReviewPanelProps
       <header className="rp-head">
         <h3 className="rp-title">{headline}</h3>
         <p className="rp-sub">
-          Every item needs your sign-off before code is generated, because that sign-off is what the
-          bundle reports as human oversight. The groups without a bulk button are the ones to read.
+          The AI read these from your protocol. Approve the routine ones in one click; the groups without
+          a bulk button are the few it wants you to actually look at. Your sign-off is what the bundle
+          reports as human oversight, which is why the AI cannot tick these itself.
         </p>
+        {routine > 0 && (
+          <button type="button" className="btn btn-primary" onClick={() => confirmMany(routineItems)}>
+            Approve the {routine} routine {routine === 1 ? "item" : "items"}
+          </button>
+        )}
       </header>
 
       {sections.map((s) => {

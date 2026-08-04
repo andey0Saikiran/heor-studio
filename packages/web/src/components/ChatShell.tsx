@@ -279,6 +279,48 @@ export default function ChatShell(props: ChatShellProps) {
       setError((e as Error).message);
       setDraft(instruction);
     } finally {
+      setBusy(""); // send
+    }
+  };
+
+  /* ---------------- let the AI fix the open problems ----------------
+   * The product's point is that the AI does the analysis, not that it hands the
+   * analyst a to-do list. When readiness is blocked on things the AI CAN resolve
+   * (an unmapped criterion, a missing code list, an unset bound), it proposes the
+   * fixes as one reviewable diff rather than saying "tell me what to change". It
+   * does NOT touch the "cannot represent" limitations (those are acknowledge-or-
+   * remove, not fixable) and it cannot mark anything reviewed or verified: the
+   * human still approves, the AI just did the work. */
+  const fixableProblems = useMemo(() => {
+    if (!readiness) return [];
+    return readiness.problems.filter((p) => !p.startsWith("CANNOT REPRESENT"));
+  }, [readiness]);
+
+  const proposeFixes = async () => {
+    if (!spec || fixableProblems.length === 0) return;
+    setError("");
+    if (!hasKey) { setError("Fixing the open problems needs your own API key. Open Settings to add one."); return; }
+    setMsgs((m) => [...m, { id: nextId(), role: "user", kind: "text", text: "Fix the open problems you can." }]);
+    setBusy("Working out fixes for the open problems…");
+    try {
+      const instruction =
+        "Resolve these readiness problems so the specification can generate code. For each, make the " +
+        "SMALLEST correct change: map an unmapped criterion to a concrete rule, add a missing code list " +
+        "(with codes marked source 'ai_suggested', or an empty list plus a note saying what to look up if " +
+        "you are not sure of the codes, never invent a code you cannot stand behind), set a missing bound. " +
+        "Change nothing the list below does not name, and do not mark anything reviewed or verified.\n\n" +
+        "Problems:\n" + fixableProblems.map((p) => "- " + p).join("\n");
+      const turn = await converseOrEdit({
+        apiKey: settings.apiKey, model, spec, instruction, history: [], onStatus: setBusy,
+      });
+      if (turn.kind === "reply") {
+        say(turn.text);
+      } else {
+        setMsgs((m) => [...m, { id: nextId(), role: "assistant", kind: "proposal", proposal: turn.proposal }]);
+      }
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
       setBusy("");
     }
   };
@@ -555,6 +597,12 @@ export default function ChatShell(props: ChatShellProps) {
               hand. */}
           {spec && (
             <div className="cs-progress">
+              {fixableProblems.length > 0 && (
+                <button type="button" className="btn btn-primary btn-sm" disabled={Boolean(busy)}
+                  onClick={() => void proposeFixes()}>
+                  Fix the {fixableProblems.length} open problem{fixableProblems.length === 1 ? "" : "s"} for me
+                </button>
+              )}
               <button type="button" className="btn btn-quiet btn-sm" onClick={props.onOpenPanels}>
                 Study tools
               </button>

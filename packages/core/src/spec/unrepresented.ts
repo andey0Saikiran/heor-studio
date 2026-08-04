@@ -107,15 +107,6 @@ const LAB_COVAR = /\b(loinc|hba1c|a1c\b|glycated\s+h[ae]moglobin|triglycerid\w*|
 /* As-treated / grace-period follow-up: PersonTimeRule cannot express it. */
 const AS_TREATED = /\b(as[-\s]?treated|on[-\s]?(?:treatment|drug)|grace[-\s]?period|treatment\s+(?:discontinuation|cessation)|discontinu\w*\s+(?:plus|\+)\s*\d+|censor\w*\s+at\s+(?:treatment|drug|discontinuation|switch|cessation))\b/i;
 
-function makeKey(category: string, sourceText: string): string {
-  /* Keyed on the category and the FULL normalized text (not a 200-char prefix:
-   * two clauses differing only past char 200 — a 30-day vs a 90-day grace — used
-   * to collapse to one key, so an acknowledgement of one silently cleared the
-   * other). */
-  const norm = sourceText.trim().toLowerCase().replace(/\s+/g, " ");
-  return `${category}:${stableHash(norm)}`;
-}
-
 function snippet(text: string): string {
   const t = text.trim().replace(/\s+/g, " ");
   return t.length > 240 ? t.slice(0, 237) + "…" : t;
@@ -129,7 +120,13 @@ export function detectUnrepresented(spec: StudySpec): UnrepresentedConstruct[] {
   const found: UnrepresentedConstruct[] = [];
   const seen = new Set<string>();
   const add = (category: UnrepresentedCategory, label: string, bit: TextBit, detail: string) => {
-    const key = makeKey(category, bit.text);
+    /* ONE CARD PER KIND OF PROBLEM. Keyed on the concern (category + label), not
+     * the matched sentence, so an as-treated sensitivity analysis whose LABEL and
+     * NOTES both trip the censoring rule shows once, not twice. The analyst
+     * acknowledges "the tool cannot express as-treated follow-up" a single time;
+     * it does not need saying twice because the same clause appears in two
+     * fields. The first-matched sentence is kept as the representative quote. */
+    const key = `${category}:${stableHash(label)}`;
     if (seen.has(key)) return;
     seen.add(key);
     found.push({ key, category, label, sourceText: snippet(bit.text), detail, acknowledged: false, origin: "detector" });
